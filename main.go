@@ -350,6 +350,11 @@ func main() {
 
 	app.Post("/api/refresh", refreshTokenVerifierMiddleware, utils.RefreshToken)
 
-	app.Listen(os.Getenv("PORT"))
+	// Get the port from the environment, fallback to 8080
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "4000"
+	}
 
+	app.Listen(":" + port) // notice the ":" before the port
 }
