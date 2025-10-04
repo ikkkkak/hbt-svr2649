@@ -741,11 +741,15 @@ func main() {
 		port = "4000"
 		fmt.Println("⚠️  PORT environment variable not set, defaulting to 4000")
 	}
-	addr := ":" + port
+	addr := "0.0.0.0:" + port // Bind to all interfaces (0.0.0.0 means listen on every network interface)
+
+	// In Iris, app.Listen(addr) both binds and listens on the given address/port.
+	// There is no separate "bind" function like in some other frameworks.
+	// This is the idiomatic way to bind the server to a port in Iris.
 
 	fmt.Printf("🚀 Server starting on %s\n", addr)
 
-	// Start server
+	// Start server (binds and listens)
 	if err := app.Listen(addr); err != nil {
 		log.Fatalf("❌ Server failed: %v", err)
 	}
