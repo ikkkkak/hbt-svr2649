@@ -4,6 +4,7 @@ import (
 	"apartments-clone-server/routes"
 	"apartments-clone-server/storage"
 	"apartments-clone-server/utils"
+	"fmt"
 	"log"
 	"os"
 
@@ -359,15 +360,18 @@ func main() {
 
 	// app.Listen(":" + port) // notice the ":" before the port
 	// Get Render's assigned PORT
+	// Get Render's PORT
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "4000" // fallback for local dev
 	}
+	addr := ":" + port
 
-	log.Fatal(app.Listen(":" + port))
-	// IF TEHRE IS ANY ISSUE PANIC AND LOG THE ISSUE
-	if err := app.Listen(":" + port); err != nil {
-		log.Fatalf("failed to start server: %v", err)
+	fmt.Println("🚀 Starting server on 🆗🆗🆗", addr)
+
+	// Listen once and handle errors
+	if err := app.Listen(addr); err != nil {
+		log.Fatalf("❌ failed to start server: %v", err)
 	}
 
 }
