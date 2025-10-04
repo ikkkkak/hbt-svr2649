@@ -4,6 +4,8 @@ import (
 	"apartments-clone-server/routes"
 	"apartments-clone-server/storage"
 	"apartments-clone-server/utils"
+	"fmt"
+	"net/http"
 	"os"
 
 	"github.com/go-playground/validator/v10"
@@ -350,11 +352,18 @@ func main() {
 
 	app.Post("/api/refresh", refreshTokenVerifierMiddleware, utils.RefreshToken)
 
-	// Get the port from the environment, fallback to 8080
+	// // Get the port from the environment, fallback to 8080
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "4000"
 	}
 
-	app.Listen(":" + port) // notice the ":" before the port
+	// app.Listen(":" + port) // notice the ":" before the port
+	server := &http.Server{
+		Addr:    ":" + port,
+		Handler: app,
+	}
+	fmt.Println("Server starting on port 🆗🆗🆗:", port)
+	server.ListenAndServe()
+
 }
