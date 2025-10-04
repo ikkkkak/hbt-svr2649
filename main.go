@@ -339,6 +339,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"time"
 
 	"github.com/go-playground/validator/v10"
 	"github.com/joho/godotenv"
@@ -359,9 +360,45 @@ func main() {
 		fmt.Println("🌐 Running on Render (production)")
 	}
 
-	fmt.Println("🔍 Debug: About to initialize services...")
+	fmt.Println("🔧 Creating Iris app...")
+	app := iris.New()
+	app.Validator = validator.New()
 
-	// Initialize services with error handling
+	// Health check endpoint - CRITICAL for Render (add early)
+	fmt.Println("🔧 Setting up health check endpoint...")
+	app.Get("/health", func(ctx iris.Context) {
+		ctx.JSON(iris.Map{"status": "ok", "message": "Server is running"})
+	})
+
+	// Simple test endpoint
+	app.Get("/test", func(ctx iris.Context) {
+		ctx.JSON(iris.Map{"status": "ok", "message": "Test endpoint working"})
+	})
+
+	// Start server first to bind port, then initialize services
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "4000"
+		fmt.Println("⚠️  PORT environment variable not set, defaulting to 4000")
+	}
+	addr := ":" + port
+
+	fmt.Printf("🚀 Server starting on %s\n", addr)
+	fmt.Printf("🌐 Health check available at: http://localhost%s/health\n", addr)
+
+	// Start server in goroutine to bind port immediately
+	go func() {
+		fmt.Println("🎯 Starting server in background...")
+		if err := app.Run(iris.Addr(addr)); err != nil {
+			log.Fatalf("❌ Server failed to start: %v", err)
+		}
+	}()
+
+	// Give server time to start
+	time.Sleep(2 * time.Second)
+	fmt.Println("✅ Server port bound, initializing services...")
+
+	// Initialize services with error handling (after port is bound)
 	fmt.Println("🔧 Initializing database...")
 	func() {
 		defer func() {
@@ -397,10 +434,6 @@ func main() {
 		storage.InitializeRedis()
 		fmt.Println("✅ Redis initialized successfully")
 	}()
-
-	fmt.Println("🔧 Creating Iris app...")
-	app := iris.New()
-	app.Validator = validator.New()
 
 	// CORS configuration
 	fmt.Println("🔧 Setting up CORS...")
@@ -448,17 +481,6 @@ func main() {
 			return ""
 		}
 		return tokenInput.RefreshToken
-	})
-
-	// Health check endpoint - CRITICAL for Render
-	fmt.Println("🔧 Setting up health check endpoint...")
-	app.Get("/health", func(ctx iris.Context) {
-		ctx.JSON(iris.Map{"status": "ok", "message": "Server is running"})
-	})
-
-	// Simple test endpoint
-	app.Get("/test", func(ctx iris.Context) {
-		ctx.JSON(iris.Map{"status": "ok", "message": "Test endpoint working"})
 	})
 
 	// Routes
@@ -739,21 +761,10 @@ func main() {
 
 	app.Post("/api/refresh", refreshTokenVerifierMiddleware, utils.RefreshToken)
 
-	// Get port from environment, default to 4000 if not set (for local dev)
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "4000"
-		fmt.Println("⚠️  PORT environment variable not set, defaulting to 4000")
-	}
-	addr := ":" + port // Use :PORT format for Render compatibility
+	fmt.Println("📡 API endpoints available at: http://localhost" + addr + "/api/")
+	fmt.Println("✅ All routes configured successfully")
 
-	fmt.Printf("🚀 Server starting on %s\n", addr)
-	fmt.Printf("🌐 Health check available at: http://localhost%s/health\n", addr)
-	fmt.Printf("📡 API endpoints available at: http://localhost%s/api/\n", addr)
-
-	// Start server using router.Run() - more reliable for deployment platforms
-	fmt.Println("🎯 Attempting to start server with router.Run()...")
-	if err := app.Run(iris.Addr(addr)); err != nil {
-		log.Fatalf("❌ Server failed to start: %v", err)
-	}
+	// Keep the main function running
+	fmt.Println("🔄 Server is running, keeping main function alive...")
+	select {} // Block forever to keep the program running
 }
