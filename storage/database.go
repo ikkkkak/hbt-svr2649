@@ -13,15 +13,22 @@ import (
 var DB *gorm.DB
 
 func connectToDB() *gorm.DB {
-	err := godotenv.Load()
-	if err != nil {
-		panic("Error loading .env file")
+	// Only load .env in development (when RENDER env var is not set)
+	if os.Getenv("RENDER") == "" {
+		err := godotenv.Load()
+		if err != nil {
+			log.Println("Warning: Could not load .env file (this is normal in production)")
+		}
 	}
 
 	dsn := os.Getenv("DB_CONNECTION_STRING")
+	if dsn == "" {
+		log.Panic("DB_CONNECTION_STRING environment variable is required")
+	}
+
 	db, dbError := gorm.Open(postgres.Open(dsn), &gorm.Config{})
 	if dbError != nil {
-		log.Panic("error connection to db")
+		log.Panic("error connection to db: " + dbError.Error())
 	}
 
 	DB = db
