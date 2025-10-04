@@ -35,8 +35,42 @@ func performMigrations(db *gorm.DB) {
 		&models.User{},
 		&models.Property{},
 		&models.Review{},
-		&models.Apartment{},
+		&models.Reservation{},
+		&models.Collection{},
+		&models.CollectionProperty{},
+		&models.Video{},
+		&models.VideoLike{},
+		&models.VideoSave{},
+		&models.VideoComment{},
+		&models.VideoCommentLike{},
+		&models.Experience{},
+		&models.ExperienceBooking{},
+		&models.ExperienceCollection{},
+		&models.ExperienceCollectionItem{},
+		&models.ExperienceInvite{},
+		&models.ExperienceParticipant{},
+		&models.ExperienceGroup{},
+		&models.ExperienceGroupMember{},
+		&models.ExperienceAvailability{},
+		&models.ChatMessage{},
+		&models.GroupWishlistItem{},
+		&models.GroupWishlistLike{},
+		&models.GroupJoinRequest{},
+		&models.Notification{},
+		&models.UserProfile{},
+		&models.PropertyAvailability{},
+		&models.PropertyPricing{},
+		&models.PropertyDiscount{},
+		&models.PropertyBlock{},
+		&models.LocationCriteria{},
+		&models.LocationCriteriaProperty{},
+		&models.IdentityVerification{},
+		&models.AuditLog{},
+		&models.Feedback{},
 	)
+
+	// Allow direct chat groups without an experience by making experience_id nullable
+	db.Exec("ALTER TABLE experience_groups ALTER COLUMN experience_id DROP NOT NULL;")
 }
 
 func InitializeDB() *gorm.DB {

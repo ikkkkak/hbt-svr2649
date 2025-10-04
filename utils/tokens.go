@@ -1,8 +1,10 @@
 package utils
 
 import (
+	"apartments-clone-server/models"
 	"apartments-clone-server/storage"
 	"context"
+	"crypto/rand"
 	"os"
 	"strconv"
 	"time"
@@ -37,8 +39,16 @@ func CreateTokenPair(id uint) (*jwt.TokenPair, error) {
 
 	refreshClaims := jwt.Claims{Subject: userID}
 
+	// Load role for embedding into access token
+	var u models.User
+	role := "user"
+	if err := storage.DB.Select("id, role").First(&u, id).Error; err == nil && u.Role != "" {
+		role = u.Role
+	}
+
 	accessTokenClaims := AccessToken{
-		ID: id,
+		ID:   id,
+		Role: role,
 	}
 
 	accessToken, err := accessTokenSigner.Sign(accessTokenClaims)
@@ -94,13 +104,31 @@ func RefreshToken(ctx iris.Context) {
 	})
 }
 
+// GenerateShortToken returns a URL-safe random string of the given length (bytes*2 hex).
+func GenerateShortToken(n int) string {
+	b := make([]byte, n)
+	_, err := rand.Read(b)
+	if err != nil {
+		return ""
+	}
+	// hex encoding doubles length; that's fine for uniqueness and safety
+	const hex = "0123456789abcdef"
+	out := make([]byte, n*2)
+	for i, v := range b {
+		out[i*2] = hex[v>>4]
+		out[i*2+1] = hex[v&0x0f]
+	}
+	return string(out)
+}
+
 type ForgotPasswordToken struct {
 	ID    uint   `json:"ID"`
 	Email string `json:"email"`
 }
 
 type AccessToken struct {
-	ID uint `json:"ID"`
+	ID   uint   `json:"ID"`
+	Role string `json:"role"`
 }
 
 type RefreshTokenInput struct {

@@ -5,72 +5,141 @@ import (
 	"apartments-clone-server/storage"
 	"apartments-clone-server/utils"
 	"encoding/json"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/kataras/iris/v12"
 	"github.com/kataras/iris/v12/middleware/jwt"
-	"github.com/thanhpk/randstr"
+	"gorm.io/datatypes"
 	"gorm.io/gorm/clause"
 )
 
 func CreateProperty(ctx iris.Context) {
-	var propertyInput CreatePropertyInput
+	var input CreateListingInput
 
-	err := ctx.ReadJSON(&propertyInput)
+	err := ctx.ReadJSON(&input)
 	if err != nil {
 		utils.HandleValidationErrors(err, ctx)
 		return
 	}
 
-	var apartments []models.Apartment
-	bedroomLow := 0
-	bedroomHigh := 0
-	var bathroomLow float32 = 0.5
-	var bathroomHigh float32 = 0.5
-
-	for _, element := range propertyInput.Apartments {
-		if element.Bathrooms < bathroomLow {
-			bathroomLow = element.Bathrooms
-		}
-		if element.Bathrooms > bathroomHigh {
-			bathroomHigh = element.Bathrooms
-		}
-		if *element.Bedrooms < bedroomLow {
-			bedroomLow = *element.Bedrooms
-		}
-		if *element.Bedrooms > bedroomHigh {
-			bedroomHigh = *element.Bedrooms
-		}
-
-		apartments = append(apartments, models.Apartment{
-			Unit:        element.Unit,
-			Bedrooms:    *element.Bedrooms,
-			Bathrooms:   element.Bathrooms,
-			AvailableOn: element.AvailableOn,
-			Active:      element.Active,
-		})
+	// Ensure arrays are never null
+	amenities := input.Amenities
+	if amenities == nil {
+		amenities = []string{}
 	}
+	amenitiesJSON, _ := json.Marshal(amenities)
+
+	// Nearby attractions JSON
+	nearby := input.NearbyAttractions
+	if nearby == nil {
+		nearby = []map[string]string{}
+	}
+	nearbyJSON, _ := json.Marshal(nearby)
+
+	imagesArr := insertImages(InsertImages{
+		images: input.Images,
+	})
+	if imagesArr == nil {
+		imagesArr = []string{}
+	}
+	imagesJSON, _ := json.Marshal(imagesArr)
 
 	property := models.Property{
-		UnitType:     propertyInput.UnitType,
-		PropertyType: propertyInput.PropertyType,
-		Street:       propertyInput.Street,
-		City:         propertyInput.City,
-		State:        propertyInput.State,
-		Zip:          propertyInput.Zip,
-		Lat:          propertyInput.Lat,
-		Lng:          propertyInput.Lng,
-		BedroomLow:   bedroomLow,
-		BedroomHigh:  bedroomHigh,
-		BathroomLow:  bathroomLow,
-		BathroomHigh: bathroomHigh,
-		Apartments:   apartments,
-		UserID:       propertyInput.UserID,
+		HostID:             input.HostID,
+		Title:              input.Title,
+		Description:        input.Description,
+		PropertyType:       input.PropertyType,
+		AddressLine1:       input.AddressLine1,
+		AddressLine2:       input.AddressLine2,
+		City:               input.City,
+		State:              input.State,
+		Zip:                input.Zip,
+		Country:            input.Country,
+		Lat:                input.Lat,
+		Lng:                input.Lng,
+		Capacity:           input.Capacity,
+		Bedrooms:           input.Bedrooms,
+		Beds:               input.Beds,
+		Bathrooms:          input.Bathrooms,
+		NightlyPrice:       input.NightlyPrice,
+		CleaningFee:        input.CleaningFee,
+		ServiceFee:         input.ServiceFee,
+		Currency:           input.Currency,
+		Amenities:          string(amenitiesJSON),
+		HouseRules:         input.HouseRules,
+		CancellationPolicy: input.CancellationPolicy,
+		Images:             string(imagesJSON),
+		IsActive:           input.IsActive,
+
+		// Neighborhood & timing & category mapping
+		NeighborhoodDescription: input.NeighborhoodDescription,
+		NearbyAttractions:       datatypes.JSON(nearbyJSON),
+		CheckInTime:             input.CheckInTime,
+		CheckOutTime:            input.CheckOutTime,
+
+		// New policy fields
+		BookingMode:                      input.BookingMode,
+		SecureCompoundAcknowledged:       input.SecureCompoundAcknowledged,
+		EquipmentViolationPolicyAccepted: input.EquipmentViolationPolicyAccepted,
+		UserSafetyPolicyAccepted:         input.UserSafetyPolicyAccepted,
+		PropertyPolicyAccepted:           input.PropertyPolicyAccepted,
 	}
 
-	storage.DB.Create(&property)
+	// Optional property category id
+	if input.PropertyCategoryId > 0 {
+		pc := input.PropertyCategoryId
+		property.PropertyCategoryID = &pc
+	}
+
+	// DEBUG: Log input and constructed property before saving
+	fmt.Printf("[CreateProperty] Input payload summary => hostID=%d, title=%q, propertyType=%q, categoryId=%d, neighDesc=%q, checkIn=%q, checkOut=%q, nearbyAttractions.len=%d\n",
+		input.HostID,
+		input.Title,
+		input.PropertyType,
+		input.PropertyCategoryId,
+		input.NeighborhoodDescription,
+		input.CheckInTime,
+		input.CheckOutTime,
+		len(input.NearbyAttractions),
+	)
+	fmt.Printf("[CreateProperty] Constructed model => categoryId(ptr)=%v, neighDesc.len=%d, checkIn=%q, checkOut=%q, amenitiesStr.len=%d, imagesStr.len=%d\n",
+		property.PropertyCategoryID,
+		len(property.NeighborhoodDescription),
+		property.CheckInTime,
+		property.CheckOutTime,
+		len(property.Amenities),
+		len(property.Images),
+	)
+
+	result := storage.DB.Create(&property)
+	if result.Error != nil {
+		ctx.StatusCode(iris.StatusInternalServerError)
+		ctx.JSON(iris.Map{"error": "Failed to create property"})
+		return
+	}
+
+	// Sync amenity links into junction table (property_amenities)
+	if len(input.Amenities) > 0 {
+		for _, a := range input.Amenities {
+			if id, err := strconv.Atoi(a); err == nil {
+				// insert if not exists
+				storage.DB.Exec(`
+                    INSERT INTO property_amenities (property_id, amenity_id, is_active, created_at, updated_at)
+                    VALUES (?, ?, TRUE, NOW(), NOW())
+                    ON CONFLICT DO NOTHING
+                `, property.ID, id)
+			}
+		}
+	}
+
+	// Auto-assign property to location criteria
+	if err := AssignSinglePropertyToLocationCriteria(property.ID); err != nil {
+		// Log the error but don't fail the property creation
+		fmt.Printf("⚠️ Failed to auto-assign property %d to location criteria: %v\n", property.ID, err)
+	}
 
 	ctx.JSON(property)
 }
@@ -92,7 +161,7 @@ func GetPropertiesByUserID(ctx iris.Context) {
 	id := params.Get("id")
 
 	var properties []models.Property
-	propertiesExist := storage.DB.Preload(clause.Associations).Where("user_id = ?", id).Find(&properties)
+	propertiesExist := storage.DB.Preload(clause.Associations).Where("host_id = ?", id).Find(&properties)
 
 	if propertiesExist.Error != nil {
 		utils.CreateError(
@@ -118,7 +187,7 @@ func DeleteProperty(ctx iris.Context) {
 
 	claims := jwt.Get(ctx).(*utils.AccessToken)
 
-	if property.UserID != claims.ID {
+	if property.HostID != claims.ID {
 		ctx.StatusCode(iris.StatusForbidden)
 		return
 	}
@@ -132,7 +201,7 @@ func DeleteProperty(ctx iris.Context) {
 		return
 	}
 
-	storage.DB.Where("property_id = ?", id).Delete(&models.Apartment{})
+	storage.DB.Where("property_id = ?", id).Delete(&models.Reservation{})
 	ctx.StatusCode(iris.StatusNoContent)
 }
 
@@ -147,115 +216,51 @@ func UpdateProperty(ctx iris.Context) {
 
 	claims := jwt.Get(ctx).(*utils.AccessToken)
 
-	if property.UserID != claims.ID {
+	if property.HostID != claims.ID {
 		ctx.StatusCode(iris.StatusForbidden)
 		return
 	}
 
-	var propertyInput UpdatePropertyInput
-	err := ctx.ReadJSON(&propertyInput)
+	var input UpdateListingInput
+	err := ctx.ReadJSON(&input)
 	if err != nil {
 		utils.HandleValidationErrors(err, ctx)
 		return
 	}
 
-	var newApartments []models.Apartment
-	var newApartmentImages []*[]string
-	bedroomLow := property.BedroomLow
-	bedroomHigh := property.BedroomHigh
-	var bathroomLow float32 = property.BathroomLow
-	var bathroomHigh float32 = property.BathroomHigh
-	var rentLow float32 = propertyInput.Apartments[0].Rent
-	var rentHigh float32 = propertyInput.Apartments[0].Rent
-
-	for _, apartment := range propertyInput.Apartments {
-		if apartment.Bathrooms < bathroomLow {
-			bathroomLow = apartment.Bathrooms
-		}
-		if apartment.Bathrooms > bathroomHigh {
-			bathroomHigh = apartment.Bathrooms
-		}
-		if *apartment.Bedrooms < bedroomLow {
-			bedroomLow = *apartment.Bedrooms
-		}
-		if *apartment.Bedrooms > bedroomHigh {
-			bedroomHigh = *apartment.Bedrooms
-		}
-		if apartment.Rent < rentLow {
-			rentLow = apartment.Rent
-		}
-		if apartment.Rent > rentHigh {
-			rentHigh = apartment.Rent
-		}
-
-		amenities, _ := json.Marshal(apartment.Amenities)
-
-		currApartment := models.Apartment{
-			Unit:        apartment.Unit,
-			Bedrooms:    *apartment.Bedrooms,
-			Bathrooms:   apartment.Bathrooms,
-			PropertyID:  property.ID,
-			SqFt:        apartment.SqFt,
-			Rent:        apartment.Rent,
-			Deposit:     *apartment.Deposit,
-			LeaseLength: apartment.LeaseLength,
-			AvailableOn: apartment.AvailableOn,
-			Active:      apartment.Active,
-			Amenities:   amenities,
-			Description: apartment.Description,
-		}
-
-		if apartment.ID != nil {
-			currApartment.ID = *apartment.ID
-			updateApartmentAndImages(currApartment, apartment.Images)
-		} else {
-			newApartments = append(newApartments, currApartment)
-			newApartmentImages = append(newApartmentImages, &apartment.Images)
-		}
-	}
-
-	storage.DB.Create(&newApartments)
-
-	for index, apartment := range newApartments {
-		if len(*newApartmentImages[index]) > 0 {
-			updateApartmentAndImages(apartment, *newApartmentImages[index])
-		}
-	}
-
-	propertyAmenities, _ := json.Marshal(propertyInput.Amenities)
-	includedUtilities, _ := json.Marshal(propertyInput.IncludedUtilities)
-
-	property.UnitType = propertyInput.UnitType
-	property.Description = propertyInput.Description
-	property.IncludedUtilities = includedUtilities
-	property.PetsAllowed = propertyInput.PetsAllowed
-	property.LaundryType = propertyInput.LaundryType
-	property.ParkingFee = *propertyInput.ParkingFee
-	property.Amenities = propertyAmenities
-	property.Name = propertyInput.Name
-	property.FirstName = propertyInput.FirstName
-	property.LastName = propertyInput.LastName
-	property.Email = propertyInput.Email
-	property.CallingCode = propertyInput.CallingCode
-	property.CountryCode = propertyInput.CountryCode
-	property.PhoneNumber = propertyInput.PhoneNumber
-	property.Website = propertyInput.Website
-	property.OnMarket = propertyInput.OnMarket
-	property.BathroomHigh = bathroomHigh
-	property.BathroomLow = bathroomLow
-	property.BedroomLow = bedroomLow
-	property.BedroomHigh = bedroomHigh
-	property.RentLow = rentLow
-	property.RentHigh = rentHigh
+	amenities, _ := json.Marshal(input.Amenities)
 
 	imagesArr := insertImages(InsertImages{
-		images:     propertyInput.Images,
+		images:     input.Images,
 		propertyID: strconv.FormatUint(uint64(property.ID), 10),
 	})
 
 	jsonImgs, _ := json.Marshal(imagesArr)
 
-	property.Images = jsonImgs
+	property.Title = input.Title
+	property.Description = input.Description
+	property.PropertyType = input.PropertyType
+	property.AddressLine1 = input.AddressLine1
+	property.AddressLine2 = input.AddressLine2
+	property.City = input.City
+	property.State = input.State
+	property.Zip = input.Zip
+	property.Country = input.Country
+	property.Lat = input.Lat
+	property.Lng = input.Lng
+	property.Capacity = input.Capacity
+	property.Bedrooms = input.Bedrooms
+	property.Beds = input.Beds
+	property.Bathrooms = input.Bathrooms
+	property.NightlyPrice = input.NightlyPrice
+	property.CleaningFee = input.CleaningFee
+	property.ServiceFee = input.ServiceFee
+	property.Currency = input.Currency
+	property.Amenities = string(amenities)
+	property.HouseRules = input.HouseRules
+	property.CancellationPolicy = input.CancellationPolicy
+	property.Images = string(jsonImgs)
+	property.IsActive = input.IsActive
 
 	rowsUpdated := storage.DB.Model(&property).Updates(property)
 
@@ -266,13 +271,21 @@ func UpdateProperty(ctx iris.Context) {
 		return
 	}
 
+	// Auto-reassign property to location criteria if coordinates changed
+	if err := AssignSinglePropertyToLocationCriteria(property.ID); err != nil {
+		// Log the error but don't fail the property update
+		fmt.Printf("⚠️ Failed to auto-reassign property %d to location criteria: %v\n", property.ID, err)
+	}
+
 	ctx.StatusCode(iris.StatusNoContent)
 }
 
 func GetPropertyAndAssociationsByPropertyID(id string, ctx iris.Context) *models.Property {
 
 	var property models.Property
-	propertyExists := storage.DB.Preload(clause.Associations).Find(&property, id)
+	propertyExists := storage.DB.Preload("Host").
+		Preload("Reviews").
+		Find(&property, id)
 
 	if propertyExists.Error != nil {
 		utils.CreateInternalServerError(ctx)
@@ -295,49 +308,167 @@ func GetPropertiesByBoundingBox(ctx iris.Context) {
 		return
 	}
 
+	fmt.Printf("GetPropertiesByBoundingBox - Searching in bounds: lat[%f-%f], lng[%f-%f]\n",
+		boundingBox.LatLow, boundingBox.LatHigh, boundingBox.LngLow, boundingBox.LngHigh)
+
 	var properties []models.Property
-	storage.DB.Preload(clause.Associations).
-		Where("lat >= ? AND lat <= ? AND lng >= ? AND lng <= ? AND on_market = true",
-			boundingBox.LatLow, boundingBox.LatHigh, boundingBox.LngLow, boundingBox.LngHigh).
+	result := storage.DB.Preload("Host").
+		Preload("Reviews").
+		Where("lat >= ? AND lat <= ? AND lng >= ? AND lng <= ? AND is_active = true AND status IN (?)",
+			boundingBox.LatLow, boundingBox.LatHigh, boundingBox.LngLow, boundingBox.LngHigh, []string{"approved", "live"}).
+		Order("created_at DESC").
 		Find(&properties)
+
+	if result.Error != nil {
+		fmt.Printf("GetPropertiesByBoundingBox - Database error: %v\n", result.Error)
+		utils.CreateInternalServerError(ctx)
+		return
+	}
+
+	fmt.Printf("GetPropertiesByBoundingBox - Found %d properties\n", len(properties))
+
+	// Debug: Log property details
+	for i, property := range properties {
+		fmt.Printf("Property %d - ID: %d, Title: '%s', City: '%s', Price: %.2f, Host: %s %s\n",
+			i, property.ID, property.Title, property.City, property.NightlyPrice,
+			property.Host.FirstName, property.Host.LastName)
+	}
 
 	ctx.JSON(properties)
 }
 
-func updateApartmentAndImages(apartment models.Apartment, images []string) {
-	apartmentID := strconv.FormatUint(uint64(apartment.ID), 10)
-
-	apartmentImages := insertImages(InsertImages{
-		images:      images,
-		propertyID:  strconv.FormatUint(uint64(apartment.PropertyID), 10),
-		apartmentID: &apartmentID,
-	})
-
-	if len(apartmentImages) > 0 {
-		images, _ := json.Marshal(apartmentImages)
-		apartment.Images = images
-	}
-
-	storage.DB.Model(&apartment).Updates(apartment)
-}
-
 func insertImages(arg InsertImages) []string {
 	var imagesArr []string
-	for _, image := range arg.images {
-		if !strings.Contains(image, storage.BucketName) {
-			imageID := randstr.Hex(16)
-			imageStr := "property/" + arg.propertyID
-			if arg.apartmentID != nil {
-				imageStr += "/apartment/" + *arg.apartmentID
+	for i, image := range arg.images {
+		if image == "" {
+			continue // Skip empty strings
+		}
+		if !(strings.Contains(image, "res.cloudinary.com")) {
+			// Generate unique filename with timestamp and index
+			timestamp := time.Now().UnixNano() / int64(time.Millisecond) // milliseconds since epoch
+			publicID := fmt.Sprintf("property_%d_%d", timestamp, i)
+
+			if arg.propertyID != "" {
+				publicID = "property/" + arg.propertyID + "/" + publicID
 			}
-			imageStr += "/" + imageID
-			urlMap := storage.UploadBase64Image(image, imageStr)
-			imagesArr = append(imagesArr, urlMap["url"])
+			if arg.apartmentID != nil {
+				publicID = "property/" + arg.propertyID + "/apartment/" + *arg.apartmentID + "/" + publicID
+			}
+
+			fmt.Printf("Uploading image with publicID: %s\n", publicID)
+			urlMap := storage.UploadBase64Image(image, publicID)
+			if urlMap != nil && urlMap["url"] != "" {
+				imagesArr = append(imagesArr, urlMap["url"])
+				fmt.Printf("Successfully uploaded image: %s\n", urlMap["url"])
+			} else {
+				// Log error but continue
+				fmt.Printf("Failed to upload image to Cloudinary with publicID: %s\n", publicID)
+			}
 		} else {
 			imagesArr = append(imagesArr, image)
 		}
 	}
 	return imagesArr
+}
+
+// DeletePropertyImage deletes a single image from a property
+func DeletePropertyImage(ctx iris.Context) {
+	userID := ctx.Values().Get("userID").(uint)
+
+	// Get parameters from query string instead of body
+	propertyIDStr := ctx.URLParam("propertyID")
+	imageURL := ctx.URLParam("imageURL")
+
+	fmt.Printf("DEBUG: Received propertyID: %s\n", propertyIDStr)
+	fmt.Printf("DEBUG: Received imageURL: %s\n", imageURL)
+
+	if propertyIDStr == "" || imageURL == "" {
+		fmt.Printf("ERROR: Missing parameters - propertyID: '%s', imageURL: '%s'\n", propertyIDStr, imageURL)
+		ctx.StatusCode(iris.StatusBadRequest)
+		ctx.JSON(iris.Map{
+			"message": "propertyID and imageURL are required",
+		})
+		return
+	}
+
+	propertyID, err := strconv.ParseUint(propertyIDStr, 10, 32)
+	if err != nil {
+		ctx.StatusCode(iris.StatusBadRequest)
+		ctx.JSON(iris.Map{
+			"message": "Invalid propertyID",
+		})
+		return
+	}
+
+	// Verify the property belongs to the user
+	var property models.Property
+	if err := storage.DB.Where("id = ? AND host_id = ?", propertyID, userID).First(&property).Error; err != nil {
+		ctx.StatusCode(iris.StatusNotFound)
+		ctx.JSON(iris.Map{
+			"message": "Property not found or not owned by user",
+		})
+		return
+	}
+
+	// Parse existing images
+	var images []string
+	if property.Images != "" {
+		if err := json.Unmarshal([]byte(property.Images), &images); err != nil {
+			ctx.StatusCode(iris.StatusInternalServerError)
+			ctx.JSON(iris.Map{
+				"message": "Failed to parse property images",
+			})
+			return
+		}
+	}
+
+	// Find and remove the image
+	imageIndex := -1
+	for i, img := range images {
+		if img == imageURL {
+			imageIndex = i
+			break
+		}
+	}
+
+	if imageIndex == -1 {
+		ctx.StatusCode(iris.StatusNotFound)
+		ctx.JSON(iris.Map{
+			"message": "Image not found in property",
+		})
+		return
+	}
+
+	// Remove image from array
+	images = append(images[:imageIndex], images[imageIndex+1:]...)
+
+	// Update property with new images array
+	imagesJSON, _ := json.Marshal(images)
+	property.Images = string(imagesJSON)
+
+	if err := storage.DB.Save(&property).Error; err != nil {
+		ctx.StatusCode(iris.StatusInternalServerError)
+		ctx.JSON(iris.Map{
+			"message": "Failed to update property",
+		})
+		return
+	}
+
+	// Delete image from Cloudinary
+	if storage.DeleteImageFromCloudinary(imageURL) {
+		ctx.JSON(iris.Map{
+			"message": "Image deleted successfully",
+			"success": true,
+		})
+	} else {
+		// Even if Cloudinary deletion fails, we've removed it from the database
+		// Log the error but don't fail the request
+		fmt.Printf("WARNING: Failed to delete image from Cloudinary: %s\n", imageURL)
+		ctx.JSON(iris.Map{
+			"message": "Image removed from property (Cloudinary deletion may have failed)",
+			"success": true,
+		})
+	}
 }
 
 type InsertImages struct {
@@ -346,62 +477,73 @@ type InsertImages struct {
 	apartmentID *string
 }
 
-type CreatePropertyInput struct {
-	UnitType     string                 `json:"unitType" validate:"required,oneof=single multiple"`
-	PropertyType string                 `json:"propertyType" validate:"required,max=256"`
-	Street       string                 `json:"street" validate:"required,max=512"`
-	City         string                 `json:"city" validate:"required,max=512"`
-	State        string                 `json:"state" validate:"required,max=256"`
-	Zip          int                    `json:"zip" validate:"required"`
-	Lat          float32                `json:"lat" validate:"required"`
-	Lng          float32                `json:"lng" validate:"required"`
-	UserID       uint                   `json:"userID" validate:"required"`
-	Apartments   []CreateApartmentInput `json:"apartments" validate:"required,dive"`
+type CreateListingInput struct {
+	HostID             uint     `json:"hostID" validate:"required"`
+	Title              string   `json:"title" validate:"required,max=256"`
+	Description        string   `json:"description"`
+	PropertyType       string   `json:"propertyType" validate:"required,oneof=entire_place private_room shared_room"`
+	AddressLine1       string   `json:"addressLine1" validate:"required,max=512"`
+	AddressLine2       string   `json:"addressLine2" validate:"max=512"`
+	City               string   `json:"city" validate:"required,max=256"`
+	State              string   `json:"state" validate:"required,max=256"`
+	Zip                string   `json:"zip" validate:"required,max=32"`
+	Country            string   `json:"country" validate:"required,max=128"`
+	Lat                float32  `json:"lat" validate:"required"`
+	Lng                float32  `json:"lng" validate:"required"`
+	Capacity           int      `json:"capacity" validate:"required,gte=1,lte=16"`
+	Bedrooms           int      `json:"bedrooms" validate:"required,gte=0,lte=10"`
+	Beds               int      `json:"beds" validate:"required,gte=0,lte=20"`
+	Bathrooms          float32  `json:"bathrooms" validate:"required,gte=0,lte=10"`
+	NightlyPrice       float32  `json:"nightlyPrice" validate:"required,gte=0"`
+	CleaningFee        float32  `json:"cleaningFee"`
+	ServiceFee         float32  `json:"serviceFee"`
+	Currency           string   `json:"currency" validate:"required"`
+	Amenities          []string `json:"amenities"`
+	HouseRules         string   `json:"houseRules"`
+	CancellationPolicy string   `json:"cancellationPolicy"`
+	Images             []string `json:"images"`
+	IsActive           *bool    `json:"isActive"`
+
+	// New policy fields
+	BookingMode                      string `json:"bookingMode"`
+	SecureCompoundAcknowledged       bool   `json:"secureCompoundAcknowledged"`
+	EquipmentViolationPolicyAccepted bool   `json:"equipmentViolationPolicyAccepted"`
+	UserSafetyPolicyAccepted         bool   `json:"userSafetyPolicyAccepted"`
+	PropertyPolicyAccepted           bool   `json:"propertyPolicyAccepted"`
+
+	// Neighborhood & timing & category mapping
+	NeighborhoodDescription string              `json:"neighborhoodDescription"`
+	NearbyAttractions       []map[string]string `json:"nearbyAttractions"`
+	CheckInTime             string              `json:"checkInTime"`
+	CheckOutTime            string              `json:"checkOutTime"`
+	PropertyCategoryId      uint                `json:"propertyCategoryId"`
 }
 
-type CreateApartmentInput struct {
-	Unit        string    `json:"unit" validate:"max=512"`
-	Bedrooms    *int      `json:"bedrooms" validate:"gte=0,max=6,required"` // make int a pointer so 0 is accepted
-	Bathrooms   float32   `json:"bathrooms" validate:"min=0.5,max=6.5,required"`
-	Active      *bool     `json:"active" validate:"required"`
-	AvailableOn time.Time `json:"availableOn" validate:"required"`
-}
-
-type UpdatePropertyInput struct {
-	UnitType          string                  `json:"unitType" validate:"required,oneof=single multiple"`
-	Description       string                  `json:"description"`
-	Images            []string                `json:"images"`
-	IncludedUtilities []string                `json:"includedUtilities"`
-	PetsAllowed       string                  `json:"petsAllowed" validate:"required"`
-	LaundryType       string                  `json:"laundryType" validate:"required"`
-	ParkingFee        *float32                `json:"parkingFee"`
-	Amenities         []string                `json:"amenities"`
-	Name              string                  `json:"name"`
-	FirstName         string                  `json:"firstName"`
-	LastName          string                  `json:"lastName"`
-	Email             string                  `json:"email" validate:"required,email"`
-	CallingCode       string                  `json:"callingCode"`
-	CountryCode       string                  `json:"countryCode"`
-	PhoneNumber       string                  `json:"phoneNumber" validate:"required"`
-	Website           string                  `json:"website" validate:"omitempty,url"`
-	OnMarket          *bool                   `json:"onMarket" validate:"required"`
-	Apartments        []UpdateApartmentsInput `json:"apartments" validate:"required,dive"`
-}
-
-type UpdateApartmentsInput struct {
-	ID          *uint     `json:"ID"`
-	Unit        string    `json:"unit" validate:"max=512"`
-	Bedrooms    *int      `json:"bedrooms" validate:"gte=0,max=6,required"` // make int a pointer so 0 is accepted
-	Bathrooms   float32   `json:"bathrooms" validate:"min=0.5,max=6.5,required"`
-	SqFt        int       `json:"sqFt" validate:"max=100000000000,required"`
-	Rent        float32   `json:"rent" validate:"required"`
-	Deposit     *float32  `json:"deposit" validate:"required"`
-	LeaseLength string    `json:"leaseLength" validate:"required,max=256"`
-	AvailableOn time.Time `json:"availableOn" validate:"required"`
-	Active      *bool     `json:"active" validate:"required"`
-	Images      []string  `json:"images"`
-	Amenities   []string  `json:"amenities"`
-	Description string    `json:"description"`
+type UpdateListingInput struct {
+	Title              string   `json:"title" validate:"required,max=256"`
+	Description        string   `json:"description"`
+	PropertyType       string   `json:"propertyType" validate:"required,oneof=entire_place private_room shared_room"`
+	AddressLine1       string   `json:"addressLine1" validate:"required,max=512"`
+	AddressLine2       string   `json:"addressLine2" validate:"max=512"`
+	City               string   `json:"city" validate:"required,max=256"`
+	State              string   `json:"state" validate:"required,max=256"`
+	Zip                string   `json:"zip" validate:"required,max=32"`
+	Country            string   `json:"country" validate:"required,max=128"`
+	Lat                float32  `json:"lat" validate:"required"`
+	Lng                float32  `json:"lng" validate:"required"`
+	Capacity           int      `json:"capacity" validate:"required,gte=1,lte=16"`
+	Bedrooms           int      `json:"bedrooms" validate:"required,gte=0,lte=10"`
+	Beds               int      `json:"beds" validate:"required,gte=0,lte=20"`
+	Bathrooms          float32  `json:"bathrooms" validate:"required,gte=0,lte=10"`
+	NightlyPrice       float32  `json:"nightlyPrice" validate:"required,gte=0"`
+	CleaningFee        float32  `json:"cleaningFee"`
+	ServiceFee         float32  `json:"serviceFee"`
+	Currency           string   `json:"currency" validate:"required"`
+	Amenities          []string `json:"amenities"`
+	HouseRules         string   `json:"houseRules"`
+	CancellationPolicy string   `json:"cancellationPolicy"`
+	Images             []string `json:"images"`
+	IsActive           *bool    `json:"isActive"`
 }
 
 type BoundingBoxInput struct {

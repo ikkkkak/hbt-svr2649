@@ -1,0 +1,302 @@
+openapi: 3.0.3
+info:
+  title: Apartments Clone Admin API
+  version: 1.0.0
+servers:
+  - url: /api
+paths:
+  /admin/users:
+    get:
+      summary: List users
+      parameters:
+        - in: query
+          name: page
+          schema: { type: integer, default: 1 }
+        - in: query
+          name: per_page
+          schema: { type: integer, default: 25 }
+        - in: query
+          name: role
+          schema: { type: string }
+        - in: query
+          name: q
+          schema: { type: string }
+      responses:
+        '200': { description: OK }
+  /admin/users/{id}:
+    get:
+      summary: Get user details
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      responses:
+        '200': { description: OK }
+  /admin/users/{id}/role:
+    patch:
+      summary: Change user role
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                role: { type: string }
+      responses:
+        '200': { description: OK }
+  /admin/users/{id}/verify:
+    post:
+      summary: Verify or reject identity
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                status: { type: string }
+                notes: { type: string }
+      responses:
+        '200': { description: OK }
+  /admin/properties:
+    get:
+      summary: List properties
+      responses:
+        '200': { description: OK }
+  /admin/properties/{id}:
+    get:
+      summary: Get property details
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      responses:
+        '200': { description: OK }
+  /admin/properties/{id}/status:
+    patch:
+      summary: Update property status
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      responses:
+        '200': { description: OK }
+  /admin/properties/{id}/flag:
+    post:
+      summary: Flag property
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      responses:
+        '200': { description: OK }
+  /admin/experiences:
+    get:
+      summary: List experiences
+      responses:
+        '200': { description: OK }
+  /admin/experiences/{id}:
+    get:
+      summary: Get experience
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      responses:
+        '200': { description: OK }
+  /admin/experiences/{id}/status:
+    patch:
+      summary: Update experience status
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      responses:
+        '200': { description: OK }
+  /admin/reservations:
+    get:
+      summary: List reservations
+      responses:
+        '200': { description: OK }
+  /admin/reservations/{id}:
+    get:
+      summary: Get reservation
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      responses:
+        '200': { description: OK }
+  /admin/reservations/{id}/cancel:
+    post:
+      summary: Cancel reservation
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      responses:
+        '200': { description: OK }
+  /admin/reservations/{id}/status:
+    patch:
+      summary: Update reservation status
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      responses:
+        '200': { description: OK }
+  /admin/reviews:
+    get:
+      summary: List reviews
+      responses:
+        '200': { description: OK }
+  /admin/reviews/{id}/status:
+    patch:
+      summary: Update review visibility
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      responses:
+        '200': { description: OK }
+  /admin/reviews/{id}:
+    delete:
+      summary: Delete review
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      responses:
+        '204': { description: No Content }
+  /admin/videos:
+    get:
+      summary: List videos
+      responses:
+        '200': { description: OK }
+  /admin/videos/{id}:
+    get:
+      summary: Get video
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      responses:
+        '200': { description: OK }
+  /admin/videos/{id}/status:
+    patch:
+      summary: Update video status
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      responses:
+        '200': { description: OK }
+  /admin/videos/{id}/force_unpublish:
+    post:
+      summary: Force unpublish video
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      responses:
+        '200': { description: OK }
+  /admin/videos/{id}/comments:
+    get:
+      summary: List video comments
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      responses:
+        '200': { description: OK }
+  /admin/videos/{id}/comments/{comment_id}:
+    delete:
+      summary: Delete video comment
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+        - in: path
+          name: comment_id
+          required: true
+          schema: { type: integer }
+      responses:
+        '204': { description: No Content }
+  /admin/stats:
+    get:
+      summary: Admin stats
+      responses:
+        '200': { description: OK }
+  /admin/activity:
+    get:
+      summary: Recent admin actions
+      responses:
+        '200': { description: OK }
+  /admin/groups:
+    get:
+      summary: List groups
+      responses:
+        '200': { description: OK }
+  /admin/groups/{id}:
+    get:
+      summary: Get group
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      responses:
+        '200': { description: OK }
+    patch:
+      summary: Update group
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      responses:
+        '200': { description: OK }
+  /admin/export:
+    post:
+      summary: Create export job
+      responses:
+        '200': { description: OK }
+  /admin/export/{id}:
+    get:
+      summary: Get export job
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: OK }
+
+

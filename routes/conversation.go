@@ -44,11 +44,26 @@ func CreateConversation(ctx iris.Context) {
 		return
 	}
 
+	// Compose initial messages: property card then user's first text
 	var messages []models.Message
+	// Load property preview
+	var prop models.Property
+	storage.DB.First(&prop, req.PropertyID)
+	messages = append(messages, models.Message{
+		SenderID:        req.SenderID,
+		ReceiverID:      req.ReceiverID,
+		Type:            "property_card",
+		RefType:         "property",
+		RefID:           &req.PropertyID,
+		PreviewTitle:    prop.Title,
+		PreviewSubtitle: prop.City,
+		PreviewImageURL: "", // client can fetch image list; keep empty if not parsed here
+	})
 	messages = append(messages, models.Message{
 		SenderID:   req.SenderID,
 		ReceiverID: req.ReceiverID,
 		Text:       req.Text,
+		Type:       "text",
 	})
 
 	conversation := models.Conversation{
@@ -148,9 +163,9 @@ func getConversationResult(id string, ctx iris.Context) (ConversationResult, err
 	var result ConversationResult
 	resultQuery := storage.DB.Table("conversations").
 		Select(`conversations.*,
-		 properties.name, properties.street, properties.city, properties.state, 
-		 owners.first_name as owner_first_name, owners.last_name as owner_last_name, owners.email as owner_email,
-		 tenants.first_name as tenant_first_name, tenants.last_name as tenant_last_name, tenants.email as tenant_email`).
+         properties.name, properties.street, properties.city, properties.state, 
+         owners.first_name as owner_first_name, owners.last_name as owner_last_name, owners.email as owner_email, owners.avatar_url as owner_avatar_url,
+         tenants.first_name as tenant_first_name, tenants.last_name as tenant_last_name, tenants.email as tenant_email, tenants.avatar_url as tenant_avatar_url`).
 		Joins("INNER JOIN properties on properties.id = conversations.property_id").
 		Joins("INNER JOIN users owners on conversations.owner_id = owners.id").
 		Joins("INNER JOIN users tenants on conversations.tenant_id = tenants.id").
@@ -174,9 +189,9 @@ func getConversationResultsByUserID(id string, ctx iris.Context) ([]Conversation
 	var result []ConversationResult
 	resultQuery := storage.DB.Table("conversations").
 		Select(`conversations.*,
-		 properties.name, properties.street, properties.city, properties.state, 
-		 owners.first_name as owner_first_name, owners.last_name as owner_last_name, owners.email as owner_email,
-		 tenants.first_name as tenant_first_name, tenants.last_name as tenant_last_name, tenants.email as tenant_email`).
+         properties.name, properties.street, properties.city, properties.state, 
+         owners.first_name as owner_first_name, owners.last_name as owner_last_name, owners.email as owner_email, owners.avatar_url as owner_avatar_url,
+         tenants.first_name as tenant_first_name, tenants.last_name as tenant_last_name, tenants.email as tenant_email, tenants.avatar_url as tenant_avatar_url`).
 		Joins("INNER JOIN properties on properties.id = conversations.property_id").
 		Joins("INNER JOIN users owners on conversations.owner_id = owners.id").
 		Joins("INNER JOIN users tenants on conversations.tenant_id = tenants.id").
@@ -211,10 +226,12 @@ type ConversationResult struct {
 	OwnerFirstName string `json:"ownerFirstName"`
 	OwnerLastName  string `json:"ownerLastName"`
 	OwnerEmail     string `json:"ownerEmail"`
+	OwnerAvatarURL string `json:"ownerAvatarURL"`
 	// Tenenant / User
 	TenantFirstName string `json:"tenantFirstName"`
 	TenantLastName  string `json:"tenantLastName"`
 	TenantEmail     string `json:"tenantEmail"`
+	TenantAvatarURL string `json:"tenantAvatarURL"`
 	// Conversation / Message
 	Messages []models.Message `gorm:"foreignKey:ID" json:"messages"`
 }
