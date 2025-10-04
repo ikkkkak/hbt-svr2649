@@ -350,6 +350,6 @@ func main() {
 
 	app.Post("/api/refresh", refreshTokenVerifierMiddleware, utils.RefreshToken)
 
-	app.Listen(":4000")
+	app.Listen(os.Getenv("PORT"))
 
 }
