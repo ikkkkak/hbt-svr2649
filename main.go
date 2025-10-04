@@ -394,22 +394,55 @@ import (
 
 func main() {
 	fmt.Println("🚀 Starting apartments-clone-server...")
+	fmt.Println("🔍 Debug: Main function started")
 
 	// Only load .env in development
 	if os.Getenv("RENDER") == "" {
+		fmt.Println("🔍 Debug: Loading .env file...")
 		godotenv.Load()
 		fmt.Println("📁 Loaded .env file")
 	} else {
 		fmt.Println("🌐 Running on Render (production)")
 	}
 
-	// Initialize services
+	fmt.Println("🔍 Debug: About to initialize services...")
+
+	// Initialize services with error handling
 	fmt.Println("🔧 Initializing database...")
-	storage.InitializeDB()
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				fmt.Printf("❌ Panic during database initialization: %v\n", r)
+				fmt.Println("⚠️  Continuing without database...")
+			}
+		}()
+		storage.InitializeDB()
+		fmt.Println("✅ Database initialized successfully")
+	}()
+
 	fmt.Println("🔧 Initializing S3...")
-	storage.InitializeS3()
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				fmt.Printf("❌ Panic during S3 initialization: %v\n", r)
+				fmt.Println("⚠️  Continuing without S3...")
+			}
+		}()
+		storage.InitializeS3()
+		fmt.Println("✅ S3 initialized successfully")
+	}()
+
 	fmt.Println("🔧 Initializing Redis...")
-	storage.InitializeRedis()
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				fmt.Printf("❌ Panic during Redis initialization: %v\n", r)
+				fmt.Println("⚠️  Continuing without Redis...")
+			}
+		}()
+		storage.InitializeRedis()
+		fmt.Println("✅ Redis initialized successfully")
+	}()
 
 	fmt.Println("🔧 Creating Iris app...")
 	app := iris.New()
@@ -467,6 +500,11 @@ func main() {
 	fmt.Println("🔧 Setting up health check endpoint...")
 	app.Get("/health", func(ctx iris.Context) {
 		ctx.JSON(iris.Map{"status": "ok", "message": "Server is running"})
+	})
+
+	// Simple test endpoint
+	app.Get("/test", func(ctx iris.Context) {
+		ctx.JSON(iris.Map{"status": "ok", "message": "Test endpoint working"})
 	})
 
 	// Routes
