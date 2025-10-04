@@ -797,9 +797,9 @@ func main() {
 	fmt.Printf("🌐 Health check available at: http://localhost%s/health\n", addr)
 	fmt.Printf("📡 API endpoints available at: http://localhost%s/api/\n", addr)
 
-	// Start server (binds and listens)
-	fmt.Println("🎯 Attempting to start server...")
-	if err := app.Listen(addr); err != nil {
+	// Start server using router.Run() - more reliable for deployment platforms
+	fmt.Println("🎯 Attempting to start server with router.Run()...")
+	if err := app.Run(iris.Addr(addr)); err != nil {
 		log.Fatalf("❌ Server failed to start: %v", err)
 	}
 }
