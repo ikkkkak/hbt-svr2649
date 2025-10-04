@@ -735,12 +735,12 @@ func main() {
 
 	app.Post("/api/refresh", refreshTokenVerifierMiddleware, utils.RefreshToken)
 
-	// Get port from environment
+	// Get port from environment (Render requires binding to 0.0.0.0 and the PORT env variable)
 	port := os.Getenv("PORT")
 	if port == "" {
-		port = "4000"
+		log.Fatal("PORT environment variable not set")
 	}
-	addr := "0.0.0.0:" + port
+	addr := fmt.Sprintf("0.0.0.0:%s", port)
 
 	fmt.Printf("🚀 Server starting on %s\n", addr)
 
