@@ -28,20 +28,20 @@ Postman
 Demo Flows (curl)
 ```
 # List pending properties
-curl -H "Authorization: Bearer $TOKEN" "http://localhost:4000/api/admin/properties?status=pending&page=1&per_page=25"
+curl -H "Authorization: Bearer $TOKEN" "https://hbt-svr2649.onrender.com/api/admin/properties?status=pending&page=1&per_page=25"
 
 # Approve property
 curl -X PATCH -H "Content-Type: application/json" -H "Authorization: Bearer $TOKEN" \
   -d '{"status":"approved","note":"Verified host documents."}' \
-  "http://localhost:4000/api/admin/properties/123/status"
+  "https://hbt-svr2649.onrender.com/api/admin/properties/123/status"
 
 # Verify user
 curl -X POST -H "Content-Type: application/json" -H "Authorization: Bearer $TOKEN" \
   -d '{"status":"verified","notes":"Passport verified"}' \
-  "http://localhost:4000/api/admin/users/42/verify"
+  "https://hbt-svr2649.onrender.com/api/admin/users/42/verify"
 
 # Remove a video comment
 curl -X DELETE -H "Authorization: Bearer $TOKEN" \
-  "http://localhost:4000/api/admin/videos/55/comments/777"
+  "https://hbt-svr2649.onrender.com/api/admin/videos/55/comments/777"
 ```
 

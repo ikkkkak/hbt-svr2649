@@ -5,7 +5,7 @@ import (
 	"apartments-clone-server/storage"
 	"apartments-clone-server/utils"
 	"fmt"
-	"net/http"
+	"log"
 	"os"
 
 	"github.com/go-playground/validator/v10"
@@ -353,17 +353,24 @@ func main() {
 	app.Post("/api/refresh", refreshTokenVerifierMiddleware, utils.RefreshToken)
 
 	// // Get the port from the environment, fallback to 8080
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "4000"
-	}
+	// port := os.Getenv("PORT")
+	// if port == "" {
+	// 	port = "4000"
+	// }
 
 	// app.Listen(":" + port) // notice the ":" before the port
-	server := &http.Server{
-		Addr:    ":" + port,
-		Handler: app,
+	// Get Render's assigned PORT
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080" // fallback for local dev
 	}
-	fmt.Println("Server starting on port 🆗🆗🆗:", port)
-	server.ListenAndServe()
+
+	addr := ":" + port
+	fmt.Println("🚀 Starting server on", addr)
+
+	// Method 1 (recommended)
+	if err := app.Listen(addr); err != nil {
+		log.Fatalf("failed to start server: %v", err)
+	}
 
 }
