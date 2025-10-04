@@ -393,20 +393,30 @@ import (
 )
 
 func main() {
+	fmt.Println("🚀 Starting apartments-clone-server...")
+
 	// Only load .env in development
 	if os.Getenv("RENDER") == "" {
 		godotenv.Load()
+		fmt.Println("📁 Loaded .env file")
+	} else {
+		fmt.Println("🌐 Running on Render (production)")
 	}
 
 	// Initialize services
+	fmt.Println("🔧 Initializing database...")
 	storage.InitializeDB()
+	fmt.Println("🔧 Initializing S3...")
 	storage.InitializeS3()
+	fmt.Println("🔧 Initializing Redis...")
 	storage.InitializeRedis()
 
+	fmt.Println("🔧 Creating Iris app...")
 	app := iris.New()
 	app.Validator = validator.New()
 
 	// CORS configuration
+	fmt.Println("🔧 Setting up CORS...")
 	app.AllowMethods(iris.MethodOptions)
 	app.UseRouter(func(ctx iris.Context) {
 		ctx.Header("Access-Control-Allow-Origin", ctx.GetHeader("Origin"))
@@ -422,6 +432,7 @@ func main() {
 	})
 
 	// Minimal middleware - compression only
+	fmt.Println("🔧 Setting up middleware...")
 	app.Use(iris.Compression)
 
 	// JWT Verifiers
@@ -453,8 +464,9 @@ func main() {
 	})
 
 	// Health check endpoint - CRITICAL for Render
+	fmt.Println("🔧 Setting up health check endpoint...")
 	app.Get("/health", func(ctx iris.Context) {
-		ctx.JSON(iris.Map{"status": "ok"})
+		ctx.JSON(iris.Map{"status": "ok", "message": "Server is running"})
 	})
 
 	// Routes
@@ -741,16 +753,15 @@ func main() {
 		port = "4000"
 		fmt.Println("⚠️  PORT environment variable not set, defaulting to 4000")
 	}
-	addr := "0.0.0.0:" + port // Bind to all interfaces (0.0.0.0 means listen on every network interface)
-
-	// In Iris, app.Listen(addr) both binds and listens on the given address/port.
-	// There is no separate "bind" function like in some other frameworks.
-	// This is the idiomatic way to bind the server to a port in Iris.
+	addr := ":" + port // Use :PORT format for Render compatibility
 
 	fmt.Printf("🚀 Server starting on %s\n", addr)
+	fmt.Printf("🌐 Health check available at: http://localhost%s/health\n", addr)
+	fmt.Printf("📡 API endpoints available at: http://localhost%s/api/\n", addr)
 
 	// Start server (binds and listens)
+	fmt.Println("🎯 Attempting to start server...")
 	if err := app.Listen(addr); err != nil {
-		log.Fatalf("❌ Server failed: %v", err)
+		log.Fatalf("❌ Server failed to start: %v", err)
 	}
 }
