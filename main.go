@@ -862,8 +862,8 @@ func main() {
 		adminOrganizations.Patch("/{orgID:uint}/status", routes.AdminUpdateOrganizationStatus)
 	}
 
-    // Admin routes for landmark verification
-    adminLandmarks := app.Party("/api/admin/landmarks", accessTokenVerifierMiddleware, utils.AdminOnlyMiddleware, utils.UserIDFromTokenMiddleware)
+	// Admin routes for landmark verification
+	adminLandmarks := app.Party("/api/admin/landmarks", accessTokenVerifierMiddleware, utils.AdminOnlyMiddleware, utils.UserIDFromTokenMiddleware)
 	{
 		adminLandmarks.Get("/", routes.AdminGetAllLandmarks)
 		adminLandmarks.Get("/pending", routes.GetPendingLandmarks)
@@ -878,15 +878,15 @@ func main() {
 		port = "4000"
 		fmt.Println("⚠️  PORT environment variable not set, defaulting to 4000")
 	}
-	addr := ":" + port // Use :PORT format for Render compatibility
+	addr := "0.0.0.0:" + port // Explicitly bind to all interfaces for Render
 
 	fmt.Printf("🚀 Server starting on %s\n", addr)
-	fmt.Printf("🌐 Health check available at: http://localhost%s/health\n", addr)
-	fmt.Printf("📡 API endpoints available at: http://localhost%s/api/\n", addr)
+	fmt.Printf("🌐 Health check available at: http://%s/health\n", addr)
+	fmt.Printf("📡 API endpoints available at: http://%s/api/\n", addr)
 
-    // Start server and bind to the provided PORT (Render requires binding to $PORT)
-    fmt.Println("🎯 Attempting to start server with app.Listen()...")
-    if err := app.Listen(addr); err != nil {
-        log.Fatalf("❌ Server failed to start: %v", err)
-    }
+	// Start server and bind to the provided PORT (Render requires binding to $PORT)
+	fmt.Println("🎯 Attempting to start server with app.Listen()...")
+	if err := app.Listen(addr); err != nil {
+		log.Fatalf("❌ Server failed to start: %v", err)
+	}
 }
