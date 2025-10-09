@@ -51,21 +51,35 @@ func UploadBase64Image(base64ImageSrc string, publicID string) map[string]string
 	form.Add("file", "data:image/jpeg;base64,"+payload)
 	form.Add("api_key", apiKey)
 
-	// Set public_id with folder
-	finalPublicID := publicID
-	if folder != "" {
-		finalPublicID = folder + "/" + publicID
-	}
-	if finalPublicID != "" {
+	// Handle folder/public_id correctly
+	// If publicID provided, we can prefix with folder. If not, use Cloudinary 'folder' param instead.
+	finalPublicID := ""
+	if strings.TrimSpace(publicID) != "" {
+		if folder != "" {
+			finalPublicID = folder + "/" + publicID
+		} else {
+			finalPublicID = publicID
+		}
 		form.Add("public_id", finalPublicID)
+	} else if folder != "" {
+		form.Add("folder", folder)
 	}
 
 	// Generate signature for signed upload
 	timestamp := fmt.Sprintf("%d", time.Now().Unix())
 	form.Add("timestamp", timestamp)
 
-	// Create signature string for Cloudinary (must be SHA1)
-	signatureString := fmt.Sprintf("public_id=%s&timestamp=%s%s", finalPublicID, timestamp, apiSecret)
+	// Create signature string for Cloudinary (must be SHA1) — include only params we sent, ordered by key
+	// Possible keys: folder, public_id, timestamp
+	var parts []string
+	if form.Has("folder") {
+		parts = append(parts, fmt.Sprintf("folder=%s", form.Get("folder")))
+	}
+	if form.Has("public_id") {
+		parts = append(parts, fmt.Sprintf("public_id=%s", form.Get("public_id")))
+	}
+	parts = append(parts, fmt.Sprintf("timestamp=%s", timestamp))
+	signatureString := strings.Join(parts, "&") + apiSecret
 	signature := fmt.Sprintf("%x", sha1.Sum([]byte(signatureString)))
 	form.Add("signature", signature)
 
@@ -130,6 +144,111 @@ func UploadBase64Image(base64ImageSrc string, publicID string) map[string]string
 	}
 
 	fmt.Printf("SUCCESS: Uploaded to %s\n", urlOut)
+	return map[string]string{"url": urlOut}
+}
+
+// UploadBase64Video uploads a base64 video to Cloudinary and returns {"url": secure_url}
+func UploadBase64Video(base64VideoSrc string, publicID string, mime string) map[string]string {
+	if base64VideoSrc == "" {
+		fmt.Printf("ERROR: Empty base64 video\n")
+		return map[string]string{"url": ""}
+	}
+	i := strings.Index(base64VideoSrc, ",")
+	payload := base64VideoSrc
+	if i != -1 {
+		payload = base64VideoSrc[i+1:]
+	}
+	cloudName := os.Getenv("CLOUDINARY_CLOUD_NAME")
+	apiKey := os.Getenv("CLOUDINARY_API_KEY")
+	apiSecret := os.Getenv("CLOUDINARY_API_SECRET")
+	folder := os.Getenv("CLOUDINARY_FOLDER")
+	if cloudName == "" || apiKey == "" || apiSecret == "" {
+		fmt.Printf("ERROR: Missing Cloudinary env vars - cloudName: %s, apiKey: %s, apiSecret: %s\n", cloudName, apiKey, apiSecret)
+		return map[string]string{"url": ""}
+	}
+	endpoint := "https://api.cloudinary.com/v1_1/" + cloudName + "/video/upload"
+	form := url.Values{}
+	m := mime
+	if m == "" {
+		m = "video/mp4"
+	}
+	form.Add("file", "data:"+m+";base64,"+payload)
+	form.Add("api_key", apiKey)
+
+	// Handle folder/public_id like images: if publicID provided -> prefix with folder; else use folder param
+	finalPublicID := ""
+	if strings.TrimSpace(publicID) != "" {
+		if folder != "" {
+			finalPublicID = folder + "/" + publicID
+		} else {
+			finalPublicID = publicID
+		}
+		form.Add("public_id", finalPublicID)
+	} else if folder != "" {
+		form.Add("folder", folder)
+	}
+
+	timestamp := fmt.Sprintf("%d", time.Now().Unix())
+	form.Add("timestamp", timestamp)
+
+	// Build signature only with provided params, ordered by key
+	var parts []string
+	if form.Has("folder") {
+		parts = append(parts, fmt.Sprintf("folder=%s", form.Get("folder")))
+	}
+	if form.Has("public_id") {
+		parts = append(parts, fmt.Sprintf("public_id=%s", form.Get("public_id")))
+	}
+	parts = append(parts, fmt.Sprintf("timestamp=%s", timestamp))
+	signatureString := strings.Join(parts, "&") + apiSecret
+	signature := fmt.Sprintf("%x", sha1.Sum([]byte(signatureString)))
+	form.Add("signature", signature)
+	req, err := http.NewRequest("POST", endpoint, strings.NewReader(form.Encode()))
+	if err != nil {
+		fmt.Printf("ERROR: Failed to create request: %v\n", err)
+		return map[string]string{"url": ""}
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		fmt.Printf("ERROR: HTTP request failed: %v\n", err)
+		return map[string]string{"url": ""}
+	}
+	defer res.Body.Close()
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		fmt.Printf("ERROR: Failed to read response: %v\n", err)
+		return map[string]string{"url": ""}
+	}
+	if res.StatusCode != 200 {
+		fmt.Printf("ERROR: HTTP request failed with status: %d\n", res.StatusCode)
+		fmt.Printf("ERROR: Response body: %s\n", string(body))
+		return map[string]string{"url": ""}
+	}
+	var cloudRes struct {
+		SecureURL string `json:"secure_url"`
+		URL       string `json:"url"`
+		Error     struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(body, &cloudRes); err != nil {
+		fmt.Printf("ERROR: Failed to parse JSON: %v\n", err)
+		return map[string]string{"url": ""}
+	}
+	if cloudRes.Error.Message != "" {
+		fmt.Printf("ERROR: Cloudinary error: %s\n", cloudRes.Error.Message)
+		return map[string]string{"url": ""}
+	}
+	urlOut := cloudRes.SecureURL
+	if urlOut == "" {
+		urlOut = cloudRes.URL
+	}
+	if urlOut == "" {
+		fmt.Printf("ERROR: No URL returned from Cloudinary (video)\n")
+		return map[string]string{"url": ""}
+	}
+	fmt.Printf("SUCCESS: Uploaded video to %s\n", urlOut)
 	return map[string]string{"url": urlOut}
 }
 

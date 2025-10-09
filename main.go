@@ -1,3 +1,49 @@
+// package main
+
+// import (
+// 	"apartments-clone-server/routes"
+// 	"apartments-clone-server/storage"
+// 	"apartments-clone-server/utils"
+// 	"fmt"
+// 	"log"
+// 	"os"
+
+// 	"github.com/go-playground/validator/v10"
+// 	"github.com/joho/godotenv"
+// 	"github.com/kataras/iris/v12"
+// 	"github.com/kataras/iris/v12/middleware/jwt"
+// )
+
+// func main() {
+// 	godotenv.Load()
+// 	storage.InitializeDB()
+// 	storage.InitializeS3()
+// 	storage.InitializeRedis()
+
+// 	app := iris.New()
+// 	app.Validator = validator.New()
+
+// 	// CORS for NovaDashboard (http://localhost:3000)
+// 	app.AllowMethods(iris.MethodOptions)
+// 	app.UseRouter(func(ctx iris.Context) {
+// 		ctx.Header("Access-Control-Allow-Origin", ctx.GetHeader("Origin"))
+// 		ctx.Header("Vary", "Origin")
+// 		ctx.Header("Access-Control-Allow-Credentials", "true")
+// 		ctx.Header("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Requested-With")
+// 		ctx.Header("Access-Control-Allow-Methods", "GET,POST,PATCH,PUT,DELETE,OPTIONS")
+// 		if ctx.Method() == iris.MethodOptions {
+// 			ctx.StatusCode(iris.StatusNoContent)
+// 			return
+// 		}
+// 		ctx.Next()
+// 	})
+
+// 	// Add only essential middleware, skip request logging
+// 	app.Use(iris.Compression)
+
+// 	resetTokenVerifier := jwt.NewVerifier(jwt.HS256, []byte(os.Getenv("EMAIL_TOKEN_SECRET")))
+// 	resetTokenVerifier.WithDefaultBlocklist()
+// 	resetTokenVerifierMiddleware := resetTokenVerifier.Verify(func() interface{} {
 // 		return new(utils.ForgotPasswordToken)
 // 	})
 
@@ -339,7 +385,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"time"
 
 	"github.com/go-playground/validator/v10"
 	"github.com/joho/godotenv"
@@ -360,45 +405,9 @@ func main() {
 		fmt.Println("🌐 Running on Render (production)")
 	}
 
-	fmt.Println("🔧 Creating Iris app...")
-	app := iris.New()
-	app.Validator = validator.New()
+	fmt.Println("🔍 Debug: About to initialize services...")
 
-	// Health check endpoint - CRITICAL for Render (add early)
-	fmt.Println("🔧 Setting up health check endpoint...")
-	app.Get("/health", func(ctx iris.Context) {
-		ctx.JSON(iris.Map{"status": "ok", "message": "Server is running"})
-	})
-
-	// Simple test endpoint
-	app.Get("/test", func(ctx iris.Context) {
-		ctx.JSON(iris.Map{"status": "ok", "message": "Test endpoint working"})
-	})
-
-	// Start server first to bind port, then initialize services
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "4000"
-		fmt.Println("⚠️  PORT environment variable not set, defaulting to 4000")
-	}
-	addr := ":" + port
-
-	fmt.Printf("🚀 Server starting on %s\n", addr)
-	fmt.Printf("🌐 Health check available at: http://localhost%s/health\n", addr)
-
-	// Start server in goroutine to bind port immediately
-	go func() {
-		fmt.Println("🎯 Starting server in background...")
-		if err := app.Run(iris.Addr(addr)); err != nil {
-			log.Fatalf("❌ Server failed to start: %v", err)
-		}
-	}()
-
-	// Give server time to start
-	time.Sleep(2 * time.Second)
-	fmt.Println("✅ Server port bound, initializing services...")
-
-	// Initialize services with error handling (after port is bound)
+	// Initialize services with error handling
 	fmt.Println("🔧 Initializing database...")
 	func() {
 		defer func() {
@@ -435,6 +444,10 @@ func main() {
 		fmt.Println("✅ Redis initialized successfully")
 	}()
 
+	fmt.Println("🔧 Creating Iris app...")
+	app := iris.New()
+	app.Validator = validator.New()
+
 	// CORS configuration
 	fmt.Println("🔧 Setting up CORS...")
 	app.AllowMethods(iris.MethodOptions)
@@ -444,6 +457,14 @@ func main() {
 		ctx.Header("Access-Control-Allow-Credentials", "true")
 		ctx.Header("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Requested-With")
 		ctx.Header("Access-Control-Allow-Methods", "GET,POST,PATCH,PUT,DELETE,OPTIONS")
+		// If Authorization header is missing but cookie exists, promote cookie to header
+		if ctx.Method() != iris.MethodOptions {
+			if ctx.GetHeader("Authorization") == "" {
+				if tok := ctx.GetCookie("accessToken"); tok != "" {
+					ctx.Request().Header.Set("Authorization", "Bearer "+tok)
+				}
+			}
+		}
 		if ctx.Method() == iris.MethodOptions {
 			ctx.StatusCode(iris.StatusNoContent)
 			return
@@ -481,6 +502,17 @@ func main() {
 			return ""
 		}
 		return tokenInput.RefreshToken
+	})
+
+	// Health check endpoint - CRITICAL for Render
+	fmt.Println("🔧 Setting up health check endpoint...")
+	app.Get("/health", func(ctx iris.Context) {
+		ctx.JSON(iris.Map{"status": "ok", "message": "Server is running"})
+	})
+
+	// Simple test endpoint
+	app.Get("/test", func(ctx iris.Context) {
+		ctx.JSON(iris.Map{"status": "ok", "message": "Test endpoint working"})
 	})
 
 	// Routes
@@ -523,7 +555,7 @@ func main() {
 		property.Delete("/image", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.DeletePropertyImage)
 	}
 
-	admin := app.Party("/api/admin", accessTokenVerifierMiddleware, utils.AdminOnlyMiddleware)
+	admin := app.Party("/api/admin", accessTokenVerifierMiddleware, utils.AdminOnlyMiddleware, utils.UserIDFromTokenMiddleware)
 	{
 		admin.Get("/users", routes.AdminListUsers)
 		admin.Patch("/users/{id:uint}/role", utils.SuperAdminOnlyMiddleware, routes.AdminChangeUserRole)
@@ -592,6 +624,9 @@ func main() {
 		location.Get("/search", routes.GetPropertiesWithFilters)
 	}
 
+	// Nearby POIs (schools, hospitals, restaurants)
+	app.Get("/api/nearby", routes.NearbyHandler)
+
 	apartment := app.Party("/api/apartment")
 	{
 		apartment.Get("/property/{id}", routes.GetReservationsByPropertyID)
@@ -628,6 +663,12 @@ func main() {
 	}
 
 	notifications := app.Party("/api/notifications")
+	// Upload routes (Cloudinary)
+	upload := app.Party("/api/upload")
+	{
+		upload.Post("/image", routes.UploadImage)
+		upload.Post("/video", routes.UploadVideo)
+	}
 	{
 		notifications.Post("/test-push", routes.SendTestNotification)
 		notifications.Post("/test-detailed/{userID:int}", routes.SendDetailedTestNotification)
@@ -759,12 +800,93 @@ func main() {
 		reviews.Post("/property/{propertyId:uint}", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.CreatePropertyReview)
 	}
 
+	// Property Selling System Routes
+	organization := app.Party("/api/organization")
+	{
+		organization.Post("/", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.CreateOrganization)
+		organization.Get("/", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.GetUserOrganization)
+		organization.Put("/", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.UpdateOrganization)
+		organization.Get("/agents", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.GetOrganizationAgents)
+		organization.Post("/agents", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.AddAgent)
+		organization.Patch("/agents/{agentID:uint}/status", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.UpdateAgentStatus)
+	}
+
+	propertySales := app.Party("/api/property-sales")
+	{
+		propertySales.Post("/", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.CreatePropertySale)
+		propertySales.Get("/", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.GetUserPropertySales)
+		propertySales.Get("/{id:uint}", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.GetPropertySale)
+		propertySales.Put("/{id:uint}", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.UpdatePropertySale)
+		propertySales.Post("/{id:uint}/submit", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.SubmitPropertyForVerification)
+		propertySales.Post("/{id:uint}/publish", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.PublishProperty)
+		propertySales.Post("/{id:uint}/offers", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.CreateOffer)
+		propertySales.Get("/public", routes.GetPublishedProperties)
+		propertySales.Get("/offers/organization", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.GetOrganizationOffers)
+		propertySales.Patch("/offers/{id:uint}/status", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.UpdateOfferStatus)
+		propertySales.Get("/{id:uint}/offer-insights", routes.PublicOfferInsights)
+	}
+
+	landmarks := app.Party("/api/landmarks")
+	{
+		landmarks.Post("/", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.CreateLandmark)
+		landmarks.Get("/organization", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.GetOrganizationLandmarks)
+		landmarks.Get("/public", routes.GetPublicLandmarks)
+		landmarks.Patch("/{id:uint}", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.UpdateLandmark)
+		landmarks.Delete("/{id:uint}", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.DeleteLandmark)
+		landmarks.Post("/{id:uint}/submit", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.SubmitLandmarkForVerification)
+		landmarks.Patch("/{id:uint}/verify", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.VerifyLandmark)
+		landmarks.Get("/pending", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.GetPendingLandmarks)
+	}
+
+	propertyTours := app.Party("/api/property-tours")
+	{
+		propertyTours.Post("/property/{id:uint}", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.BookPropertyTour)
+		propertyTours.Get("/my-bookings", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.GetUserTourBookings)
+		propertyTours.Get("/property/{id:uint}", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.GetPropertyTourBookings)
+		propertyTours.Patch("/{id:uint}/status", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.UpdateTourStatus)
+		propertyTours.Get("/organization", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.GetOrganizationTourBookings)
+		propertyTours.Get("/agent", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.GetAgentTourBookings)
+		propertyTours.Delete("/{id:uint}", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.CancelTour)
+	}
+
+	// Admin routes for property selling system
+	adminPropertySales := app.Party("/api/admin/property-sales", accessTokenVerifierMiddleware, utils.AdminOnlyMiddleware)
+	{
+		adminPropertySales.Get("/", routes.AdminGetPropertySales)
+		adminPropertySales.Patch("/{id:uint}/verify", routes.AdminVerifyProperty)
+	}
+
+	adminOrganizations := app.Party("/api/admin/organizations", accessTokenVerifierMiddleware, utils.AdminOnlyMiddleware)
+	{
+		adminOrganizations.Get("/", routes.AdminGetOrganizations)
+		adminOrganizations.Patch("/{orgID:uint}/status", routes.AdminUpdateOrganizationStatus)
+	}
+
+    // Admin routes for landmark verification
+    adminLandmarks := app.Party("/api/admin/landmarks", accessTokenVerifierMiddleware, utils.AdminOnlyMiddleware, utils.UserIDFromTokenMiddleware)
+	{
+		adminLandmarks.Get("/", routes.AdminGetAllLandmarks)
+		adminLandmarks.Get("/pending", routes.GetPendingLandmarks)
+		adminLandmarks.Patch("/{id:uint}/verify", routes.VerifyLandmark)
+	}
+
 	app.Post("/api/refresh", refreshTokenVerifierMiddleware, utils.RefreshToken)
 
-	fmt.Println("📡 API endpoints available at: http://localhost" + addr + "/api/")
-	fmt.Println("✅ All routes configured successfully")
+	// Get port from environment, default to 4000 if not set (for local dev)
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "4000"
+		fmt.Println("⚠️  PORT environment variable not set, defaulting to 4000")
+	}
+	addr := ":" + port // Use :PORT format for Render compatibility
 
-	// Keep the main function running
-	fmt.Println("🔄 Server is running, keeping main function alive...")
-	select {} // Block forever to keep the program running
+	fmt.Printf("🚀 Server starting on %s\n", addr)
+	fmt.Printf("🌐 Health check available at: http://localhost%s/health\n", addr)
+	fmt.Printf("📡 API endpoints available at: http://localhost%s/api/\n", addr)
+
+	// Start server using router.Run() - more reliable for deployment platforms
+	fmt.Println("🎯 Attempting to start server with router.Run()...")
+	if err := app.Run(iris.Addr(addr)); err != nil {
+		log.Fatalf("❌ Server failed to start: %v", err)
+	}
 }

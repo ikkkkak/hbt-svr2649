@@ -39,6 +39,8 @@ func AdminOnlyMiddleware(ctx iris.Context) {
 		ctx.JSON(iris.Map{"error": "forbidden", "message": "admin access required"})
 		return
 	}
+    // Ensure userID is available to downstream handlers
+    ctx.Values().Set("userID", claims.ID)
 	ctx.Next()
 }
 

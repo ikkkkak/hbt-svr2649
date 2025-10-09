@@ -28,7 +28,7 @@ type Property struct {
 	NightlyPrice       float32       `json:"nightlyPrice"`
 	CleaningFee        float32       `json:"cleaningFee"`
 	ServiceFee         float32       `json:"serviceFee"`
-	Currency           string        `json:"currency"`  // MRO for Mauritania
+	Currency           string        `json:"currency"`  // MRU for Mauritania
 	Amenities          string        `json:"amenities"` // JSON string
 	HouseRules         string        `json:"houseRules"`
 	CancellationPolicy string        `json:"cancellationPolicy"`

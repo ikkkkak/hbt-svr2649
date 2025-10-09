@@ -270,7 +270,7 @@ func (ns *NotificationService) SendReservationRejectionNotificationToGuest(reser
 
 // SendWelcomeNotificationToNewUser sends welcome notification to new users
 func (ns *NotificationService) SendWelcomeNotificationToNewUser(userID uint, firstName string) error {
-	title := "🎉 Bienvenue sur JPApartments!"
+	title := "🎉 Bienvenue sur habitat!"
 	body := fmt.Sprintf("Bonjour %s! Découvrez des logements incroyables en Mauritanie.", firstName)
 
 	data := NotificationData{

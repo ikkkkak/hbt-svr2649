@@ -74,6 +74,14 @@ func performMigrations(db *gorm.DB) {
 		&models.IdentityVerification{},
 		&models.AuditLog{},
 		&models.Feedback{},
+		// Property Selling System Models
+		&models.Organization{},
+		&models.Agent{},
+		&models.PropertySale{},
+		&models.PropertyTour{},
+		&models.PropertyInquiry{},
+		&models.PropertyOffer{},
+		&models.Landmark{},
 	)
 
 	// Allow direct chat groups without an experience by making experience_id nullable
