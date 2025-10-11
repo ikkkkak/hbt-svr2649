@@ -62,7 +62,12 @@ func GetVideoFeed(ctx iris.Context) {
 	if claims := jsonWT.Get(ctx); claims != nil {
 		if accessToken, ok := claims.(*utils.AccessToken); ok {
 			userID = accessToken.ID
+			fmt.Printf("🔍 JWT Token parsed - User ID: %d\n", userID)
+		} else {
+			fmt.Printf("❌ Failed to parse JWT token as AccessToken\n")
 		}
+	} else {
+		fmt.Printf("❌ No JWT claims found in request\n")
 	}
 
 	// simple pagination
@@ -99,6 +104,34 @@ func GetVideoFeed(ctx iris.Context) {
 		Where("COALESCE(videos.is_flagged, ?) = ?", false, false).
 		Select("videos.*").
 		Preload("Property").Preload("User")
+
+	// If user is authenticated, exclude hidden videos, reported videos, and flagged users
+	if userID > 0 {
+		fmt.Printf("🔍 Filtering videos for user ID: %d\n", userID)
+
+		// Check how many videos are hidden by this user
+		var hiddenCount int64
+		storage.DB.Model(&models.HiddenVideo{}).Where("user_id = ?", userID).Count(&hiddenCount)
+		fmt.Printf("📊 User has hidden %d videos\n", hiddenCount)
+
+		// Check how many videos are reported by this user
+		var reportedCount int64
+		storage.DB.Model(&models.VideoReport{}).Where("reporter_id = ?", userID).Count(&reportedCount)
+		fmt.Printf("📊 User has reported %d videos\n", reportedCount)
+
+		// Exclude videos hidden by this user
+		query = query.Where("videos.id NOT IN (SELECT video_id FROM hidden_videos WHERE user_id = ?)", userID)
+
+		// Exclude videos reported by this user
+		query = query.Where("videos.id NOT IN (SELECT video_id FROM video_reports WHERE reporter_id = ?)", userID)
+
+		// Exclude videos from users flagged by this user
+		query = query.Where("videos.user_id NOT IN (SELECT flagged_user_id FROM user_flags WHERE flagger_id = ? AND status = 'active')", userID)
+
+		fmt.Printf("✅ Applied user-specific filters (hidden, reported, flagged users)\n")
+	} else {
+		fmt.Printf("⚠️ No user authentication - showing all videos\n")
+	}
 
 	// Apply property filters
 	if city != "" {
@@ -166,6 +199,8 @@ func GetVideoFeed(ctx iris.Context) {
 		utils.CreateInternalServerError(ctx)
 		return
 	}
+
+	fmt.Printf("📹 Returning %d videos for user ID: %d (page: %d, limit: %d)\n", len(videos), userID, page, limit)
 
 	// Get user's liked and saved video IDs for this batch
 	var videoIDs []uint

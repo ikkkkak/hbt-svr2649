@@ -745,3 +745,22 @@ func GetPublishedProperties(ctx iris.Context) {
 
 	ctx.JSON(iris.Map{"properties": properties})
 }
+
+// GetPublishedProperty - Get single published property (public access)
+func GetPublishedProperty(ctx iris.Context) {
+	id, err := ctx.Params().GetUint("id")
+	if err != nil {
+		ctx.StatusCode(http.StatusBadRequest)
+		ctx.JSON(iris.Map{"error": "Invalid property ID"})
+		return
+	}
+
+	var property models.PropertySale
+	if err := storage.DB.Preload("Organization").Preload("Agent.User").Where("id = ? AND (status = ? OR is_published = ?)", id, "published", true).First(&property).Error; err != nil {
+		ctx.StatusCode(http.StatusNotFound)
+		ctx.JSON(iris.Map{"error": "Property not found"})
+		return
+	}
+
+	ctx.JSON(iris.Map{"property": property})
+}

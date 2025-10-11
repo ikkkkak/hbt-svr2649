@@ -1187,6 +1187,144 @@ type VerificationInput struct {
 	SelfieImage  string `json:"selfieImage"`
 }
 
+// DeleteUserAccount permanently deletes a user account and all associated data
+func DeleteUserAccount(ctx iris.Context) {
+	userIDInterface := ctx.Values().Get("userID")
+	if userIDInterface == nil {
+		ctx.StatusCode(http.StatusUnauthorized)
+		ctx.JSON(iris.Map{"error": "User not authenticated"})
+		return
+	}
+
+	userID := userIDInterface.(uint)
+	log.Printf("🗑️ Account deletion requested for user ID: %d", userID)
+
+	// Start a transaction to ensure all deletions succeed or none do
+	tx := storage.DB.Begin()
+	if tx.Error != nil {
+		log.Printf("❌ Failed to start transaction: %v", tx.Error)
+		ctx.StatusCode(http.StatusInternalServerError)
+		ctx.JSON(iris.Map{"error": "Failed to start deletion process"})
+		return
+	}
+
+	// Delete user's properties
+	if err := tx.Where("user_id = ?", userID).Delete(&models.Property{}).Error; err != nil {
+		log.Printf("❌ Failed to delete properties: %v", err)
+		tx.Rollback()
+		ctx.StatusCode(http.StatusInternalServerError)
+		ctx.JSON(iris.Map{"error": "Failed to delete user properties"})
+		return
+	}
+
+	// Delete user's property sales (through organization)
+	var userOrganizations []models.Organization
+	if err := tx.Where("owner_id = ?", userID).Find(&userOrganizations).Error; err != nil {
+		log.Printf("❌ Failed to find user organizations: %v", err)
+		tx.Rollback()
+		ctx.StatusCode(http.StatusInternalServerError)
+		ctx.JSON(iris.Map{"error": "Failed to find user organizations"})
+		return
+	}
+
+	// Delete property sales for each organization
+	for _, org := range userOrganizations {
+		if err := tx.Where("organization_id = ?", org.ID).Delete(&models.PropertySale{}).Error; err != nil {
+			log.Printf("❌ Failed to delete property sales for organization %d: %v", org.ID, err)
+			tx.Rollback()
+			ctx.StatusCode(http.StatusInternalServerError)
+			ctx.JSON(iris.Map{"error": "Failed to delete user property sales"})
+			return
+		}
+	}
+
+	// Delete user's organizations
+	if err := tx.Where("owner_id = ?", userID).Delete(&models.Organization{}).Error; err != nil {
+		log.Printf("❌ Failed to delete organizations: %v", err)
+		tx.Rollback()
+		ctx.StatusCode(http.StatusInternalServerError)
+		ctx.JSON(iris.Map{"error": "Failed to delete user organizations"})
+		return
+	}
+
+	// Delete user's experiences
+	if err := tx.Where("host_id = ?", userID).Delete(&models.Experience{}).Error; err != nil {
+		log.Printf("❌ Failed to delete experiences: %v", err)
+		tx.Rollback()
+		ctx.StatusCode(http.StatusInternalServerError)
+		ctx.JSON(iris.Map{"error": "Failed to delete user experiences"})
+		return
+	}
+
+	// Delete user's reservations (as guest)
+	if err := tx.Where("guest_id = ?", userID).Delete(&models.Reservation{}).Error; err != nil {
+		log.Printf("❌ Failed to delete reservations: %v", err)
+		tx.Rollback()
+		ctx.StatusCode(http.StatusInternalServerError)
+		ctx.JSON(iris.Map{"error": "Failed to delete user reservations"})
+		return
+	}
+
+	// Delete user's experience bookings
+	if err := tx.Where("guest_id = ?", userID).Delete(&models.ExperienceBooking{}).Error; err != nil {
+		log.Printf("❌ Failed to delete experience bookings: %v", err)
+		tx.Rollback()
+		ctx.StatusCode(http.StatusInternalServerError)
+		ctx.JSON(iris.Map{"error": "Failed to delete user experience bookings"})
+		return
+	}
+
+	// Delete user's collections
+	if err := tx.Where("user_id = ?", userID).Delete(&models.Collection{}).Error; err != nil {
+		log.Printf("❌ Failed to delete collections: %v", err)
+		tx.Rollback()
+		ctx.StatusCode(http.StatusInternalServerError)
+		ctx.JSON(iris.Map{"error": "Failed to delete user collections"})
+		return
+	}
+
+	// Delete user's messages
+	if err := tx.Where("sender_id = ? OR receiver_id = ?", userID, userID).Delete(&models.Message{}).Error; err != nil {
+		log.Printf("❌ Failed to delete messages: %v", err)
+		tx.Rollback()
+		ctx.StatusCode(http.StatusInternalServerError)
+		ctx.JSON(iris.Map{"error": "Failed to delete user messages"})
+		return
+	}
+
+	// Delete user's notification preferences
+	if err := tx.Where("user_id = ?", userID).Delete(&models.NotificationPreference{}).Error; err != nil {
+		log.Printf("❌ Failed to delete notification preferences: %v", err)
+		tx.Rollback()
+		ctx.StatusCode(http.StatusInternalServerError)
+		ctx.JSON(iris.Map{"error": "Failed to delete user notification preferences"})
+		return
+	}
+
+	// Finally, delete the user account itself
+	if err := tx.Where("id = ?", userID).Delete(&models.User{}).Error; err != nil {
+		log.Printf("❌ Failed to delete user account: %v", err)
+		tx.Rollback()
+		ctx.StatusCode(http.StatusInternalServerError)
+		ctx.JSON(iris.Map{"error": "Failed to delete user account"})
+		return
+	}
+
+	// Commit the transaction
+	if err := tx.Commit().Error; err != nil {
+		log.Printf("❌ Failed to commit transaction: %v", err)
+		ctx.StatusCode(http.StatusInternalServerError)
+		ctx.JSON(iris.Map{"error": "Failed to complete account deletion"})
+		return
+	}
+
+	log.Printf("✅ Account successfully deleted for user ID: %d", userID)
+	ctx.JSON(iris.Map{
+		"success": true,
+		"message": "Account deleted successfully",
+	})
+}
+
 type LoginUserInput struct {
 	Email    string `json:"email" validate:"required,email"`
 	Password string `json:"password" validate:"required"`
