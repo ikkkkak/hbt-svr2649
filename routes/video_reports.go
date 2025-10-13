@@ -6,8 +6,11 @@ import (
 	"apartments-clone-server/utils"
 	"fmt"
 	"net/http"
+	"os"
+	"strconv"
 
 	"github.com/kataras/iris/v12"
+	"github.com/kataras/iris/v12/middleware/jwt"
 )
 
 // ReportVideo - POST /api/videos/{id}/report
@@ -295,13 +298,43 @@ func ReportVideoPublic(ctx iris.Context) {
 
 	// Try to get user ID if authenticated (optional)
 	var reporterID *uint = nil
-	if userIDInterface := ctx.Values().Get("userID"); userIDInterface != nil {
-		if userID, ok := userIDInterface.(uint); ok {
-			reporterID = &userID
-			fmt.Printf("🔍 User authenticated for report - User ID: %d\n", userID)
+	if v := ctx.Values().Get("userID"); v != nil {
+		switch t := v.(type) {
+		case uint:
+			u := t
+			reporterID = &u
+		case int:
+			u := uint(t)
+			reporterID = &u
+		case float64:
+			u := uint(t)
+			reporterID = &u
+		case string:
+			if parsed, err := strconv.ParseUint(t, 10, 64); err == nil {
+				u := uint(parsed)
+				reporterID = &u
+			}
 		}
-	} else {
-		fmt.Printf("🔍 Anonymous report - no user ID\n")
+		if reporterID != nil {
+			fmt.Printf("🔍 User authenticated for report - User ID: %d\n", *reporterID)
+		}
+	}
+	// Fallback: parse Authorization header directly if still nil
+	if reporterID == nil {
+		if auth := ctx.GetHeader("Authorization"); len(auth) > 7 && auth[:7] == "Bearer " {
+			verifier := jwt.NewVerifier(jwt.HS256, []byte(os.Getenv("ACCESS_TOKEN_SECRET")))
+			verifier.WithDefaultBlocklist()
+			if token, err := verifier.VerifyToken([]byte(auth[7:])); err == nil {
+				var claims utils.AccessToken
+				if err := token.Claims(&claims); err == nil {
+					uid := claims.ID
+					reporterID = &uid
+					fmt.Printf("🔍 Fallback auth (report) - User ID: %d\n", uid)
+				}
+			}
+		} else {
+			fmt.Printf("🔍 Anonymous report - no user ID\n")
+		}
 	}
 
 	// Create report (authenticated or anonymous)
@@ -403,13 +436,43 @@ func HideVideoPublic(ctx iris.Context) {
 
 	// Try to get user ID if authenticated (optional)
 	var userID *uint = nil
-	if userIDInterface := ctx.Values().Get("userID"); userIDInterface != nil {
-		if uid, ok := userIDInterface.(uint); ok {
-			userID = &uid
-			fmt.Printf("🔍 User authenticated for hide - User ID: %d\n", uid)
+	if v := ctx.Values().Get("userID"); v != nil {
+		switch t := v.(type) {
+		case uint:
+			u := t
+			userID = &u
+		case int:
+			u := uint(t)
+			userID = &u
+		case float64:
+			u := uint(t)
+			userID = &u
+		case string:
+			if parsed, err := strconv.ParseUint(t, 10, 64); err == nil {
+				u := uint(parsed)
+				userID = &u
+			}
 		}
-	} else {
-		fmt.Printf("🔍 Anonymous hide - no user ID\n")
+		if userID != nil {
+			fmt.Printf("🔍 User authenticated for hide - User ID: %d\n", *userID)
+		}
+	}
+	// Fallback: parse Authorization header directly if still nil
+	if userID == nil {
+		if auth := ctx.GetHeader("Authorization"); len(auth) > 7 && auth[:7] == "Bearer " {
+			verifier := jwt.NewVerifier(jwt.HS256, []byte(os.Getenv("ACCESS_TOKEN_SECRET")))
+			verifier.WithDefaultBlocklist()
+			if token, err := verifier.VerifyToken([]byte(auth[7:])); err == nil {
+				var claims utils.AccessToken
+				if err := token.Claims(&claims); err == nil {
+					uid := claims.ID
+					userID = &uid
+					fmt.Printf("🔍 Fallback auth (hide) - User ID: %d\n", uid)
+				}
+			}
+		} else {
+			fmt.Printf("🔍 Anonymous hide - no user ID\n")
+		}
 	}
 
 	// Create hidden video record (authenticated or anonymous)

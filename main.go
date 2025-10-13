@@ -32,24 +32,20 @@ func optionalAuthMiddleware(ctx iris.Context) {
 			return new(utils.AccessToken)
 		})
 
-		// Try to verify the token
+		// Attempt verification (do not rely on status code)
 		accessTokenVerifierMiddleware(ctx)
-		if ctx.GetStatusCode() == iris.StatusOK {
-			// Token is valid, user is authenticated - extract user ID
-			if claims := jsonWT.Get(ctx); claims != nil {
-				if accessToken, ok := claims.(*utils.AccessToken); ok {
-					ctx.Values().Set("userID", accessToken.ID)
-					fmt.Printf("🔍 Optional auth: User ID %d authenticated\n", accessToken.ID)
-				}
+		if claims := jsonWT.Get(ctx); claims != nil {
+			if accessToken, ok := claims.(*utils.AccessToken); ok {
+				ctx.Values().Set("userID", accessToken.ID)
+				fmt.Printf("🔍 Optional auth: User ID %d authenticated\n", accessToken.ID)
 			}
-			return
+		} else {
+			fmt.Printf("🔍 Optional auth: Invalid token - proceeding without auth\n")
 		}
-		// Token is invalid, but we don't reject the request - just continue without auth
-		fmt.Printf("🔍 Optional auth: Invalid token - proceeding without auth\n")
-		ctx.Next()
+	} else {
+		fmt.Printf("🔍 Optional auth: No token or invalid token - proceeding without auth\n")
 	}
-	// No token or invalid token - continue without authentication
-	fmt.Printf("🔍 Optional auth: No token or invalid token - proceeding without auth\n")
+	// Always continue to the next handler
 	ctx.Next()
 }
 
