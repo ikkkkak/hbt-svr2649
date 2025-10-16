@@ -119,11 +119,11 @@ func GetVideoFeed(ctx iris.Context) {
 		storage.DB.Model(&models.VideoReport{}).Where("reporter_id = ?", userID).Count(&reportedCount)
 		fmt.Printf("📊 User has reported %d videos\n", reportedCount)
 
-		// Exclude videos hidden by this user
-		query = query.Where("videos.id NOT IN (SELECT video_id FROM hidden_videos WHERE user_id = ?)", userID)
+		// Exclude videos hidden by this user (ignore soft-deleted rows)
+		query = query.Where("videos.id NOT IN (SELECT video_id FROM hidden_videos WHERE user_id = ? AND deleted_at IS NULL)", userID)
 
-		// Exclude videos reported by this user
-		query = query.Where("videos.id NOT IN (SELECT video_id FROM video_reports WHERE reporter_id = ?)", userID)
+		// Exclude videos reported by this user (ignore soft-deleted rows if any)
+		query = query.Where("videos.id NOT IN (SELECT video_id FROM video_reports WHERE reporter_id = ? AND deleted_at IS NULL)", userID)
 
 		// Exclude videos from users flagged by this user
 		query = query.Where("videos.user_id NOT IN (SELECT flagged_user_id FROM user_flags WHERE flagger_id = ? AND status = 'active')", userID)

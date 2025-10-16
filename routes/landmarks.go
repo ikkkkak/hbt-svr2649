@@ -3,13 +3,16 @@ package routes
 import (
 	"apartments-clone-server/models"
 	"apartments-clone-server/storage"
+	"apartments-clone-server/utils"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"strconv"
 	"time"
 
 	"github.com/kataras/iris/v12"
+	jwt "github.com/kataras/iris/v12/middleware/jwt"
 )
 
 // CreateLandmark creates a new landmark for an organization
@@ -154,8 +157,38 @@ func GetOrganizationLandmarks(ctx iris.Context) {
 
 // GetPublicLandmarks gets all verified and published landmarks for public display
 func GetPublicLandmarks(ctx iris.Context) {
+	// Optional auth: extract userID
+	var userID uint = 0
+	if v := ctx.Values().Get("userID"); v != nil {
+		if id, ok := v.(uint); ok {
+			userID = id
+		}
+	}
+	if userID == 0 {
+		if auth := ctx.GetHeader("Authorization"); len(auth) > 7 && auth[:7] == "Bearer " {
+			verifier := jwt.NewVerifier(jwt.HS256, []byte(os.Getenv("ACCESS_TOKEN_SECRET")))
+			verifier.WithDefaultBlocklist()
+			if token, err := verifier.VerifyToken([]byte(auth[7:])); err == nil {
+				var claims utils.AccessToken
+				if err := token.Claims(&claims); err == nil {
+					userID = claims.ID
+				}
+			}
+		}
+	}
+
+	q := storage.DB.Model(&models.Landmark{}).
+		Preload("Organization").
+		Where("landmarks.is_verified = ? AND landmarks.is_published = ? AND landmarks.status = ?", true, true, "verified")
+
+	if userID > 0 {
+		// Exclude landmarks from blocked organizations' owners
+		q = q.Joins("LEFT JOIN organizations ON organizations.id = landmarks.organization_id").
+			Where("NOT EXISTS (SELECT 1 FROM user_flags uf WHERE uf.flagger_id = ? AND uf.status = 'active' AND uf.flagged_user_id = organizations.owner_id)", userID)
+	}
+
 	var landmarks []models.Landmark
-	if err := storage.DB.Preload("Organization").Where("is_verified = ? AND is_published = ? AND status = ?", true, true, "verified").Find(&landmarks).Error; err != nil {
+	if err := q.Order("landmarks.created_at DESC").Find(&landmarks).Error; err != nil {
 		ctx.StatusCode(http.StatusInternalServerError)
 		ctx.JSON(iris.Map{"error": "Failed to fetch landmarks"})
 		return
@@ -477,4 +510,54 @@ func AdminGetAllLandmarks(ctx iris.Context) {
 // Helper function to validate coordinates
 func isValidCoordinate(lat, lng float64) bool {
 	return lat >= -90 && lat <= 90 && lng >= -180 && lng <= 180
+}
+
+// ReportLandmark allows an authenticated user to report a public landmark
+func ReportLandmark(ctx iris.Context) {
+	userIDVal := ctx.Values().Get("userID")
+	if userIDVal == nil {
+		ctx.StatusCode(http.StatusUnauthorized)
+		ctx.JSON(iris.Map{"error": "Unauthorized"})
+		return
+	}
+	userID := userIDVal.(uint)
+
+	id, err := ctx.Params().GetUint("id")
+	if err != nil {
+		ctx.StatusCode(http.StatusBadRequest)
+		ctx.JSON(iris.Map{"error": "Invalid landmark ID"})
+		return
+	}
+
+	// Ensure landmark is public/verified
+	var lm models.Landmark
+	if err := storage.DB.Where("id = ? AND is_verified = ? AND is_published = ? AND status = ?", id, true, true, "verified").First(&lm).Error; err != nil {
+		ctx.StatusCode(http.StatusNotFound)
+		ctx.JSON(iris.Map{"error": "Landmark not found"})
+		return
+	}
+
+	var body struct {
+		Reason      string `json:"reason"`
+		Description string `json:"description"`
+	}
+	if err := ctx.ReadJSON(&body); err != nil {
+		ctx.StatusCode(http.StatusBadRequest)
+		ctx.JSON(iris.Map{"error": "Invalid JSON"})
+		return
+	}
+
+	rep := models.LandmarkReport{
+		ReporterID:  userID,
+		LandmarkID:  lm.ID,
+		Reason:      body.Reason,
+		Description: body.Description,
+	}
+	if err := storage.DB.Create(&rep).Error; err != nil {
+		ctx.StatusCode(http.StatusInternalServerError)
+		ctx.JSON(iris.Map{"error": "Failed to create report"})
+		return
+	}
+
+	ctx.JSON(iris.Map{"success": true})
 }

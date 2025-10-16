@@ -128,6 +128,12 @@ func main() {
 		}()
 		storage.InitializeDB()
 		fmt.Println("✅ Database initialized successfully")
+		// Auto-migrate moderation tables (idempotent)
+		if err := storage.DB.AutoMigrate(&models.HiddenProperty{}, &models.PropertyReport{}, &models.UserFlag{}, &models.HiddenVideo{}, &models.PropertySaleReport{}, &models.LandmarkReport{}, &models.HiddenPropertySale{}, &models.PropertySaleVideo{}, &models.PropertySaleVideoLike{}, &models.PropertySaleVideoSave{}, &models.PropertySaleVideoComment{}, &models.PropertySaleVideoReport{}, &models.HiddenPropertySaleVideo{}, &models.UserBlockedOrganization{}); err != nil {
+			fmt.Printf("❌ Failed to migrate moderation tables: %v\n", err)
+		} else {
+			fmt.Println("✅ Moderation tables migrated (hidden_properties, property_reports, user_flags, hidden_videos, property_sale_reports, landmark_reports, property_sale_videos, user_blocked_organizations)")
+		}
 	}()
 
 	fmt.Println("🔧 Initializing S3...")
@@ -272,12 +278,21 @@ func main() {
 		user.Put("/profile", accessTokenVerifierMiddleware, routes.CreateOrUpdateUserProfile)
 		user.Delete("/profile", accessTokenVerifierMiddleware, routes.DeleteUserProfile)
 		user.Delete("/account", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.DeleteUserAccount)
+
+		// User moderation routes
+		user.Get("/blocked", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.GetBlockedUsers)
+		user.Get("/hidden-properties", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.GetHiddenProperties)
+		user.Get("/hidden-videos", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.GetHiddenVideos)
 	}
 
 	// Video reporting routes (Public - optional auth for better filtering)
 	app.Post("/api/videos/{id:uint}/report", optionalAuthMiddleware, routes.ReportVideoPublic)
 	app.Post("/api/users/{id:uint}/flag", optionalAuthMiddleware, routes.FlagUserPublic)
 	app.Post("/api/videos/{id:uint}/hide", optionalAuthMiddleware, routes.HideVideoPublic)
+	// Unblock/unhide routes (authenticated)
+	app.Delete("/api/users/{id:uint}/unblock", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.UnblockUser)
+	app.Delete("/api/videos/{id:uint}/unhide", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.UnhideVideo)
+	app.Post("/api/users/{id:uint}/block", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.BlockUser)
 
 	// Admin routes for video reports
 	app.Get("/api/admin/flagged-videos", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.GetFlaggedVideos)
@@ -290,7 +305,7 @@ func main() {
 		property.Get("/userid/{id}", accessTokenVerifierMiddleware, utils.UserIDMiddleware, routes.GetPropertiesByUserID)
 		property.Delete("/{id}", accessTokenVerifierMiddleware, routes.DeleteProperty)
 		property.Patch("/update/{id}", accessTokenVerifierMiddleware, routes.UpdateProperty)
-		property.Post("/search", routes.GetPropertiesByBoundingBox)
+		property.Post("/search", optionalAuthMiddleware, routes.GetPropertiesByBoundingBox)
 		property.Delete("/image", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.DeletePropertyImage)
 	}
 
@@ -390,8 +405,8 @@ func main() {
 	{
 		location.Get("/near/{location}", routes.GetPropertiesNearLocation)
 		location.Get("/locations", routes.GetAvailableLocations)
-		location.Get("/coordinates", routes.GetPropertiesByCoordinates)
-		location.Get("/search", routes.GetPropertiesWithFilters)
+		location.Get("/coordinates", optionalAuthMiddleware, routes.GetPropertiesByCoordinates)
+		location.Get("/search", optionalAuthMiddleware, routes.GetPropertiesWithFilters)
 	}
 
 	// Nearby POIs (schools, hospitals, restaurants)
@@ -682,6 +697,17 @@ func main() {
 		video.Get("/saved", accessTokenVerifierMiddleware, routes.GetSavedVideos)
 	}
 
+	// Property Sale Videos routes
+	propertySaleVideos := app.Party("/api/property-sale-videos")
+	{
+		propertySaleVideos.Post("/", accessTokenVerifierMiddleware, routes.CreatePropertySaleVideo)
+		propertySaleVideos.Get("/feed", optionalAuthMiddleware, routes.GetPropertySaleVideoFeed)
+		propertySaleVideos.Post("/{id:uint}/like", accessTokenVerifierMiddleware, routes.LikePropertySaleVideo)
+		propertySaleVideos.Post("/{id:uint}/unlike", accessTokenVerifierMiddleware, routes.UnlikePropertySaleVideo)
+		propertySaleVideos.Post("/{id:uint}/save", accessTokenVerifierMiddleware, routes.SavePropertySaleVideo)
+		propertySaleVideos.Post("/{id:uint}/unsave", accessTokenVerifierMiddleware, routes.UnsavePropertySaleVideo)
+	}
+
 	experience := app.Party("/api/experience")
 	{
 		experience.Post("/", accessTokenVerifierMiddleware, routes.CreateExperience)
@@ -749,11 +775,11 @@ func main() {
 		chat.Post("/start-direct", accessTokenVerifierMiddleware, routes.StartDirectConversation)
 	}
 
-	// Location Discovery routes
+	// Location Discovery routes (Public with optional auth for better filtering)
 	locationDiscovery := app.Party("/api/location-discovery")
 	{
 		locationDiscovery.Get("/criteria", routes.GetLocationCriteria)
-		locationDiscovery.Get("/criteria/{criteriaId}/properties", routes.GetLocationProperties)
+		locationDiscovery.Get("/criteria/{criteriaId}/properties", optionalAuthMiddleware, routes.GetLocationProperties)
 		locationDiscovery.Get("/property/{propertyId}/criteria", routes.GetPropertyLocationCriteria)
 		locationDiscovery.Post("/initialize", routes.InitializeLocationCriteriaEndpoint)
 		locationDiscovery.Post("/assign-properties", routes.AssignPropertiesToCriteriaEndpoint)
@@ -762,7 +788,12 @@ func main() {
 	// Properties Search
 	properties := app.Party("/api/properties")
 	{
-		properties.Get("/search", routes.SearchProperties)
+		properties.Get("/search", optionalAuthMiddleware, routes.SearchProperties)
+		// Public moderation endpoints (optional auth)
+		properties.Post("/{id:uint}/hide", optionalAuthMiddleware, routes.HidePropertyPublic)
+		properties.Post("/{id:uint}/report", optionalAuthMiddleware, routes.ReportPropertyPublic)
+		// Unhide property (authenticated)
+		properties.Delete("/{id:uint}/unhide", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.UnhideProperty)
 	}
 
 	// Reviews
@@ -781,6 +812,10 @@ func main() {
 		organization.Get("/agents", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.GetOrganizationAgents)
 		organization.Post("/agents", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.AddAgent)
 		organization.Patch("/agents/{agentID:uint}/status", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.UpdateAgentStatus)
+		// Organization moderation (user-level)
+		organization.Post("/{id:uint}/block", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.BlockOrganization)
+		organization.Delete("/{id:uint}/unblock", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.UnblockOrganization)
+		organization.Get("/blocked", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.GetBlockedOrganizations)
 	}
 
 	propertySales := app.Party("/api/property-sales")
@@ -792,8 +827,10 @@ func main() {
 		propertySales.Post("/{id:uint}/submit", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.SubmitPropertyForVerification)
 		propertySales.Post("/{id:uint}/publish", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.PublishProperty)
 		propertySales.Post("/{id:uint}/offers", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.CreateOffer)
-		propertySales.Get("/public", routes.GetPublishedProperties)
+		propertySales.Get("/public", optionalAuthMiddleware, routes.GetPublishedProperties)
 		propertySales.Get("/public/{id:uint}", routes.GetPublishedProperty) // Add public endpoint for individual property
+		propertySales.Post("/{id:uint}/report", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.ReportPublishedPropertySale)
+		propertySales.Post("/{id:uint}/hide", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.HidePropertySale)
 		propertySales.Get("/offers/organization", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.GetOrganizationOffers)
 		propertySales.Patch("/offers/{id:uint}/status", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.UpdateOfferStatus)
 		propertySales.Get("/{id:uint}/offer-insights", routes.PublicOfferInsights)
@@ -804,6 +841,7 @@ func main() {
 		landmarks.Post("/", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.CreateLandmark)
 		landmarks.Get("/organization", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.GetOrganizationLandmarks)
 		landmarks.Get("/public", routes.GetPublicLandmarks)
+		landmarks.Post("/{id:uint}/report", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.ReportLandmark)
 		landmarks.Patch("/{id:uint}", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.UpdateLandmark)
 		landmarks.Delete("/{id:uint}", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.DeleteLandmark)
 		landmarks.Post("/{id:uint}/submit", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.SubmitLandmarkForVerification)
@@ -827,6 +865,7 @@ func main() {
 	{
 		adminPropertySales.Get("/", routes.AdminGetPropertySales)
 		adminPropertySales.Patch("/{id:uint}/verify", routes.AdminVerifyProperty)
+		adminPropertySales.Post("/{id:uint}/publish", routes.AdminPublishProperty)
 	}
 
 	adminOrganizations := app.Party("/api/admin/organizations", accessTokenVerifierMiddleware, utils.AdminOnlyMiddleware)

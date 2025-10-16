@@ -6,6 +6,7 @@ import (
 	"apartments-clone-server/utils"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -311,13 +312,41 @@ func GetPropertiesByBoundingBox(ctx iris.Context) {
 	fmt.Printf("GetPropertiesByBoundingBox - Searching in bounds: lat[%f-%f], lng[%f-%f]\n",
 		boundingBox.LatLow, boundingBox.LatHigh, boundingBox.LngLow, boundingBox.LngHigh)
 
-	var properties []models.Property
-	result := storage.DB.Preload("Host").
+	// Extract userID for user-specific exclusions (optional auth)
+	var userID uint = 0
+	if v := ctx.Values().Get("userID"); v != nil {
+		if id, ok := v.(uint); ok {
+			userID = id
+		}
+	}
+	if userID == 0 {
+		if auth := ctx.GetHeader("Authorization"); len(auth) > 7 && auth[:7] == "Bearer " {
+			verifier := jwt.NewVerifier(jwt.HS256, []byte(os.Getenv("ACCESS_TOKEN_SECRET")))
+			verifier.WithDefaultBlocklist()
+			if token, err := verifier.VerifyToken([]byte(auth[7:])); err == nil {
+				var claims utils.AccessToken
+				if err := token.Claims(&claims); err == nil {
+					userID = claims.ID
+				}
+			}
+		}
+	}
+
+	// Build base query
+	query := storage.DB.Preload("Host").
 		Preload("Reviews").
 		Where("lat >= ? AND lat <= ? AND lng >= ? AND lng <= ? AND is_active = true AND status IN (?)",
-			boundingBox.LatLow, boundingBox.LatHigh, boundingBox.LngLow, boundingBox.LngHigh, []string{"approved", "live"}).
-		Order("created_at DESC").
-		Find(&properties)
+			boundingBox.LatLow, boundingBox.LatHigh, boundingBox.LngLow, boundingBox.LngHigh, []string{"approved", "live"})
+
+	// Apply user-specific exclusions if authenticated
+	if userID > 0 {
+		query = query.Where("id NOT IN (SELECT property_id FROM hidden_properties WHERE user_id = ?)", userID)
+		query = query.Where("id NOT IN (SELECT property_id FROM property_reports WHERE reporter_id = ?)", userID)
+		query = query.Where("host_id NOT IN (SELECT flagged_user_id FROM user_flags WHERE flagger_id = ? AND status='active')", userID)
+	}
+
+	var properties []models.Property
+	result := query.Order("created_at DESC").Find(&properties)
 
 	if result.Error != nil {
 		fmt.Printf("GetPropertiesByBoundingBox - Database error: %v\n", result.Error)

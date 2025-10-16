@@ -12,7 +12,7 @@ type User struct {
 	FirstName           string         `json:"firstName"`
 	LastName            string         `json:"lastName"`
 	Email               string         `json:"email"`
-	PhoneNumber         string         `json:"phoneNumber" gorm:"uniqueIndex"`
+	PhoneNumber         *string        `json:"phoneNumber" gorm:"uniqueIndex"`
 	Password            string         `json:"password"`
 	SocialLogin         bool           `json:"socialLogin"`
 	SocialProvider      string         `json:"socialProvider"`

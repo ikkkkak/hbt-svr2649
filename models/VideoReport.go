@@ -40,9 +40,9 @@ type UserFlag struct {
 // HiddenVideo represents a video hidden from a user's feed
 type HiddenVideo struct {
 	ID        uint           `json:"id" gorm:"primaryKey"`
-	VideoID   uint           `json:"video_id" gorm:"not null;index"`
+	VideoID   uint           `json:"video_id" gorm:"not null;index;uniqueIndex:idx_hidden_user_video"`
 	Video     Video          `json:"video" gorm:"foreignKey:VideoID"`
-	UserID    *uint          `json:"user_id" gorm:"index"` // Nullable for anonymous hides
+	UserID    *uint          `json:"user_id" gorm:"index;uniqueIndex:idx_hidden_user_video"` // Nullable for anonymous hides
 	User      *User          `json:"user" gorm:"foreignKey:UserID"`
 	Reason    string         `json:"reason" gorm:"not null"`
 	CreatedAt time.Time      `json:"created_at"`

@@ -4,10 +4,13 @@ import (
 	"apartments-clone-server/models"
 	"apartments-clone-server/services"
 	"apartments-clone-server/storage"
+	"apartments-clone-server/utils"
 	"encoding/json"
+	"os"
 	"strconv"
 
 	"github.com/kataras/iris/v12"
+	"github.com/kataras/iris/v12/middleware/jwt"
 )
 
 // Get properties near a specific location
@@ -104,9 +107,37 @@ func GetPropertiesByCoordinates(ctx iris.Context) {
 		limit = 20
 	}
 
+	// Extract userID for user-specific exclusions (optional auth)
+	var userID uint = 0
+	if v := ctx.Values().Get("userID"); v != nil {
+		if id, ok := v.(uint); ok {
+			userID = id
+		}
+	}
+	if userID == 0 {
+		if auth := ctx.GetHeader("Authorization"); len(auth) > 7 && auth[:7] == "Bearer " {
+			verifier := jwt.NewVerifier(jwt.HS256, []byte(os.Getenv("ACCESS_TOKEN_SECRET")))
+			verifier.WithDefaultBlocklist()
+			if token, err := verifier.VerifyToken([]byte(auth[7:])); err == nil {
+				var claims utils.AccessToken
+				if err := token.Claims(&claims); err == nil {
+					userID = claims.ID
+				}
+			}
+		}
+	}
+
+	// Build query with user-specific exclusions
+	query := storage.DB.Where("is_active = ?", true)
+	if userID > 0 {
+		query = query.Where("id NOT IN (SELECT property_id FROM hidden_properties WHERE user_id = ?)", userID)
+		query = query.Where("id NOT IN (SELECT property_id FROM property_reports WHERE reporter_id = ?)", userID)
+		query = query.Where("host_id NOT IN (SELECT flagged_user_id FROM user_flags WHERE flagger_id = ? AND status='active')", userID)
+	}
+
 	// Get all active properties
 	var properties []models.Property
-	result := storage.DB.Where("is_active = ?", true).Find(&properties)
+	result := query.Find(&properties)
 	if result.Error != nil {
 		ctx.JSON(iris.Map{
 			"success": false,
@@ -189,8 +220,35 @@ func GetPropertiesWithFilters(ctx iris.Context) {
 		limit = 20
 	}
 
+	// Extract userID for user-specific exclusions (optional auth)
+	var userID uint = 0
+	if v := ctx.Values().Get("userID"); v != nil {
+		if id, ok := v.(uint); ok {
+			userID = id
+		}
+	}
+	if userID == 0 {
+		if auth := ctx.GetHeader("Authorization"); len(auth) > 7 && auth[:7] == "Bearer " {
+			verifier := jwt.NewVerifier(jwt.HS256, []byte(os.Getenv("ACCESS_TOKEN_SECRET")))
+			verifier.WithDefaultBlocklist()
+			if token, err := verifier.VerifyToken([]byte(auth[7:])); err == nil {
+				var claims utils.AccessToken
+				if err := token.Claims(&claims); err == nil {
+					userID = claims.ID
+				}
+			}
+		}
+	}
+
 	// Build query
 	query := storage.DB.Where("is_active = ?", true)
+
+	// Apply user-specific exclusions if authenticated
+	if userID > 0 {
+		query = query.Where("id NOT IN (SELECT property_id FROM hidden_properties WHERE user_id = ?)", userID)
+		query = query.Where("id NOT IN (SELECT property_id FROM property_reports WHERE reporter_id = ?)", userID)
+		query = query.Where("host_id NOT IN (SELECT flagged_user_id FROM user_flags WHERE flagger_id = ? AND status='active')", userID)
+	}
 
 	// Property type filter
 	if propertyType != "" {

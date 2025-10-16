@@ -72,10 +72,21 @@ func Register(ctx iris.Context) {
 		FirstName:   userInput.FirstName,
 		LastName:    userInput.LastName,
 		Email:       strings.ToLower(userInput.Email),
+		PhoneNumber: nil, // NULL for email registration
 		Password:    hashedPassword,
 		SocialLogin: false}
 
-	storage.DB.Create(&newUser)
+	// Create user with proper error handling
+	if err := storage.DB.Create(&newUser).Error; err != nil {
+		// For email registration, only check email constraint
+		if strings.Contains(err.Error(), "idx_users_email") {
+			utils.CreateError(iris.StatusConflict, "Registration Error", "Email already exists", ctx)
+			return
+		}
+		// Generic database error
+		utils.CreateInternalServerError(ctx)
+		return
+	}
 
 	returnUser(newUser, ctx)
 }
@@ -156,11 +167,21 @@ func RegisterPhone(ctx iris.Context) {
 	newUser = models.User{
 		FirstName:   userInput.FirstName,
 		LastName:    userInput.LastName,
-		PhoneNumber: formattedPhone,
+		PhoneNumber: &formattedPhone,
 		Password:    hashedPassword,
 	}
 
-	storage.DB.Create(&newUser)
+	// Create user with proper error handling
+	if err := storage.DB.Create(&newUser).Error; err != nil {
+		// For phone registration, only check phone number constraint
+		if strings.Contains(err.Error(), "idx_users_phone_number") {
+			utils.CreateError(iris.StatusConflict, "Registration Error", "Phone number already exists", ctx)
+			return
+		}
+		// Generic database error
+		utils.CreateInternalServerError(ctx)
+		return
+	}
 
 	returnUser(newUser, ctx)
 }

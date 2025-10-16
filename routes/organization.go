@@ -62,6 +62,13 @@ func CreateOrganization(ctx iris.Context) {
 
 	fmt.Printf("🔍 DEBUG: userID = %d\n", userID)
 
+	// Check if userID is 0 (invalid)
+	if userID == 0 {
+		ctx.StatusCode(http.StatusUnauthorized)
+		ctx.JSON(iris.Map{"error": "Invalid user ID: user ID cannot be 0"})
+		return
+	}
+
 	// Check if user already has an organization
 	var existingOrg models.Organization
 	if err := storage.DB.Where("owner_id = ?", userID).First(&existingOrg).Error; err == nil {

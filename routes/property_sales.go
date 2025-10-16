@@ -5,11 +5,14 @@ import (
 	"apartments-clone-server/storage"
 	"apartments-clone-server/utils"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"os"
 	"strconv"
 	"time"
 
 	"github.com/kataras/iris/v12"
+	jwt "github.com/kataras/iris/v12/middleware/jwt"
 	"gorm.io/gorm"
 )
 
@@ -734,10 +737,87 @@ func PublishProperty(ctx iris.Context) {
 	})
 }
 
+// AdminPublishProperty allows admins to publish a verified property sale regardless of ownership
+func AdminPublishProperty(ctx iris.Context) {
+	id, err := ctx.Params().GetUint("id")
+	if err != nil || id == 0 {
+		ctx.StatusCode(http.StatusBadRequest)
+		ctx.JSON(iris.Map{"error": "Invalid property ID"})
+		return
+	}
+
+	var property models.PropertySale
+	if err := storage.DB.Where("id = ?", id).First(&property).Error; err != nil {
+		ctx.StatusCode(http.StatusNotFound)
+		ctx.JSON(iris.Map{"error": "Property not found"})
+		return
+	}
+
+	if !property.IsVerified {
+		ctx.StatusCode(http.StatusBadRequest)
+		ctx.JSON(iris.Map{"error": "Property must be verified before publishing"})
+		return
+	}
+
+	property.Status = "published"
+	property.IsPublished = true
+	if err := storage.DB.Save(&property).Error; err != nil {
+		ctx.StatusCode(http.StatusInternalServerError)
+		ctx.JSON(iris.Map{"error": "Failed to publish property"})
+		return
+	}
+
+	ctx.JSON(iris.Map{"message": "Property published successfully", "property": property})
+}
+
 // GetPublishedProperties gets all published properties for public viewing
 func GetPublishedProperties(ctx iris.Context) {
+	// Optional auth: extract userID from context or Authorization header
+	var userID uint = 0
+	if v := ctx.Values().Get("userID"); v != nil {
+		if id, ok := v.(uint); ok {
+			userID = id
+			fmt.Printf("🔍 GetPublishedProperties: User ID from context: %d\n", userID)
+		}
+	}
+	if userID == 0 {
+		if auth := ctx.GetHeader("Authorization"); len(auth) > 7 && auth[:7] == "Bearer " {
+			fmt.Printf("🔍 GetPublishedProperties: Parsing Authorization header\n")
+			verifier := jwt.NewVerifier(jwt.HS256, []byte(os.Getenv("ACCESS_TOKEN_SECRET")))
+			verifier.WithDefaultBlocklist()
+			if token, err := verifier.VerifyToken([]byte(auth[7:])); err == nil {
+				var claims utils.AccessToken
+				if err := token.Claims(&claims); err == nil {
+					userID = claims.ID
+					fmt.Printf("🔍 GetPublishedProperties: User ID from token: %d\n", userID)
+				}
+			}
+		}
+	}
+
+	q := storage.DB.Model(&models.PropertySale{}).
+		Preload("Organization").
+		Preload("Agent.User").
+		Where("property_sales.status = ? OR property_sales.is_published = ?", "published", true)
+
+	if userID > 0 {
+		fmt.Printf("🔍 GetPublishedProperties: Applying filters for user ID: %d\n", userID)
+		// Exclude items from blocked users (either the agent's user or the organization's owner)
+		q = q.Joins("LEFT JOIN agents ON agents.id = property_sales.agent_id").
+			Joins("LEFT JOIN organizations ON organizations.id = property_sales.organization_id").
+			Where("NOT EXISTS (SELECT 1 FROM user_flags uf WHERE uf.flagger_id = ? AND uf.status = 'active' AND (uf.flagged_user_id = agents.user_id OR uf.flagged_user_id = organizations.owner_id))", userID)
+
+		// Exclude hidden property sales
+		q = q.Where("NOT EXISTS (SELECT 1 FROM hidden_property_sales hps WHERE hps.property_sale_id = property_sales.id AND hps.user_id = ? AND hps.deleted_at IS NULL)", userID)
+		// Exclude properties from organizations explicitly blocked by the user
+		q = q.Where("NOT EXISTS (SELECT 1 FROM user_blocked_organizations ubo WHERE ubo.user_id = ? AND ubo.organization_id = property_sales.organization_id AND ubo.status = 'active')", userID)
+		fmt.Printf("🔍 GetPublishedProperties: Applied blocking and hiding filters\n")
+	} else {
+		fmt.Printf("🔍 GetPublishedProperties: No user ID, showing all property sales\n")
+	}
+
 	var properties []models.PropertySale
-	if err := storage.DB.Preload("Organization").Preload("Agent.User").Where("status = ? OR is_published = ?", "published", true).Order("created_at DESC").Find(&properties).Error; err != nil {
+	if err := q.Order("property_sales.created_at DESC").Find(&properties).Error; err != nil {
 		ctx.StatusCode(http.StatusInternalServerError)
 		ctx.JSON(iris.Map{"error": "Failed to fetch properties"})
 		return
@@ -763,4 +843,112 @@ func GetPublishedProperty(ctx iris.Context) {
 	}
 
 	ctx.JSON(iris.Map{"property": property})
+}
+
+// ReportPublishedPropertySale allows an authenticated user to report a published property sale
+func ReportPublishedPropertySale(ctx iris.Context) {
+	userIDVal := ctx.Values().Get("userID")
+	if userIDVal == nil {
+		ctx.StatusCode(http.StatusUnauthorized)
+		ctx.JSON(iris.Map{"error": "Unauthorized"})
+		return
+	}
+	userID := userIDVal.(uint)
+
+	id, err := ctx.Params().GetUint("id")
+	if err != nil {
+		ctx.StatusCode(http.StatusBadRequest)
+		ctx.JSON(iris.Map{"error": "Invalid property ID"})
+		return
+	}
+
+	// Ensure property is published
+	var property models.PropertySale
+	if err := storage.DB.Where("id = ? AND (status = ? OR is_published = ?)", id, "published", true).First(&property).Error; err != nil {
+		ctx.StatusCode(http.StatusNotFound)
+		ctx.JSON(iris.Map{"error": "Property not found"})
+		return
+	}
+
+	var body struct {
+		Reason      string `json:"reason"`
+		Description string `json:"description"`
+	}
+	if err := ctx.ReadJSON(&body); err != nil {
+		ctx.StatusCode(http.StatusBadRequest)
+		ctx.JSON(iris.Map{"error": "Invalid JSON"})
+		return
+	}
+
+	report := models.PropertySaleReport{
+		ReporterID:     userID,
+		PropertySaleID: property.ID,
+		Reason:         body.Reason,
+		Description:    body.Description,
+	}
+	if err := storage.DB.Create(&report).Error; err != nil {
+		ctx.StatusCode(http.StatusInternalServerError)
+		ctx.JSON(iris.Map{"error": "Failed to create report"})
+		return
+	}
+
+	ctx.JSON(iris.Map{"success": true})
+}
+
+// HidePropertySale allows an authenticated user to hide a property sale
+func HidePropertySale(ctx iris.Context) {
+	userIDInterface := ctx.Values().Get("userID")
+	if userIDInterface == nil {
+		ctx.StatusCode(http.StatusUnauthorized)
+		ctx.JSON(iris.Map{"error": "Authentication required"})
+		return
+	}
+	userID := userIDInterface.(uint)
+
+	propertySaleID, err := ctx.Params().GetUint("id")
+	if err != nil {
+		ctx.StatusCode(http.StatusBadRequest)
+		ctx.JSON(iris.Map{"error": "Invalid property sale ID"})
+		return
+	}
+
+	var input struct {
+		Reason string `json:"reason" validate:"required"`
+	}
+	if err := ctx.ReadJSON(&input); err != nil {
+		ctx.StatusCode(http.StatusBadRequest)
+		ctx.JSON(iris.Map{"error": "Invalid JSON"})
+		return
+	}
+
+	// Check if property sale exists and is published
+	var propertySale models.PropertySale
+	if err := storage.DB.Where("id = ? AND (status = ? OR is_published = ?)", propertySaleID, "published", true).First(&propertySale).Error; err != nil {
+		ctx.StatusCode(http.StatusNotFound)
+		ctx.JSON(iris.Map{"error": "Property sale not found or not published"})
+		return
+	}
+
+	// Check if already hidden by this user
+	var existingHide models.HiddenPropertySale
+	if err := storage.DB.Where("user_id = ? AND property_sale_id = ? AND deleted_at IS NULL", userID, propertySaleID).First(&existingHide).Error; err == nil {
+		ctx.JSON(iris.Map{"success": true, "message": "Property sale already hidden"})
+		return
+	}
+
+	hide := models.HiddenPropertySale{
+		UserID:         &userID,
+		PropertySaleID: propertySaleID,
+		Reason:         input.Reason,
+	}
+
+	if err := storage.DB.Create(&hide).Error; err != nil {
+		fmt.Printf("❌ Error hiding property sale: %v\n", err)
+		ctx.StatusCode(http.StatusInternalServerError)
+		ctx.JSON(iris.Map{"error": "Failed to hide property sale"})
+		return
+	}
+
+	fmt.Printf("✅ Property sale %d hidden by user %d\n", propertySaleID, userID)
+	ctx.JSON(iris.Map{"success": true, "message": "Property sale hidden successfully"})
 }

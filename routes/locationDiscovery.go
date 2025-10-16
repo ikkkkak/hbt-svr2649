@@ -3,11 +3,14 @@ package routes
 import (
 	"apartments-clone-server/models"
 	"apartments-clone-server/storage"
+	"apartments-clone-server/utils"
 	"fmt"
 	"math"
+	"os"
 	"strconv"
 
 	"github.com/kataras/iris/v12"
+	"github.com/kataras/iris/v12/middleware/jwt"
 	"gorm.io/gorm"
 )
 
@@ -80,9 +83,39 @@ func GetLocationProperties(ctx iris.Context) {
 		return
 	}
 
+	// Extract userID for user-specific exclusions (optional auth)
+	var userID uint = 0
+	if v := ctx.Values().Get("userID"); v != nil {
+		if id, ok := v.(uint); ok {
+			userID = id
+		}
+	}
+	if userID == 0 {
+		if auth := ctx.GetHeader("Authorization"); len(auth) > 7 && auth[:7] == "Bearer " {
+			verifier := jwt.NewVerifier(jwt.HS256, []byte(os.Getenv("ACCESS_TOKEN_SECRET")))
+			verifier.WithDefaultBlocklist()
+			if token, err := verifier.VerifyToken([]byte(auth[7:])); err == nil {
+				var claims utils.AccessToken
+				if err := token.Claims(&claims); err == nil {
+					userID = claims.ID
+				}
+			}
+		}
+	}
+
+	// Build base query for properties
+	query := storage.DB.Where("location_criteria_id = ? AND is_active = ?", criteriaID, true)
+
+	// Apply user-specific exclusions if authenticated
+	if userID > 0 {
+		query = query.Where("property_id NOT IN (SELECT property_id FROM hidden_properties WHERE user_id = ?)", userID)
+		query = query.Where("property_id NOT IN (SELECT property_id FROM property_reports WHERE reporter_id = ?)", userID)
+		query = query.Where("property_id NOT IN (SELECT p.id FROM properties p JOIN user_flags uf ON p.host_id = uf.flagged_user_id WHERE uf.flagger_id = ? AND uf.status='active')", userID)
+	}
+
 	// Get properties assigned to this criteria (only active + approved/live)
 	var criteriaProperties []models.LocationCriteriaProperty
-	if err := storage.DB.Where("location_criteria_id = ? AND is_active = ?", criteriaID, true).
+	if err := query.
 		Preload("Property", func(db *gorm.DB) *gorm.DB {
 			return db.Where("is_active = ? AND status IN (?)", true, []string{"approved", "live"})
 		}).

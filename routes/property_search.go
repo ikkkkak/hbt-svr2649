@@ -3,10 +3,13 @@ package routes
 import (
 	"apartments-clone-server/models"
 	"apartments-clone-server/storage"
+	"apartments-clone-server/utils"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/kataras/iris/v12"
+	"github.com/kataras/iris/v12/middleware/jwt"
 )
 
 // SearchProperties handles property search with multiple filters
@@ -24,6 +27,32 @@ func SearchProperties(ctx iris.Context) {
 	fmt.Printf("  Full URL: %s\n", ctx.Request().URL.String())
 
 	q := storage.DB.Model(&models.Property{})
+
+	// Exclusions based on user moderation (optional auth)
+	var userID uint = 0
+	if v := ctx.Values().Get("userID"); v != nil {
+		if id, ok := v.(uint); ok {
+			userID = id
+		}
+	}
+	if userID == 0 {
+		if auth := ctx.GetHeader("Authorization"); len(auth) > 7 && auth[:7] == "Bearer " {
+			verifier := jwt.NewVerifier(jwt.HS256, []byte(os.Getenv("ACCESS_TOKEN_SECRET")))
+			verifier.WithDefaultBlocklist()
+			if token, err := verifier.VerifyToken([]byte(auth[7:])); err == nil {
+				var claims utils.AccessToken
+				if err := token.Claims(&claims); err == nil {
+					userID = claims.ID
+				}
+			}
+		}
+	}
+	if userID > 0 {
+		// Use NOT EXISTS to allow index-only lookups and avoid IN list pitfalls
+		q = q.Where("NOT EXISTS (SELECT 1 FROM hidden_properties hp WHERE hp.property_id = properties.id AND hp.user_id = ?)", userID)
+		q = q.Where("NOT EXISTS (SELECT 1 FROM property_reports pr WHERE pr.property_id = properties.id AND pr.reporter_id = ?)", userID)
+		q = q.Where("NOT EXISTS (SELECT 1 FROM user_flags uf WHERE uf.flagged_user_id = properties.host_id AND uf.flagger_id = ? AND uf.status='active')", userID)
+	}
 
 	// Text/location filters
 	if city := strings.TrimSpace(ctx.URLParam("city")); city != "" {

@@ -26,6 +26,14 @@ func UserIDMiddleware(ctx iris.Context) {
 // Use this for routes that don't have {id} parameter in URL
 func UserIDFromTokenMiddleware(ctx iris.Context) {
 	claims := jwt.Get(ctx).(*AccessToken)
+
+	// Validate that the user ID is valid (not 0)
+	if claims.ID == 0 {
+		ctx.StatusCode(iris.StatusUnauthorized)
+		ctx.JSON(iris.Map{"error": "Invalid user ID in token"})
+		return
+	}
+
 	ctx.Values().Set("userID", claims.ID)
 	ctx.Next()
 }
@@ -39,8 +47,8 @@ func AdminOnlyMiddleware(ctx iris.Context) {
 		ctx.JSON(iris.Map{"error": "forbidden", "message": "admin access required"})
 		return
 	}
-    // Ensure userID is available to downstream handlers
-    ctx.Values().Set("userID", claims.ID)
+	// Ensure userID is available to downstream handlers
+	ctx.Values().Set("userID", claims.ID)
 	ctx.Next()
 }
 
