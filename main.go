@@ -17,7 +17,6 @@ import (
 	"github.com/joho/godotenv"
 	"github.com/kataras/iris/v12"
 	"github.com/kataras/iris/v12/middleware/jwt"
-	jsonWT "github.com/kataras/iris/v12/middleware/jwt"
 	"gorm.io/gorm"
 )
 
@@ -34,7 +33,7 @@ func optionalAuthMiddleware(ctx iris.Context) {
 
 		// Attempt verification (do not rely on status code)
 		accessTokenVerifierMiddleware(ctx)
-		if claims := jsonWT.Get(ctx); claims != nil {
+		if claims := jwt.Get(ctx); claims != nil {
 			if accessToken, ok := claims.(*utils.AccessToken); ok {
 				ctx.Values().Set("userID", accessToken.ID)
 				fmt.Printf("🔍 Optional auth: User ID %d authenticated\n", accessToken.ID)
@@ -680,8 +679,8 @@ func main() {
 
 	video := app.Party("/api/video")
 	{
-		video.Post("/", accessTokenVerifierMiddleware, routes.CreateVideo)
-		video.Get("/feed", accessTokenVerifierMiddleware, routes.GetVideoFeed)
+		video.Post("/", routes.CreateVideo)
+		video.Get("/feed", routes.GetVideoFeed)
 		video.Post("/like", accessTokenVerifierMiddleware, routes.LikeVideo)
 		video.Post("/unlike", accessTokenVerifierMiddleware, routes.UnlikeVideo)
 		video.Post("/save", accessTokenVerifierMiddleware, routes.SaveVideo)
@@ -706,6 +705,8 @@ func main() {
 		propertySaleVideos.Post("/{id:uint}/unlike", accessTokenVerifierMiddleware, routes.UnlikePropertySaleVideo)
 		propertySaleVideos.Post("/{id:uint}/save", accessTokenVerifierMiddleware, routes.SavePropertySaleVideo)
 		propertySaleVideos.Post("/{id:uint}/unsave", accessTokenVerifierMiddleware, routes.UnsavePropertySaleVideo)
+		propertySaleVideos.Get("/{id:uint}/comments", optionalAuthMiddleware, routes.GetPropertySaleVideoComments)
+		propertySaleVideos.Post("/{id:uint}/comments", accessTokenVerifierMiddleware, routes.CreatePropertySaleVideoComment)
 	}
 
 	experience := app.Party("/api/experience")
@@ -754,6 +755,8 @@ func main() {
 		// Chat
 		groups.Get("/{groupID}/messages", accessTokenVerifierMiddleware, routes.ListGroupMessages)
 		groups.Post("/{groupID}/messages", accessTokenVerifierMiddleware, routes.SendGroupMessage)
+		groups.Get("/{groupID}/messages/{msgId:uint}/reads", accessTokenVerifierMiddleware, routes.GetMessageReads)
+		groups.Post("/{groupID}/messages/{msgId:uint}/reads", accessTokenVerifierMiddleware, routes.MarkMessageRead)
 		groups.Post("/{groupID}/typing", accessTokenVerifierMiddleware, routes.Typing)
 		groups.Get("/{groupID}/typing", accessTokenVerifierMiddleware, routes.ListTyping)
 		// Wishlist

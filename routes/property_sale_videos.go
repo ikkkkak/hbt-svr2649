@@ -116,8 +116,28 @@ func GetPropertySaleVideoFeed(ctx iris.Context) {
 
 		// Create a video entry for each video URL
 		for i, videoURL := range videoURLs {
+			videoID := fmt.Sprintf("%d_%d", ps.ID, i)
+
+			// Check if user has liked/saved this video (if authenticated)
+			var liked, saved bool
+			if userID > 0 {
+				// For synthetic videos, we'll check against the property sale ID
+				var likeCount, saveCount int64
+				storage.DB.Model(&models.PropertySaleVideoLike{}).Where("property_sale_video_id = ? AND user_id = ?", ps.ID, userID).Count(&likeCount)
+				storage.DB.Model(&models.PropertySaleVideoSave{}).Where("property_sale_video_id = ? AND user_id = ?", ps.ID, userID).Count(&saveCount)
+				liked = likeCount > 0
+				saved = saveCount > 0
+			}
+
+			// Get organization branding
+			orgLogo := ""
+			orgName := ps.Organization.Name
+			if ps.Organization.Logo != "" {
+				orgLogo = ps.Organization.Logo
+			}
+
 			video := map[string]interface{}{
-				"ID":             fmt.Sprintf("%d_%d", ps.ID, i), // Unique ID for each video
+				"ID":             videoID, // Unique ID for each video
 				"propertySaleID": ps.ID,
 				"propertySale":   ps,
 				"userID":         ps.Organization.OwnerID,
@@ -131,10 +151,15 @@ func GetPropertySaleVideoFeed(ctx iris.Context) {
 				"viewCount":      0,
 				"isFlagged":      false,
 				"status":         "approved",
-				"liked":          false,
-				"saved":          false,
-				"CreatedAt":      ps.CreatedAt,
-				"UpdatedAt":      ps.UpdatedAt,
+				"liked":          liked,
+				"saved":          saved,
+				"organization": map[string]interface{}{
+					"id":      ps.Organization.ID,
+					"name":    orgName,
+					"logoURL": orgLogo,
+				},
+				"CreatedAt": ps.CreatedAt,
+				"UpdatedAt": ps.UpdatedAt,
 			}
 			videos = append(videos, video)
 		}
@@ -276,4 +301,87 @@ func UnsavePropertySaleVideo(ctx iris.Context) {
 	}
 
 	ctx.JSON(iris.Map{"success": true, "message": "Video unsaved"})
+}
+
+// GetPropertySaleVideoComments gets comments for a property sale video
+func GetPropertySaleVideoComments(ctx iris.Context) {
+	videoID, err := ctx.Params().GetUint("id")
+	if err != nil {
+		ctx.StatusCode(http.StatusBadRequest)
+		ctx.JSON(iris.Map{"error": "Invalid video ID"})
+		return
+	}
+
+	// Simple pagination
+	page := ctx.URLParamIntDefault("page", 1)
+	limit := ctx.URLParamIntDefault("limit", 20)
+	if page < 1 {
+		page = 1
+	}
+	if limit < 1 || limit > 50 {
+		limit = 20
+	}
+	offset := (page - 1) * limit
+
+	var comments []models.PropertySaleVideoComment
+	if err := storage.DB.
+		Preload("User").
+		Where("property_sale_video_id = ?", videoID).
+		Order("created_at DESC").
+		Limit(limit).
+		Offset(offset).
+		Find(&comments).Error; err != nil {
+		ctx.StatusCode(http.StatusInternalServerError)
+		ctx.JSON(iris.Map{"error": "Failed to fetch comments"})
+		return
+	}
+
+	ctx.JSON(iris.Map{
+		"comments": comments,
+		"pagination": iris.Map{
+			"page":  page,
+			"limit": limit,
+		},
+	})
+}
+
+// CreatePropertySaleVideoComment creates a comment on a property sale video
+func CreatePropertySaleVideoComment(ctx iris.Context) {
+	claims := jsonWT.Get(ctx).(*utils.AccessToken)
+	userID := claims.ID
+
+	videoID, err := ctx.Params().GetUint("id")
+	if err != nil {
+		ctx.StatusCode(http.StatusBadRequest)
+		ctx.JSON(iris.Map{"error": "Invalid video ID"})
+		return
+	}
+
+	var input struct {
+		Content string `json:"content" validate:"required"`
+	}
+	if err := ctx.ReadJSON(&input); err != nil {
+		ctx.StatusCode(http.StatusBadRequest)
+		ctx.JSON(iris.Map{"error": "Invalid JSON"})
+		return
+	}
+
+	comment := models.PropertySaleVideoComment{
+		PropertySaleVideoID: videoID,
+		UserID:              userID,
+		Content:             input.Content,
+	}
+
+	if err := storage.DB.Create(&comment).Error; err != nil {
+		utils.CreateInternalServerError(ctx)
+		return
+	}
+
+	// Update comments count
+	storage.DB.Model(&models.PropertySaleVideo{}).Where("id = ?", videoID).Update("comments_count", gorm.Expr("comments_count + 1"))
+
+	// Load the comment with user data
+	storage.DB.Preload("User").First(&comment, comment.ID)
+
+	ctx.JSON(iris.Map{"success": true, "comment": comment})
 }
