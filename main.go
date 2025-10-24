@@ -203,6 +203,38 @@ func main() {
 	accessTokenVerifierMiddleware := accessTokenVerifier.Verify(func() interface{} {
 		return new(utils.AccessToken)
 	})
+	// Fixed JWT middleware - ensure userID is set before handler
+	accessTokenVerifierMiddleware = func(ctx iris.Context) {
+		fmt.Printf("🔍 JWT Middleware - Starting authentication\n")
+
+		// Call the original middleware
+		accessTokenVerifier.Verify(func() interface{} {
+			return new(utils.AccessToken)
+		})(ctx)
+
+		// Extract userID from claims if token was valid
+		if claims := jwt.Get(ctx); claims != nil {
+			if accessToken, ok := claims.(*utils.AccessToken); ok {
+				ctx.Values().Set("userID", accessToken.ID)
+				fmt.Printf("✅ JWT Middleware - User ID %d authenticated and set in context\n", accessToken.ID)
+			} else {
+				fmt.Printf("❌ JWT Middleware - Claims not AccessToken type: %T\n", claims)
+			}
+		} else {
+			fmt.Printf("❌ JWT Middleware - No claims found\n")
+		}
+
+		// Verify userID is set before calling next
+		if userID, ok := ctx.Values().Get("userID").(uint); ok && userID > 0 {
+			fmt.Printf("✅ JWT Middleware - UserID %d confirmed in context before next\n", userID)
+			ctx.Next()
+		} else {
+			fmt.Printf("❌ JWT Middleware - UserID not properly set in context - BLOCKING REQUEST\n")
+			ctx.StatusCode(401)
+			ctx.JSON(iris.Map{"error": "unauthorized"})
+			return
+		}
+	}
 
 	refreshTokenVerifier := jwt.NewVerifier(jwt.HS256, []byte(os.Getenv("REFRESH_TOKEN_SECRET")))
 	refreshTokenVerifier.WithDefaultBlocklist()
@@ -686,7 +718,7 @@ func main() {
 		video.Post("/save", accessTokenVerifierMiddleware, routes.SaveVideo)
 		video.Post("/unsave", accessTokenVerifierMiddleware, routes.UnsaveVideo)
 		video.Post("/comment", accessTokenVerifierMiddleware, routes.CreateVideoComment)
-		video.Get("/comment/{videoID}", accessTokenVerifierMiddleware, routes.GetVideoComments)
+		video.Get("/comment/{videoID}", optionalAuthMiddleware, routes.GetVideoComments)
 		video.Put("/comment/{id}", accessTokenVerifierMiddleware, routes.UpdateVideoComment)
 		video.Delete("/comment/{id}", accessTokenVerifierMiddleware, routes.DeleteVideoComment)
 		video.Post("/comment/like", accessTokenVerifierMiddleware, routes.LikeVideoComment)
@@ -771,11 +803,33 @@ func main() {
 		groups.Get("/my-requests", accessTokenVerifierMiddleware, routes.GetMyJoinRequests)
 		groups.Get("/{groupID}/requests", accessTokenVerifierMiddleware, routes.GetGroupJoinRequests)
 		groups.Post("/requests/{requestID}/respond", accessTokenVerifierMiddleware, routes.RespondToJoinRequest)
+		// Group Management - Clean Implementation
+		groups.Post("/{groupID}/quit", accessTokenVerifierMiddleware, routes.QuitGroup)
+		groups.Post("/{groupID}/block/{userID:uint}", accessTokenVerifierMiddleware, routes.BlockUserInGroup)
+		groups.Delete("/{groupID}/unblock/{userID:uint}", accessTokenVerifierMiddleware, routes.UnblockUserInGroup)
+		groups.Get("/{groupID}/quit-history", accessTokenVerifierMiddleware, routes.GetGroupQuitHistory)
+		groups.Get("/{groupID}/blocked-users", accessTokenVerifierMiddleware, routes.GetBlockedUsersInGroup)
 	}
 
 	chat := app.Party("/api/chat")
 	{
 		chat.Post("/start-direct", accessTokenVerifierMiddleware, routes.StartDirectConversation)
+	}
+
+	// Direct Messages - Clean Implementation
+	directMessages := app.Party("/api/direct-messages")
+	{
+		directMessages.Post("/", accessTokenVerifierMiddleware, routes.SendDirectMessage)
+		directMessages.Get("/{userID:uint}", accessTokenVerifierMiddleware, routes.GetDirectMessages)
+		directMessages.Post("/{messageID:uint}/read", accessTokenVerifierMiddleware, routes.MarkDirectMessageRead)
+	}
+
+	// User Blocking for Direct Messages - Clean Implementation
+	userBlocks := app.Party("/api/user-blocks")
+	{
+		userBlocks.Post("/{userID:uint}", accessTokenVerifierMiddleware, routes.BlockUser)
+		userBlocks.Delete("/{userID:uint}", accessTokenVerifierMiddleware, routes.UnblockUser)
+		userBlocks.Get("/", accessTokenVerifierMiddleware, routes.GetBlockedUsers)
 	}
 
 	// Location Discovery routes (Public with optional auth for better filtering)

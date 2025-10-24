@@ -23,7 +23,9 @@ type GroupMember struct {
 	ID        uint           `json:"id" gorm:"primaryKey"`
 	GroupID   uint           `json:"group_id" gorm:"index;not null"`
 	UserID    uint           `json:"user_id" gorm:"index;not null"`
-	Role      string         `json:"role" gorm:"size:20;default:'member'"` // owner, admin, moderator, member
+	Role      string         `json:"role" gorm:"size:20;default:'member'"`   // owner, admin, moderator, member
+	Status    string         `json:"status" gorm:"size:20;default:'active'"` // active, quit, blocked
+	QuitAt    *time.Time     `json:"quit_at" gorm:"index"`
 	CreatedAt time.Time      `json:"created_at"`
 	UpdatedAt time.Time      `json:"updated_at"`
 	DeletedAt gorm.DeletedAt `json:"deleted_at" gorm:"index"`
@@ -69,6 +71,28 @@ type GroupBan struct {
 	UserID    uint           `json:"user_id" gorm:"index;not null"`
 	Reason    string         `json:"reason" gorm:"size:200"`
 	CreatedBy uint           `json:"created_by" gorm:"index;not null"`
+	CreatedAt time.Time      `json:"created_at"`
+	DeletedAt gorm.DeletedAt `json:"deleted_at" gorm:"index"`
+}
+
+// GroupUserBlock represents when a user blocks another user within a group
+type GroupUserBlock struct {
+	ID        uint           `json:"id" gorm:"primaryKey"`
+	GroupID   uint           `json:"group_id" gorm:"index;not null"`
+	BlockerID uint           `json:"blocker_id" gorm:"index;not null"` // User who is blocking
+	BlockedID uint           `json:"blocked_id" gorm:"index;not null"` // User who is being blocked
+	Reason    string         `json:"reason" gorm:"size:200"`
+	CreatedAt time.Time      `json:"created_at"`
+	DeletedAt gorm.DeletedAt `json:"deleted_at" gorm:"index"`
+}
+
+// GroupQuit represents when a user quits a group
+type GroupQuit struct {
+	ID        uint           `json:"id" gorm:"primaryKey"`
+	GroupID   uint           `json:"group_id" gorm:"index;not null"`
+	UserID    uint           `json:"user_id" gorm:"index;not null"`
+	Reason    string         `json:"reason" gorm:"size:200"`
+	QuitAt    time.Time      `json:"quit_at" gorm:"index"`
 	CreatedAt time.Time      `json:"created_at"`
 	DeletedAt gorm.DeletedAt `json:"deleted_at" gorm:"index"`
 }

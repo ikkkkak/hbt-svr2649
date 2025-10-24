@@ -5,6 +5,7 @@ import (
 	"apartments-clone-server/storage"
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -13,7 +14,7 @@ import (
 
 func requireGroupRole(groupID uint, userID uint, roles ...string) bool {
 	var member models.GroupMember
-	if err := storage.DB.Where("group_id = ? AND user_id = ?", groupID, userID).First(&member).Error; err != nil {
+	if err := storage.DB.Where("group_id = ? AND user_id = ? AND status = 'active'", groupID, userID).First(&member).Error; err != nil {
 		return false
 	}
 	for _, r := range roles {
@@ -22,6 +23,14 @@ func requireGroupRole(groupID uint, userID uint, roles ...string) bool {
 		}
 	}
 	return false
+}
+
+func isUserBlockedInGroup(groupID uint, userID uint) bool {
+	var count int64
+	storage.DB.Model(&models.GroupUserBlock{}).
+		Where("group_id = ? AND blocked_id = ? AND deleted_at IS NULL", groupID, userID).
+		Count(&count)
+	return count > 0
 }
 
 // CreateGroup - owner becomes member with owner role
@@ -281,4 +290,276 @@ func MarkMessageRead(ctx iris.Context) {
 		return
 	}
 	ctx.JSON(iris.Map{"ok": true})
+}
+
+// QuitGroup - User quits a group
+func QuitGroup(ctx iris.Context) {
+	fmt.Printf("🔍 QuitGroup called - Headers: %+v\n", ctx.Request().Header)
+	fmt.Printf("🔍 QuitGroup called - Auth header: %s\n", ctx.GetHeader("Authorization"))
+
+	uid, ok := ctx.Values().Get("userID").(uint)
+	fmt.Printf("🔍 QuitGroup - UserID from context: %d, ok: %v\n", uid, ok)
+
+	if !ok || uid == 0 {
+		fmt.Printf("❌ QuitGroup - Unauthorized: uid=%d, ok=%v\n", uid, ok)
+		ctx.StatusCode(http.StatusUnauthorized)
+		ctx.JSON(iris.Map{"error": "unauthorized"})
+		return
+	}
+
+	groupID, err := ctx.Params().GetUint("groupID")
+	if err != nil {
+		ctx.StatusCode(http.StatusBadRequest)
+		ctx.JSON(iris.Map{"error": "invalid group id"})
+		return
+	}
+
+	var body struct {
+		Reason string `json:"reason"`
+	}
+	ctx.ReadJSON(&body)
+
+	// Check if user is a member
+	var member models.GroupMember
+	if err := storage.DB.Where("group_id = ? AND user_id = ? AND status = 'active'", groupID, uid).First(&member).Error; err != nil {
+		ctx.StatusCode(http.StatusNotFound)
+		ctx.JSON(iris.Map{"error": "not a member of this group"})
+		return
+	}
+
+	// Check if user is the owner
+	if member.Role == "owner" {
+		ctx.StatusCode(http.StatusForbidden)
+		ctx.JSON(iris.Map{"error": "group owner cannot quit. Transfer ownership first or delete the group"})
+		return
+	}
+
+	// Update member status to quit
+	now := time.Now()
+	member.Status = "quit"
+	member.QuitAt = &now
+	if err := storage.DB.Save(&member).Error; err != nil {
+		ctx.StatusCode(http.StatusInternalServerError)
+		ctx.JSON(iris.Map{"error": "failed to quit group"})
+		return
+	}
+
+	// Create quit record
+	quitRecord := models.GroupQuit{
+		GroupID: groupID,
+		UserID:  uid,
+		Reason:  body.Reason,
+		QuitAt:  now,
+	}
+	storage.DB.Create(&quitRecord)
+
+	ctx.JSON(iris.Map{
+		"message": "Successfully quit the group",
+		"quit_at": now,
+	})
+}
+
+// BlockUserInGroup - Block a user within a group
+func BlockUserInGroup(ctx iris.Context) {
+	uid, ok := ctx.Values().Get("userID").(uint)
+	if !ok || uid == 0 {
+		ctx.StatusCode(http.StatusUnauthorized)
+		return
+	}
+
+	groupID, err := ctx.Params().GetUint("groupID")
+	if err != nil {
+		ctx.StatusCode(http.StatusBadRequest)
+		ctx.JSON(iris.Map{"error": "invalid group id"})
+		return
+	}
+
+	blockedUserID, err := ctx.Params().GetUint("userID")
+	if err != nil {
+		ctx.StatusCode(http.StatusBadRequest)
+		ctx.JSON(iris.Map{"error": "invalid user id"})
+		return
+	}
+
+	if uid == blockedUserID {
+		ctx.StatusCode(http.StatusBadRequest)
+		ctx.JSON(iris.Map{"error": "cannot block yourself"})
+		return
+	}
+
+	var body struct {
+		Reason string `json:"reason"`
+	}
+	ctx.ReadJSON(&body)
+
+	// Check if blocker is a member
+	if !requireGroupRole(groupID, uid, "owner", "admin", "moderator", "member") {
+		ctx.StatusCode(http.StatusForbidden)
+		ctx.JSON(iris.Map{"error": "not a member of this group"})
+		return
+	}
+
+	// Check if blocked user is a member
+	if !requireGroupRole(groupID, blockedUserID, "owner", "admin", "moderator", "member") {
+		ctx.StatusCode(http.StatusNotFound)
+		ctx.JSON(iris.Map{"error": "user is not a member of this group"})
+		return
+	}
+
+	// Check if already blocked
+	var existingBlock models.GroupUserBlock
+	if err := storage.DB.Where("group_id = ? AND blocker_id = ? AND blocked_id = ? AND deleted_at IS NULL",
+		groupID, uid, blockedUserID).First(&existingBlock).Error; err == nil {
+		ctx.StatusCode(http.StatusConflict)
+		ctx.JSON(iris.Map{"error": "user is already blocked"})
+		return
+	}
+
+	// Create block record
+	blockRecord := models.GroupUserBlock{
+		GroupID:   groupID,
+		BlockerID: uid,
+		BlockedID: blockedUserID,
+		Reason:    body.Reason,
+	}
+	if err := storage.DB.Create(&blockRecord).Error; err != nil {
+		ctx.StatusCode(http.StatusInternalServerError)
+		ctx.JSON(iris.Map{"error": "failed to block user"})
+		return
+	}
+
+	ctx.JSON(iris.Map{
+		"message":         "User blocked successfully",
+		"blocked_user_id": blockedUserID,
+	})
+}
+
+// UnblockUserInGroup - Unblock a user within a group
+func UnblockUserInGroup(ctx iris.Context) {
+	uid, ok := ctx.Values().Get("userID").(uint)
+	if !ok || uid == 0 {
+		ctx.StatusCode(http.StatusUnauthorized)
+		return
+	}
+
+	groupID, err := ctx.Params().GetUint("groupID")
+	if err != nil {
+		ctx.StatusCode(http.StatusBadRequest)
+		ctx.JSON(iris.Map{"error": "invalid group id"})
+		return
+	}
+
+	blockedUserID, err := ctx.Params().GetUint("userID")
+	if err != nil {
+		ctx.StatusCode(http.StatusBadRequest)
+		ctx.JSON(iris.Map{"error": "invalid user id"})
+		return
+	}
+
+	// Check if blocker is a member
+	if !requireGroupRole(groupID, uid, "owner", "admin", "moderator", "member") {
+		ctx.StatusCode(http.StatusForbidden)
+		ctx.JSON(iris.Map{"error": "not a member of this group"})
+		return
+	}
+
+	// Soft delete the block record
+	if err := storage.DB.Where("group_id = ? AND blocker_id = ? AND blocked_id = ? AND deleted_at IS NULL",
+		groupID, uid, blockedUserID).Delete(&models.GroupUserBlock{}).Error; err != nil {
+		ctx.StatusCode(http.StatusNotFound)
+		ctx.JSON(iris.Map{"error": "block record not found"})
+		return
+	}
+
+	ctx.JSON(iris.Map{
+		"message":           "User unblocked successfully",
+		"unblocked_user_id": blockedUserID,
+	})
+}
+
+// GetGroupQuitHistory - Get users who have quit the group
+func GetGroupQuitHistory(ctx iris.Context) {
+	uid, ok := ctx.Values().Get("userID").(uint)
+	if !ok || uid == 0 {
+		ctx.StatusCode(http.StatusUnauthorized)
+		return
+	}
+
+	groupID, err := ctx.Params().GetUint("groupID")
+	if err != nil {
+		ctx.StatusCode(http.StatusBadRequest)
+		ctx.JSON(iris.Map{"error": "invalid group id"})
+		return
+	}
+
+	// Check if user is a member (owner, admin, moderator can see quit history)
+	if !requireGroupRole(groupID, uid, "owner", "admin", "moderator") {
+		ctx.StatusCode(http.StatusForbidden)
+		ctx.JSON(iris.Map{"error": "insufficient permissions"})
+		return
+	}
+
+	var quits []struct {
+		ID        uint      `json:"id"`
+		UserID    uint      `json:"user_id"`
+		UserName  string    `json:"user_name"`
+		Reason    string    `json:"reason"`
+		QuitAt    time.Time `json:"quit_at"`
+		CreatedAt time.Time `json:"created_at"`
+	}
+
+	storage.DB.Table("group_quits").
+		Select("group_quits.id, group_quits.user_id, users.name as user_name, group_quits.reason, group_quits.quit_at, group_quits.created_at").
+		Joins("JOIN users ON users.id = group_quits.user_id").
+		Where("group_quits.group_id = ? AND group_quits.deleted_at IS NULL", groupID).
+		Order("group_quits.quit_at DESC").
+		Scan(&quits)
+
+	ctx.JSON(iris.Map{
+		"quits": quits,
+		"total": len(quits),
+	})
+}
+
+// GetBlockedUsersInGroup - Get users blocked by current user in the group
+func GetBlockedUsersInGroup(ctx iris.Context) {
+	uid, ok := ctx.Values().Get("userID").(uint)
+	if !ok || uid == 0 {
+		ctx.StatusCode(http.StatusUnauthorized)
+		return
+	}
+
+	groupID, err := ctx.Params().GetUint("groupID")
+	if err != nil {
+		ctx.StatusCode(http.StatusBadRequest)
+		ctx.JSON(iris.Map{"error": "invalid group id"})
+		return
+	}
+
+	// Check if user is a member
+	if !requireGroupRole(groupID, uid, "owner", "admin", "moderator", "member") {
+		ctx.StatusCode(http.StatusForbidden)
+		ctx.JSON(iris.Map{"error": "not a member of this group"})
+		return
+	}
+
+	var blockedUsers []struct {
+		ID        uint      `json:"id"`
+		BlockedID uint      `json:"blocked_id"`
+		UserName  string    `json:"user_name"`
+		Reason    string    `json:"reason"`
+		CreatedAt time.Time `json:"created_at"`
+	}
+
+	storage.DB.Table("group_user_blocks").
+		Select("group_user_blocks.id, group_user_blocks.blocked_id, users.name as user_name, group_user_blocks.reason, group_user_blocks.created_at").
+		Joins("JOIN users ON users.id = group_user_blocks.blocked_id").
+		Where("group_user_blocks.group_id = ? AND group_user_blocks.blocker_id = ? AND group_user_blocks.deleted_at IS NULL", groupID, uid).
+		Order("group_user_blocks.created_at DESC").
+		Scan(&blockedUsers)
+
+	ctx.JSON(iris.Map{
+		"blocked_users": blockedUsers,
+		"total":         len(blockedUsers),
+	})
 }
