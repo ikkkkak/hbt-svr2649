@@ -204,13 +204,15 @@ func main() {
 		return new(utils.AccessToken)
 	})
 	// Fixed JWT middleware - ensure userID is set before handler
+	originalVerifier := accessTokenVerifier.Verify(func() interface{} {
+		return new(utils.AccessToken)
+	})
+
 	accessTokenVerifierMiddleware = func(ctx iris.Context) {
 		fmt.Printf("🔍 JWT Middleware - Starting authentication\n")
 
 		// Call the original middleware
-		accessTokenVerifier.Verify(func() interface{} {
-			return new(utils.AccessToken)
-		})(ctx)
+		originalVerifier(ctx)
 
 		// Extract userID from claims if token was valid
 		if claims := jwt.Get(ctx); claims != nil {
@@ -227,13 +229,14 @@ func main() {
 		// Verify userID is set before calling next
 		if userID, ok := ctx.Values().Get("userID").(uint); ok && userID > 0 {
 			fmt.Printf("✅ JWT Middleware - UserID %d confirmed in context before next\n", userID)
-			ctx.Next()
 		} else {
 			fmt.Printf("❌ JWT Middleware - UserID not properly set in context - BLOCKING REQUEST\n")
 			ctx.StatusCode(401)
 			ctx.JSON(iris.Map{"error": "unauthorized"})
 			return
 		}
+
+		ctx.Next()
 	}
 
 	refreshTokenVerifier := jwt.NewVerifier(jwt.HS256, []byte(os.Getenv("REFRESH_TOKEN_SECRET")))
@@ -309,6 +312,11 @@ func main() {
 		user.Put("/profile", accessTokenVerifierMiddleware, routes.CreateOrUpdateUserProfile)
 		user.Delete("/profile", accessTokenVerifierMiddleware, routes.DeleteUserProfile)
 		user.Delete("/account", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.DeleteUserAccount)
+
+		// User Wishlist routes
+		user.Get("/wishlist", accessTokenVerifierMiddleware, routes.GetUserWishlist)
+		user.Post("/wishlist", accessTokenVerifierMiddleware, routes.AddToUserWishlist)
+		user.Delete("/wishlist/{propertyID:uint}", accessTokenVerifierMiddleware, routes.RemoveFromUserWishlist)
 
 		// User moderation routes
 		user.Get("/blocked", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.GetBlockedUsers)
@@ -753,8 +761,13 @@ func main() {
 		experience.Post("/{id}/invites", accessTokenVerifierMiddleware, routes.CreateExperienceInvites)
 		experience.Get("/{id}/participants", routes.ListParticipants)
 		experience.Post("/{id}/participants/{userID}/remove", accessTokenVerifierMiddleware, routes.RemoveParticipant)
-		// Groups
+		// Groups - Simplified
 		experience.Post("/{id}/groups", accessTokenVerifierMiddleware, routes.CreateOrOpenGroup)
+		experience.Get("/groups", accessTokenVerifierMiddleware, routes.ListMyGroups)
+		experience.Get("/groups/{groupId}/members", accessTokenVerifierMiddleware, routes.GetGroupMembers)
+		experience.Post("/groups/{groupId}/join", accessTokenVerifierMiddleware, routes.JoinGroup)
+		experience.Post("/groups/{groupId}/leave", accessTokenVerifierMiddleware, routes.LeaveGroup)
+		experience.Delete("/groups/{groupId}", accessTokenVerifierMiddleware, routes.DeleteGroup)
 		// Availability
 		experience.Get("/{id}/availability", routes.ListAvailability)
 		experience.Post("/{id}/availability", accessTokenVerifierMiddleware, routes.SetAvailability)
@@ -801,7 +814,7 @@ func main() {
 		groups.Post("/discover", accessTokenVerifierMiddleware, routes.DiscoverGroups)
 		groups.Post("/request-join", accessTokenVerifierMiddleware, routes.RequestToJoinGroup)
 		groups.Get("/my-requests", accessTokenVerifierMiddleware, routes.GetMyJoinRequests)
-		groups.Get("/{groupID}/requests", accessTokenVerifierMiddleware, routes.GetGroupJoinRequests)
+		// groups.Get("/{groupID}/requests", accessTokenVerifierMiddleware, routes.GetGroupJoinRequests)
 		groups.Post("/requests/{requestID}/respond", accessTokenVerifierMiddleware, routes.RespondToJoinRequest)
 		// Group Management - Clean Implementation
 		groups.Post("/{groupID}/quit", accessTokenVerifierMiddleware, routes.QuitGroup)
@@ -809,6 +822,11 @@ func main() {
 		groups.Delete("/{groupID}/unblock/{userID:uint}", accessTokenVerifierMiddleware, routes.UnblockUserInGroup)
 		groups.Get("/{groupID}/quit-history", accessTokenVerifierMiddleware, routes.GetGroupQuitHistory)
 		groups.Get("/{groupID}/blocked-users", accessTokenVerifierMiddleware, routes.GetBlockedUsersInGroup)
+
+		// Group Invite Codes
+		groups.Post("/{id:uint}/invite-code", accessTokenVerifierMiddleware, routes.GenerateInviteCode)
+		groups.Get("/invite/{code}", routes.GetGroupByInviteCode)
+		groups.Post("/invite/join", accessTokenVerifierMiddleware, routes.JoinGroupWithCode)
 	}
 
 	chat := app.Party("/api/chat")

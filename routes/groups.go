@@ -3,13 +3,16 @@ package routes
 import (
 	"apartments-clone-server/models"
 	"apartments-clone-server/storage"
+	"apartments-clone-server/utils"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/kataras/iris/v12"
+	"github.com/kataras/iris/v12/middleware/jwt"
 )
 
 func requireGroupRole(groupID uint, userID uint, roles ...string) bool {
@@ -63,7 +66,7 @@ func CreateGroup(ctx iris.Context) {
 		ctx.JSON(iris.Map{"error": "failed to create group"})
 		return
 	}
-	gm := models.GroupMember{GroupID: g.ID, UserID: uid, Role: "owner"}
+	gm := models.GroupMember{GroupID: g.ID, UserID: uid, Role: "owner", Status: "active"}
 	storage.DB.Create(&gm)
 	ctx.JSON(iris.Map{"group": g})
 }
@@ -561,5 +564,336 @@ func GetBlockedUsersInGroup(ctx iris.Context) {
 	ctx.JSON(iris.Map{
 		"blocked_users": blockedUsers,
 		"total":         len(blockedUsers),
+	})
+}
+
+// GenerateInviteCode - generate an invite code that expires in 5 minutes
+func GenerateInviteCode(ctx iris.Context) {
+	var uid uint
+
+	// Try to get userID from context
+	if userID, ok := ctx.Values().Get("userID").(uint); ok && userID > 0 {
+		uid = userID
+	} else if claims := jwt.Get(ctx); claims != nil {
+		if accessToken, ok := claims.(*utils.AccessToken); ok {
+			uid = accessToken.ID
+		}
+	}
+
+	if uid == 0 {
+		ctx.StatusCode(http.StatusUnauthorized)
+		ctx.JSON(iris.Map{"error": "Unauthorized"})
+		return
+	}
+
+	groupID := ctx.Params().GetUintDefault("id", 0)
+	fmt.Printf("🔍 GenerateInviteCode - GroupID: %d\n", groupID)
+	if groupID == 0 {
+		ctx.StatusCode(http.StatusBadRequest)
+		ctx.JSON(iris.Map{"error": "Invalid group ID"})
+		return
+	}
+
+	// Check if this is an experience group or regular group
+	var expGroup models.ExperienceGroup
+	var expMember models.ExperienceGroupMember
+	isExperienceGroup := false
+
+	// Try to find it in experience_groups first
+	if err := storage.DB.Where("id = ?", groupID).First(&expGroup).Error; err == nil {
+		isExperienceGroup = true
+		fmt.Printf("🔍 GenerateInviteCode - Found experience group %d\n", groupID)
+	} else {
+		fmt.Printf("🔍 GenerateInviteCode - Group %d not found in experience_groups, checking regular groups\n", groupID)
+	}
+
+	if isExperienceGroup {
+		// It's an experience group
+		if err := storage.DB.Where("group_id = ? AND user_id = ? AND (state = 'joined' OR state = 'pending')", groupID, uid).First(&expMember).Error; err != nil {
+			fmt.Printf("🔍 GenerateInviteCode - User %d is not a member of experience group %d: %v\n", uid, groupID, err)
+			ctx.StatusCode(http.StatusForbidden)
+			ctx.JSON(iris.Map{"error": "Only group members can create invite codes", "user_id": uid, "group_id": groupID})
+			return
+		}
+
+		// Check if user is owner
+		if expGroup.OwnerID != uid {
+			fmt.Printf("🔍 GenerateInviteCode - User %d is not owner of experience group %d (owner: %d)\n", uid, groupID, expGroup.OwnerID)
+			ctx.StatusCode(http.StatusForbidden)
+			ctx.JSON(iris.Map{"error": "Only group owners can create invite codes", "user_id": uid, "group_id": groupID, "owner_id": expGroup.OwnerID})
+			return
+		}
+	} else {
+		// Check if user is owner or admin of regular group
+		var member models.GroupMember
+		if err := storage.DB.Where("group_id = ? AND user_id = ? AND status = 'active'", groupID, uid).First(&member).Error; err != nil {
+			fmt.Printf("🔍 GenerateInviteCode - User %d is not a member of group %d: %v\n", uid, groupID, err)
+			ctx.StatusCode(http.StatusForbidden)
+			ctx.JSON(iris.Map{"error": "Only group admins can create invite codes", "user_id": uid, "group_id": groupID})
+			return
+		}
+
+		// Check role
+		hasPermission := false
+		for _, role := range []string{"owner", "admin"} {
+			if member.Role == role {
+				hasPermission = true
+				break
+			}
+		}
+
+		if !hasPermission {
+			fmt.Printf("🔍 GenerateInviteCode - User %d has role %s, requires owner or admin\n", uid, member.Role)
+			ctx.StatusCode(http.StatusForbidden)
+			ctx.JSON(iris.Map{"error": "Only group admins can create invite codes", "user_id": uid, "group_id": groupID, "user_role": member.Role})
+			return
+		}
+	}
+
+	// Generate a secure 10-character uppercase token
+	tokenBytes := make([]byte, 5) // 5 bytes = 10 hex characters
+	if _, err := rand.Read(tokenBytes); err != nil {
+		ctx.StatusCode(http.StatusInternalServerError)
+		ctx.JSON(iris.Map{"error": "Failed to generate invite code"})
+		return
+	}
+	token := strings.ToUpper(hex.EncodeToString(tokenBytes))
+
+	// Create invite with 5-minute expiry
+	invite := models.GroupInvite{
+		GroupID:   groupID,
+		Token:     token,
+		ExpiresAt: time.Now().Add(5 * time.Minute),
+		CreatedBy: uid,
+	}
+
+	if err := storage.DB.Create(&invite).Error; err != nil {
+		ctx.StatusCode(http.StatusInternalServerError)
+		ctx.JSON(iris.Map{"error": "Failed to create invite code"})
+		return
+	}
+
+	ctx.JSON(iris.Map{
+		"code":       token,
+		"expires_in": 300, // 5 minutes in seconds
+		"expires_at": invite.ExpiresAt,
+	})
+}
+
+// GetGroupByInviteCode - get group details for an invite code
+func GetGroupByInviteCode(ctx iris.Context) {
+	token := ctx.Params().GetStringDefault("code", "")
+	if token == "" {
+		ctx.StatusCode(http.StatusBadRequest)
+		ctx.JSON(iris.Map{"error": "Invite code required"})
+		return
+	}
+
+	var invite models.GroupInvite
+	if err := storage.DB.Where("token = ? AND expires_at > ? AND used_by IS NULL AND deleted_at IS NULL", token, time.Now()).First(&invite).Error; err != nil {
+		ctx.StatusCode(http.StatusNotFound)
+		ctx.JSON(iris.Map{"error": "Invalid or expired invite code"})
+		return
+	}
+
+	// Try to get as experience group first
+	var expGroup models.ExperienceGroup
+	var group models.Group
+	var memberCount int64
+	var owner models.User
+	var ownerID uint
+
+	if err := storage.DB.Where("id = ?", invite.GroupID).First(&expGroup).Error; err == nil {
+		// It's an experience group
+		storage.DB.Model(&models.ExperienceGroupMember{}).
+			Where("group_id = ? AND (state = 'joined' OR state = 'pending')", invite.GroupID).
+			Count(&memberCount)
+
+		ownerID = expGroup.OwnerID
+
+		ctx.JSON(iris.Map{
+			"group": iris.Map{
+				"id":           expGroup.ID,
+				"name":         expGroup.Name,
+				"description":  "",
+				"is_public":    expGroup.Privacy == "public",
+				"member_count": memberCount,
+				"owner": iris.Map{
+					"id":   ownerID,
+					"name": "Group Owner",
+				},
+			},
+			"invite_code": token,
+		})
+		return
+	}
+
+	// It's a regular group
+	if err := storage.DB.First(&group, invite.GroupID).Error; err != nil {
+		ctx.StatusCode(http.StatusNotFound)
+		ctx.JSON(iris.Map{"error": "Group not found"})
+		return
+	}
+
+	// Get member count
+	storage.DB.Model(&models.GroupMember{}).
+		Where("group_id = ? AND status = 'active'", invite.GroupID).
+		Count(&memberCount)
+
+	// Get owner info
+	storage.DB.First(&owner, group.OwnerID)
+
+	ownerName := fmt.Sprintf("%s %s", owner.FirstName, owner.LastName)
+	if ownerName == " " {
+		ownerName = owner.Email
+	}
+
+	ctx.JSON(iris.Map{
+		"group": iris.Map{
+			"id":           group.ID,
+			"name":         group.Name,
+			"description":  group.Description,
+			"is_public":    group.IsPublic,
+			"member_count": memberCount,
+			"owner": iris.Map{
+				"id":   owner.ID,
+				"name": ownerName,
+			},
+		},
+		"invite_code": token,
+	})
+}
+
+// JoinGroupWithCode - join a group using an invite code
+func JoinGroupWithCode(ctx iris.Context) {
+	var uid uint
+
+	// Try to get userID from context
+	if userID, ok := ctx.Values().Get("userID").(uint); ok && userID > 0 {
+		uid = userID
+	} else if claims := jwt.Get(ctx); claims != nil {
+		if accessToken, ok := claims.(*utils.AccessToken); ok {
+			uid = accessToken.ID
+		}
+	}
+
+	if uid == 0 {
+		ctx.StatusCode(http.StatusUnauthorized)
+		ctx.JSON(iris.Map{"error": "Unauthorized"})
+		return
+	}
+
+	var body struct {
+		Code string `json:"code"`
+	}
+	if err := ctx.ReadJSON(&body); err != nil {
+		ctx.StatusCode(http.StatusBadRequest)
+		ctx.JSON(iris.Map{"error": "Invalid request body"})
+		return
+	}
+
+	if body.Code == "" {
+		ctx.StatusCode(http.StatusBadRequest)
+		ctx.JSON(iris.Map{"error": "Invite code required"})
+		return
+	}
+
+	// Find valid invite
+	var invite models.GroupInvite
+	if err := storage.DB.Where("token = ? AND expires_at > ? AND used_by IS NULL AND deleted_at IS NULL", body.Code, time.Now()).First(&invite).Error; err != nil {
+		ctx.StatusCode(http.StatusNotFound)
+		ctx.JSON(iris.Map{"error": "Invalid or expired invite code"})
+		return
+	}
+
+	// Check if this is an experience group
+	var expGroup models.ExperienceGroup
+	if err := storage.DB.Where("id = ?", invite.GroupID).First(&expGroup).Error; err == nil {
+		// It's an experience group - check if already a member
+		var existingMember models.ExperienceGroupMember
+		if err := storage.DB.Where("group_id = ? AND user_id = ? AND (state = 'joined' OR state = 'pending')", invite.GroupID, uid).First(&existingMember).Error; err == nil {
+			ctx.StatusCode(http.StatusConflict)
+			ctx.JSON(iris.Map{"error": "You are already a member of this group"})
+			return
+		}
+
+		// Create experience group membership
+		now := time.Now()
+		member := models.ExperienceGroupMember{
+			GroupID:  invite.GroupID,
+			UserID:   uid,
+			State:    "joined",
+			Role:     "member",
+			JoinedAt: &now,
+		}
+
+		if err := storage.DB.Create(&member).Error; err != nil {
+			ctx.StatusCode(http.StatusInternalServerError)
+			ctx.JSON(iris.Map{"error": "Failed to join group"})
+			return
+		}
+
+		// Mark invite as used
+		invite.UsedBy = &uid
+		invite.UsedAt = &now
+		storage.DB.Save(&invite)
+
+		ctx.JSON(iris.Map{
+			"success": true,
+			"message": "Successfully joined the group",
+			"group": iris.Map{
+				"id":   expGroup.ID,
+				"name": expGroup.Name,
+			},
+		})
+		return
+	}
+
+	// It's a regular group - check if already a member
+	var existingMember models.GroupMember
+	if err := storage.DB.Where("group_id = ? AND user_id = ? AND status = 'active'", invite.GroupID, uid).First(&existingMember).Error; err == nil {
+		ctx.StatusCode(http.StatusConflict)
+		ctx.JSON(iris.Map{"error": "You are already a member of this group"})
+		return
+	}
+
+	// Check if user is banned from this group
+	if isUserBlockedInGroup(invite.GroupID, uid) {
+		ctx.StatusCode(http.StatusForbidden)
+		ctx.JSON(iris.Map{"error": "You are blocked from this group"})
+		return
+	}
+
+	// Create group membership
+	member := models.GroupMember{
+		GroupID: invite.GroupID,
+		UserID:  uid,
+		Role:    "member",
+		Status:  "active",
+	}
+
+	if err := storage.DB.Create(&member).Error; err != nil {
+		ctx.StatusCode(http.StatusInternalServerError)
+		ctx.JSON(iris.Map{"error": "Failed to join group"})
+		return
+	}
+
+	// Mark invite as used
+	now := time.Now()
+	invite.UsedBy = &uid
+	invite.UsedAt = &now
+	storage.DB.Save(&invite)
+
+	// Get group details to return
+	var group models.Group
+	storage.DB.First(&group, invite.GroupID)
+
+	ctx.JSON(iris.Map{
+		"success": true,
+		"message": "Successfully joined the group",
+		"group": iris.Map{
+			"id":   group.ID,
+			"name": group.Name,
+		},
 	})
 }

@@ -14,74 +14,298 @@ import (
 	jsonWT "github.com/kataras/iris/v12/middleware/jwt"
 )
 
-// GetUserProfile retrieves the user's profile information
+// GetUserProfile retrieves the user's profile information (combines User + UserProfile)
 func GetUserProfile(ctx iris.Context) {
-	tok := jsonWT.Get(ctx)
-	if tok == nil {
-		ctx.StopWithStatus(http.StatusUnauthorized)
+	fmt.Printf("🔍 GetUserProfile called - Method: %s, Path: %s\n", ctx.Method(), ctx.Path())
+	userIDInterface := ctx.Values().Get("userID")
+	if userIDInterface == nil {
+		ctx.StatusCode(iris.StatusUnauthorized)
+		ctx.JSON(iris.Map{"error": "User ID not found in context"})
 		return
 	}
-	user := tok.(*utils.AccessToken)
 
+	userID, ok := userIDInterface.(uint)
+	if !ok {
+		ctx.StatusCode(iris.StatusInternalServerError)
+		ctx.JSON(iris.Map{"error": "Invalid user ID format"})
+		return
+	}
+
+	// Get user basic info
+	var user models.User
+	if err := storage.DB.First(&user, userID).Error; err != nil {
+		fmt.Printf("❌ User not found with ID %d: %v\n", userID, err)
+		ctx.StatusCode(iris.StatusNotFound)
+		ctx.JSON(iris.Map{"error": "User not found"})
+		return
+	}
+
+	fmt.Printf("✅ Found user: ID=%d, FirstName='%s', LastName='%s', Email='%s'\n",
+		user.ID, user.FirstName, user.LastName, user.Email)
+
+	// Get user profile (if exists)
 	var profile models.UserProfile
-	if err := storage.DB.Where("user_id = ?", user.ID).First(&profile).Error; err != nil {
-		// If no profile exists, return empty profile
-		ctx.JSON(iris.Map{
-			"success": true,
-			"profile": iris.Map{
-				"id":                   0,
-				"firstName":            "",
-				"lastName":             "",
-				"avatarURL":            "",
-				"dateOfBirth":          "",
-				"bio":                  "",
-				"languages":            []string{},
-				"skills":               []string{},
-				"location":             "",
-				"interests":            []string{},
-				"occupation":           "",
-				"company":              "",
-				"website":              "",
-				"instagram":            "",
-				"twitter":              "",
-				"linkedin":             "",
-				"travelStyle":          "",
-				"accommodationType":    "",
-				"isPublic":             true,
-				"isComplete":           false,
-				"completionPercentage": 0,
-			},
-		})
-		return
+	profileExists := storage.DB.Where("user_id = ?", userID).First(&profile).Error == nil
+
+	// Parse JSON fields from User model
+	var userLanguages []string
+	if len(user.Languages) > 0 {
+		json.Unmarshal(user.Languages, &userLanguages)
+	}
+	var userSkills []string
+	if len(user.Skills) > 0 {
+		json.Unmarshal(user.Skills, &userSkills)
 	}
 
-	ctx.JSON(iris.Map{
+	// Parse JSON fields from UserProfile model
+	var profileLanguages []string
+	var profileSkills []string
+	var profileInterests []string
+
+	if profileExists {
+		if len(profile.Languages) > 0 {
+			json.Unmarshal(profile.Languages, &profileLanguages)
+		}
+		if len(profile.Skills) > 0 {
+			json.Unmarshal(profile.Skills, &profileSkills)
+		}
+		if len(profile.Interests) > 0 {
+			json.Unmarshal(profile.Interests, &profileInterests)
+		}
+	}
+
+	// Merge data (UserProfile takes precedence over User)
+	firstName := user.FirstName
+	lastName := user.LastName
+	avatarURL := user.AvatarURL
+	dateOfBirth := user.DateOfBirth
+	bio := user.Bio
+	languages := userLanguages
+	skills := userSkills
+
+	if profileExists {
+		if profile.FirstName != "" {
+			firstName = profile.FirstName
+		}
+		if profile.LastName != "" {
+			lastName = profile.LastName
+		}
+		if profile.AvatarURL != "" {
+			avatarURL = profile.AvatarURL
+		}
+		if profile.DateOfBirth != "" {
+			dateOfBirth = profile.DateOfBirth
+		}
+		if profile.Bio != "" {
+			bio = profile.Bio
+		}
+		if len(profileLanguages) > 0 {
+			languages = profileLanguages
+		}
+		if len(profileSkills) > 0 {
+			skills = profileSkills
+		}
+	}
+
+	// Calculate completion percentage
+	completionPercentage := 0
+	if profileExists {
+		completionPercentage = profile.CalculateCompletionPercentage()
+	} else {
+		// Calculate based on User model
+		fields := []bool{
+			firstName != "",
+			lastName != "",
+			avatarURL != "",
+			bio != "",
+			len(languages) > 0,
+			dateOfBirth != "",
+		}
+		completed := 0
+		for _, field := range fields {
+			if field {
+				completed++
+			}
+		}
+		completionPercentage = (completed * 100) / len(fields)
+	}
+
+	// Build response (exclude sensitive data like ID images, verification details)
+	fmt.Printf("📤 Building response: firstName='%s', lastName='%s', email='%s', hasProfile=%v\n",
+		firstName, lastName, user.Email, profileExists)
+
+	response := iris.Map{
 		"success": true,
-		"profile": profile,
-	})
+		"profile": iris.Map{
+			// Basic Info
+			"firstName":   firstName,
+			"lastName":    lastName,
+			"email":       user.Email,
+			"phoneNumber": user.PhoneNumber,
+			"avatarURL":   avatarURL,
+			"dateOfBirth": dateOfBirth,
+			"bio":         bio,
+			"hasProfile":  profileExists,
+
+			// Languages and Skills
+			"languages": languages,
+			"skills":    skills,
+
+			// Profile-specific fields (only if profile exists)
+			"location": func() string {
+				if profileExists {
+					return profile.Location
+				} else {
+					return ""
+				}
+			}(),
+			"interests": profileInterests,
+			"occupation": func() string {
+				if profileExists {
+					return profile.Occupation
+				} else {
+					return ""
+				}
+			}(),
+			"company": func() string {
+				if profileExists {
+					return profile.Company
+				} else {
+					return ""
+				}
+			}(),
+			"website": func() string {
+				if profileExists {
+					return profile.Website
+				} else {
+					return ""
+				}
+			}(),
+			"instagram": func() string {
+				if profileExists {
+					return profile.Instagram
+				} else {
+					return ""
+				}
+			}(),
+			"twitter": func() string {
+				if profileExists {
+					return profile.Twitter
+				} else {
+					return ""
+				}
+			}(),
+			"linkedin": func() string {
+				if profileExists {
+					return profile.LinkedIn
+				} else {
+					return ""
+				}
+			}(),
+			"travelStyle": func() string {
+				if profileExists {
+					return profile.TravelStyle
+				} else {
+					return ""
+				}
+			}(),
+			"accommodationType": func() string {
+				if profileExists {
+					return profile.AccommodationType
+				} else {
+					return ""
+				}
+			}(),
+
+			// Status
+			"isPublic": func() bool {
+				if profileExists {
+					return profile.IsPublic
+				} else {
+					return true
+				}
+			}(),
+			"isComplete": func() bool {
+				if profileExists {
+					return profile.IsComplete
+				} else {
+					return false
+				}
+			}(),
+			"completionPercentage": completionPercentage,
+
+			// Verification status (safe to show)
+			"isVerified": func() bool {
+				if user.IsVerified != nil {
+					return *user.IsVerified
+				} else {
+					return false
+				}
+			}(),
+			"verificationStatus": user.VerificationStatus,
+
+			// Timestamps
+			"createdAt": func() string {
+				if profileExists {
+					return profile.CreatedAt.Format(time.RFC3339)
+				} else {
+					return user.CreatedAt.Format(time.RFC3339)
+				}
+			}(),
+			"updatedAt": func() string {
+				if profileExists {
+					return profile.UpdatedAt.Format(time.RFC3339)
+				} else {
+					return user.UpdatedAt.Format(time.RFC3339)
+				}
+			}(),
+		},
+	}
+
+	ctx.JSON(response)
 }
 
 // CreateOrUpdateUserProfile creates or updates the user's profile
 func CreateOrUpdateUserProfile(ctx iris.Context) {
-	tok := jsonWT.Get(ctx)
-	if tok == nil {
-		ctx.StopWithStatus(http.StatusUnauthorized)
+	userIDInterface := ctx.Values().Get("userID")
+	if userIDInterface == nil {
+		ctx.StatusCode(iris.StatusUnauthorized)
+		ctx.JSON(iris.Map{"error": "User ID not found in context"})
 		return
 	}
-	user := tok.(*utils.AccessToken)
+
+	userID, ok := userIDInterface.(uint)
+	if !ok {
+		fmt.Printf("❌ CreateOrUpdateUserProfile: Invalid user ID format: %T\n", userIDInterface)
+		ctx.StatusCode(iris.StatusInternalServerError)
+		ctx.JSON(iris.Map{"error": "Invalid user ID format"})
+		return
+	}
+
+	fmt.Printf("✅ CreateOrUpdateUserProfile: Processing request for user ID %d\n", userID)
+	fmt.Printf("🔍 Request Method: %s\n", ctx.Method())
+	fmt.Printf("🔍 Request URL: %s\n", ctx.Path())
+	fmt.Printf("🔍 Request Host: %s\n", ctx.Host())
+	fmt.Printf("🔍 Request Full Path: %s\n", ctx.FullRequestURI())
 
 	var input CreateOrUpdateProfileInput
 	if err := ctx.ReadJSON(&input); err != nil {
-		ctx.StopWithStatus(http.StatusBadRequest)
+		fmt.Printf("❌ CreateOrUpdateUserProfile: Invalid JSON input: %v\n", err)
+		ctx.StatusCode(iris.StatusBadRequest)
+		ctx.JSON(iris.Map{"error": "Invalid JSON input"})
 		return
 	}
+
+	fmt.Printf("📝 CreateOrUpdateUserProfile: Received data - FirstName='%s', LastName='%s', Email='%s'\n",
+		input.FirstName, input.LastName, input.Email)
+	fmt.Printf("📝 Full input data: %+v\n", input)
 
 	// Upload avatar if provided and not already a Cloudinary URL
 	avatarURL := input.AvatarURL
 	if avatarURL != "" && !strings.Contains(avatarURL, "res.cloudinary.com") {
 		// Generate unique filename with timestamp
 		timestamp := time.Now().UnixNano() / int64(time.Millisecond)
-		publicID := fmt.Sprintf("profiles/%d/avatar_%d", user.ID, timestamp)
+		publicID := fmt.Sprintf("profiles/%d/avatar_%d", userID, timestamp)
 		urlMap := storage.UploadBase64Image(avatarURL, publicID)
 		if urlMap != nil && urlMap["url"] != "" {
 			avatarURL = urlMap["url"]
@@ -93,14 +317,68 @@ func CreateOrUpdateUserProfile(ctx iris.Context) {
 	skillsJSON, _ := json.Marshal(input.Skills)
 	interestsJSON, _ := json.Marshal(input.Interests)
 
+	// Update user basic information in users table
+	userUpdates := map[string]interface{}{}
+	fmt.Printf("🔍 Checking FirstName: '%s' (len=%d)\n", input.FirstName, len(input.FirstName))
+	if input.FirstName != "" {
+		fmt.Printf("✅ Adding FirstName to updates\n")
+		userUpdates["first_name"] = input.FirstName
+	}
+
+	fmt.Printf("🔍 Checking LastName: '%s' (len=%d)\n", input.LastName, len(input.LastName))
+	if input.LastName != "" {
+		fmt.Printf("✅ Adding LastName to updates\n")
+		userUpdates["last_name"] = input.LastName
+	}
+
+	fmt.Printf("🔍 Checking Email: '%s' (len=%d)\n", input.Email, len(input.Email))
+	// Email is always updateable, even if empty (to allow clearing it)
+	if input.Email != "" {
+		fmt.Printf("✅ Adding Email to updates\n")
+		userUpdates["email"] = input.Email
+	} else {
+		fmt.Printf("⚠️ Email is empty, skipping update\n")
+	}
+	if input.AvatarURL != "" {
+		userUpdates["avatar_url"] = avatarURL
+	}
+	if input.DateOfBirth != "" {
+		userUpdates["date_of_birth"] = input.DateOfBirth
+	}
+	if input.Bio != "" {
+		userUpdates["bio"] = input.Bio
+	}
+	if len(input.Languages) > 0 {
+		userUpdates["languages"] = languagesJSON
+	}
+	if len(input.Skills) > 0 {
+		userUpdates["skills"] = skillsJSON
+	}
+
+	// Update user table if there are updates
+	fmt.Printf("📝 userUpdates map: %+v (len=%d)\n", userUpdates, len(userUpdates))
+	if len(userUpdates) > 0 {
+		fmt.Printf("📝 Updating user table with: %+v\n", userUpdates)
+		result := storage.DB.Model(&models.User{}).Where("id = ?", userID).Updates(userUpdates)
+		if result.Error != nil {
+			fmt.Printf("❌ Failed to update user table: %v\n", result.Error)
+			ctx.StatusCode(iris.StatusInternalServerError)
+			ctx.JSON(iris.Map{"error": "Failed to update user information"})
+			return
+		}
+		fmt.Printf("✅ User table updated successfully (rows affected: %d)\n", result.RowsAffected)
+	} else {
+		fmt.Printf("⚠️ No user updates to perform\n")
+	}
+
 	// Check if profile exists
 	var existingProfile models.UserProfile
-	err := storage.DB.Where("user_id = ?", user.ID).First(&existingProfile).Error
+	err := storage.DB.Where("user_id = ?", userID).First(&existingProfile).Error
 
 	if err != nil {
 		// Create new profile
 		profile := models.UserProfile{
-			UserID:            user.ID,
+			UserID:            userID,
 			FirstName:         input.FirstName,
 			LastName:          input.LastName,
 			AvatarURL:         avatarURL,
@@ -125,7 +403,8 @@ func CreateOrUpdateUserProfile(ctx iris.Context) {
 		profile.CalculateCompletionPercentage()
 
 		if err := storage.DB.Create(&profile).Error; err != nil {
-			ctx.StopWithStatus(http.StatusInternalServerError)
+			ctx.StatusCode(iris.StatusInternalServerError)
+			ctx.JSON(iris.Map{"error": "Failed to create profile"})
 			return
 		}
 
@@ -158,7 +437,8 @@ func CreateOrUpdateUserProfile(ctx iris.Context) {
 		}
 
 		if err := storage.DB.Model(&existingProfile).Updates(updates).Error; err != nil {
-			ctx.StopWithStatus(http.StatusInternalServerError)
+			ctx.StatusCode(iris.StatusInternalServerError)
+			ctx.JSON(iris.Map{"error": "Failed to update profile"})
 			return
 		}
 
@@ -282,21 +562,30 @@ func GetUserProfileStatusNew(ctx iris.Context) {
 
 // DeleteUserProfile deletes the user's profile
 func DeleteUserProfile(ctx iris.Context) {
-	tok := jsonWT.Get(ctx)
-	if tok == nil {
-		ctx.StopWithStatus(http.StatusUnauthorized)
+	userIDInterface := ctx.Values().Get("userID")
+	if userIDInterface == nil {
+		ctx.StatusCode(iris.StatusUnauthorized)
+		ctx.JSON(iris.Map{"error": "User ID not found in context"})
 		return
 	}
-	user := tok.(*utils.AccessToken)
+
+	userID, ok := userIDInterface.(uint)
+	if !ok {
+		ctx.StatusCode(iris.StatusInternalServerError)
+		ctx.JSON(iris.Map{"error": "Invalid user ID format"})
+		return
+	}
 
 	var profile models.UserProfile
-	if err := storage.DB.Where("user_id = ?", user.ID).First(&profile).Error; err != nil {
-		ctx.StopWithStatus(http.StatusNotFound)
+	if err := storage.DB.Where("user_id = ?", userID).First(&profile).Error; err != nil {
+		ctx.StatusCode(iris.StatusNotFound)
+		ctx.JSON(iris.Map{"error": "Profile not found"})
 		return
 	}
 
 	if err := storage.DB.Delete(&profile).Error; err != nil {
-		ctx.StopWithStatus(http.StatusInternalServerError)
+		ctx.StatusCode(iris.StatusInternalServerError)
+		ctx.JSON(iris.Map{"error": "Failed to delete profile"})
 		return
 	}
 
@@ -310,6 +599,7 @@ func DeleteUserProfile(ctx iris.Context) {
 type CreateOrUpdateProfileInput struct {
 	FirstName         string   `json:"firstName"`
 	LastName          string   `json:"lastName"`
+	Email             string   `json:"email"`
 	AvatarURL         string   `json:"avatarURL"`
 	DateOfBirth       string   `json:"dateOfBirth"`
 	Bio               string   `json:"bio"`

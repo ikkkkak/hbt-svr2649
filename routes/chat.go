@@ -38,11 +38,38 @@ func ListGroupMessages(ctx iris.Context) {
 		ctx.StopWithStatus(http.StatusForbidden)
 		return
 	}
+
+	// Get limit from query params (default 50 for better performance)
+	limit := ctx.URLParamIntDefault("limit", 50)
+	if limit > 100 {
+		limit = 100
+	}
+
 	var msgs []models.ChatMessage
 	storage.DB.Where("group_id = ?", groupID).
-		Preload("Sender").
 		Where("expires_at IS NULL OR expires_at > ?", time.Now()).
-		Order("id DESC").Limit(100).Find(&msgs)
+		Order("id DESC").Limit(limit).Find(&msgs)
+
+	// Preload senders efficiently
+	var senderIDs []uint
+	for _, msg := range msgs {
+		senderIDs = append(senderIDs, msg.SenderID)
+	}
+
+	if len(senderIDs) > 0 {
+		var users []models.User
+		storage.DB.Where("id IN ?", senderIDs).Find(&users)
+		userMap := make(map[uint]models.User)
+		for _, u := range users {
+			userMap[u.ID] = u
+		}
+		for i := range msgs {
+			if user, ok := userMap[msgs[i].SenderID]; ok {
+				msgs[i].Sender = user
+			}
+		}
+	}
+
 	// reverse to chronological
 	for i, j := 0, len(msgs)-1; i < j; i, j = i+1, j-1 {
 		msgs[i], msgs[j] = msgs[j], msgs[i]

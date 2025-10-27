@@ -167,6 +167,53 @@ func CreateReservation(ctx iris.Context) {
 
 	storage.DB.Create(&notification)
 
+	// Create 1:1 conversation between guest and host for this reservation
+	// Check if conversation already exists
+	var existingConv models.Conversation
+	storage.DB.Where("property_id = ? AND tenant_id = ? AND owner_id = ?",
+		property.ID, claims.ID, property.HostID).First(&existingConv)
+
+	if existingConv.ID == 0 {
+		// Create new conversation with reservation message
+		guestMessage := fmt.Sprintf("Hi! I've requested to book %s from %s to %s for %d guests.",
+			property.Title, input.CheckIn.Format("Jan 2"), input.CheckOut.Format("Jan 2"), input.NumGuests)
+
+		var messages []models.Message
+		messages = append(messages, models.Message{
+			SenderID:        claims.ID,
+			ReceiverID:      property.HostID,
+			Type:            "property_card",
+			RefType:         "property",
+			RefID:           &property.ID,
+			PreviewTitle:    property.Title,
+			PreviewSubtitle: property.City,
+			PreviewImageURL: "",
+		})
+		messages = append(messages, models.Message{
+			SenderID:   claims.ID,
+			ReceiverID: property.HostID,
+			Text:       guestMessage,
+			Type:       "text",
+		})
+
+		conversation := models.Conversation{
+			TenantID:   claims.ID,
+			OwnerID:    property.HostID,
+			PropertyID: property.ID,
+			Messages:   messages,
+		}
+
+		if err := storage.DB.Create(&conversation).Error; err == nil {
+			log.Printf("✅ Created 1:1 conversation between guest %d and host %d for property %d",
+				claims.ID, property.HostID, property.ID)
+		} else {
+			log.Printf("❌ Failed to create conversation: %v", err)
+		}
+	} else {
+		log.Printf("ℹ️ Conversation already exists between guest %d and host %d for property %d",
+			claims.ID, property.HostID, property.ID)
+	}
+
 	// Send push notification to host
 	var guest models.User
 	if err := storage.DB.First(&guest, claims.ID).Error; err == nil {
@@ -185,6 +232,38 @@ func CreateReservation(ctx iris.Context) {
 			guestName,
 			property.Title,
 		)
+
+		// Send push notification to guest (reservation is pending)
+		go func() {
+			var guestUser models.User
+			if err := storage.DB.First(&guestUser, claims.ID).Error; err == nil && guestUser.AllowsNotifications != nil && *guestUser.AllowsNotifications {
+				// Create notification for guest
+				var guestNotification models.Notification
+				guestNotification.UserID = claims.ID
+				guestNotification.Title = "Reservation Request Sent"
+				guestNotification.Message = fmt.Sprintf("Your reservation request for %s is pending. The host will respond shortly.", property.Title)
+				guestNotification.Type = "reservation_pending"
+				guestNotification.RefID = uint(reservation.ID)
+				guestNotification.RefType = "reservation"
+				guestNotification.IsRead = false
+				storage.DB.Create(&guestNotification)
+
+				// Send push notification
+				data := services.NotificationData{
+					Type:       "reservation_pending",
+					ID:         fmt.Sprintf("%d", reservation.ID),
+					PropertyID: fmt.Sprintf("%d", property.ID),
+					UserID:     fmt.Sprintf("%d", claims.ID),
+				}
+
+				notificationService.SendNotificationToUser(
+					claims.ID,
+					"Reservation Request Sent",
+					fmt.Sprintf("Your request for %s is pending. The host will respond shortly.", property.Title),
+					data,
+				)
+			}
+		}()
 	}
 
 	ctx.JSON(reservation)

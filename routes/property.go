@@ -83,10 +83,10 @@ func CreateProperty(ctx iris.Context) {
 
 		// New policy fields
 		BookingMode:                      input.BookingMode,
-		SecureCompoundAcknowledged:       input.SecureCompoundAcknowledged,
-		EquipmentViolationPolicyAccepted: input.EquipmentViolationPolicyAccepted,
-		UserSafetyPolicyAccepted:         input.UserSafetyPolicyAccepted,
-		PropertyPolicyAccepted:           input.PropertyPolicyAccepted,
+		SecureCompoundAcknowledged:       input.SecureCompoundAcknowledged != nil && *input.SecureCompoundAcknowledged,
+		EquipmentViolationPolicyAccepted: input.EquipmentViolationPolicyAccepted != nil && *input.EquipmentViolationPolicyAccepted,
+		UserSafetyPolicyAccepted:         input.UserSafetyPolicyAccepted != nil && *input.UserSafetyPolicyAccepted,
+		PropertyPolicyAccepted:           input.PropertyPolicyAccepted != nil && *input.PropertyPolicyAccepted,
 	}
 
 	// Optional property category id
@@ -529,16 +529,16 @@ type CreateListingInput struct {
 	Currency           string   `json:"currency" validate:"required"`
 	Amenities          []string `json:"amenities"`
 	HouseRules         string   `json:"houseRules"`
-	CancellationPolicy string   `json:"cancellationPolicy"`
+	CancellationPolicy string   `json:"cancellationPolicy,omitempty"`
 	Images             []string `json:"images"`
 	IsActive           *bool    `json:"isActive"`
 
 	// New policy fields
 	BookingMode                      string `json:"bookingMode"`
-	SecureCompoundAcknowledged       bool   `json:"secureCompoundAcknowledged"`
-	EquipmentViolationPolicyAccepted bool   `json:"equipmentViolationPolicyAccepted"`
-	UserSafetyPolicyAccepted         bool   `json:"userSafetyPolicyAccepted"`
-	PropertyPolicyAccepted           bool   `json:"propertyPolicyAccepted"`
+	SecureCompoundAcknowledged       *bool  `json:"secureCompoundAcknowledged,omitempty"`
+	EquipmentViolationPolicyAccepted *bool  `json:"equipmentViolationPolicyAccepted,omitempty"`
+	UserSafetyPolicyAccepted         *bool  `json:"userSafetyPolicyAccepted,omitempty"`
+	PropertyPolicyAccepted           *bool  `json:"propertyPolicyAccepted,omitempty"`
 
 	// Neighborhood & timing & category mapping
 	NeighborhoodDescription string              `json:"neighborhoodDescription"`
@@ -570,7 +570,7 @@ type UpdateListingInput struct {
 	Currency           string   `json:"currency" validate:"required"`
 	Amenities          []string `json:"amenities"`
 	HouseRules         string   `json:"houseRules"`
-	CancellationPolicy string   `json:"cancellationPolicy"`
+	CancellationPolicy string   `json:"cancellationPolicy,omitempty"`
 	Images             []string `json:"images"`
 	IsActive           *bool    `json:"isActive"`
 }

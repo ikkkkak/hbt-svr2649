@@ -445,37 +445,3 @@ func GetMyJoinRequests(ctx iris.Context) {
 
 	ctx.JSON(iris.Map{"success": true, "requests": requests})
 }
-
-// GetGroupJoinRequests returns join requests for a group (owner only)
-func GetGroupJoinRequests(ctx iris.Context) {
-	tok := jsonWT.Get(ctx)
-	if tok == nil {
-		ctx.StopWithStatus(http.StatusUnauthorized)
-		return
-	}
-	user := tok.(*utils.AccessToken)
-	groupID, err := ctx.Params().GetUint("groupID")
-	if err != nil {
-		ctx.StopWithStatus(http.StatusBadRequest)
-		return
-	}
-
-	// Check if user owns the group
-	var group models.ExperienceGroup
-	if err := storage.DB.First(&group, groupID).Error; err != nil {
-		ctx.StopWithStatus(http.StatusNotFound)
-		return
-	}
-	if group.OwnerID != user.ID {
-		ctx.StopWithStatus(http.StatusForbidden)
-		return
-	}
-
-	var requests []models.GroupJoinRequest
-	storage.DB.Where("group_id = ?", groupID).
-		Preload("Requester").
-		Order("created_at DESC").
-		Find(&requests)
-
-	ctx.JSON(iris.Map{"success": true, "requests": requests})
-}

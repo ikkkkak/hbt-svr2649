@@ -87,6 +87,15 @@ func performMigrations(db *gorm.DB) {
 		&models.VideoReport{},
 		&models.UserFlag{},
 		&models.HiddenVideo{},
+		// Group Management Models
+		&models.Group{},
+		&models.GroupMember{},
+		&models.GroupInvite{},
+		&models.GroupMessage{},
+		&models.GroupMessageRead{},
+		&models.GroupBan{},
+		&models.GroupUserBlock{},
+		&models.GroupQuit{},
 	)
 
 	// Allow direct chat groups without an experience by making experience_id nullable

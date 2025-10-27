@@ -46,13 +46,14 @@ type GroupInvite struct {
 
 // GroupMessage stores messages
 type GroupMessage struct {
-	ID        uint           `json:"id" gorm:"primaryKey"`
-	GroupID   uint           `json:"group_id" gorm:"index;not null"`
-	UserID    uint           `json:"user_id" gorm:"index;not null"`
-	Content   string         `json:"content" gorm:"type:text;not null"`
-	CreatedAt time.Time      `json:"created_at" gorm:"index"`
-	UpdatedAt time.Time      `json:"updated_at"`
-	DeletedAt gorm.DeletedAt `json:"deleted_at" gorm:"index"`
+	ID          uint           `json:"id" gorm:"primaryKey"`
+	GroupID     uint           `json:"group_id" gorm:"index;not null"`
+	UserID      uint           `json:"user_id" gorm:"index;not null"`
+	Content     string         `json:"content" gorm:"type:text;not null"`
+	DeliveredAt *time.Time     `json:"delivered_at" gorm:"index"`
+	CreatedAt   time.Time      `json:"created_at" gorm:"index"`
+	UpdatedAt   time.Time      `json:"updated_at"`
+	DeletedAt   gorm.DeletedAt `json:"deleted_at" gorm:"index"`
 }
 
 // GroupMessageRead tracks reads per user

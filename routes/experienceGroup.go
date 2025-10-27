@@ -71,6 +71,93 @@ func CreateOrOpenGroup(ctx iris.Context) {
 	ctx.JSON(iris.Map{"success": true, "group": grp})
 }
 
+// GetGroupLastMessage returns last message and unread count for a group
+func GetGroupLastMessage(ctx iris.Context) {
+	tok := jsonWT.Get(ctx)
+	if tok == nil {
+		ctx.StopWithStatus(http.StatusUnauthorized)
+		return
+	}
+	user := tok.(*utils.AccessToken)
+
+	groupID, err := ctx.Params().GetUint("groupID")
+	if err != nil || groupID == 0 {
+		ctx.StopWithStatus(http.StatusBadRequest)
+		return
+	}
+
+	// Get last message with sender info
+	var lastMsg models.GroupMessage
+	if err := storage.DB.Where("group_id = ? AND (expires_at IS NULL OR expires_at > ?)", groupID, time.Now()).
+		Order("id DESC").
+		Limit(1).
+		Preload("Sender").
+		First(&lastMsg).Error; err != nil {
+		ctx.JSON(iris.Map{"lastMessage": nil, "unreadCount": 0})
+		return
+	}
+
+	// Get unread count (messages created after user's last read timestamp)
+	var lastReadTime time.Time
+	var lastReadObj models.GroupMessageRead
+	if err := storage.DB.Where("group_id = ? AND user_id = ?", groupID, user.ID).
+		Order("read_at DESC").
+		First(&lastReadObj).Error; err == nil {
+		lastReadTime = lastReadObj.ReadAt
+	}
+
+	var unreadCount int64
+	storage.DB.Model(&models.GroupMessage{}).
+		Where("group_id = ? AND user_id != ? AND created_at > ? AND (expires_at IS NULL OR expires_at > ?)",
+			groupID, user.ID, lastReadTime, time.Now()).
+		Count(&unreadCount)
+
+	ctx.JSON(iris.Map{
+		"lastMessage": iris.Map{
+			"id":           lastMsg.ID,
+			"content":      lastMsg.Content,
+			"createdAt":    lastMsg.CreatedAt,
+			"senderID":     lastMsg.UserID,
+			"senderName":   "User", // We'll need to fetch user details separately if needed
+			"senderAvatar": "",
+		},
+		"unreadCount": unreadCount,
+	})
+}
+
+// MarkGroupAsRead marks all messages in a group as read for the current user
+func MarkGroupAsRead(ctx iris.Context) {
+	tok := jsonWT.Get(ctx)
+	if tok == nil {
+		ctx.StopWithStatus(http.StatusUnauthorized)
+		return
+	}
+	user := tok.(*utils.AccessToken)
+
+	groupID, err := ctx.Params().GetUint("groupID")
+	if err != nil || groupID == 0 {
+		ctx.StopWithStatus(http.StatusBadRequest)
+		return
+	}
+
+	// Mark all messages in this group as read
+	now := time.Now()
+	rec := models.GroupMessageRead{
+		GroupID:   groupID,
+		UserID:    user.ID,
+		MessageID: 0, // Special marker for "all messages"
+		ReadAt:    now,
+	}
+
+	// Delete old reads for this group
+	storage.DB.Where("group_id = ? AND user_id = ?", groupID, user.ID).
+		Delete(&models.GroupMessageRead{})
+
+	storage.DB.Create(&rec)
+
+	ctx.JSON(iris.Map{"success": true})
+}
+
 // List groups (owned or member)
 func ListMyGroups(ctx iris.Context) {
 	tok := jsonWT.Get(ctx)
@@ -89,7 +176,72 @@ func ListMyGroups(ctx iris.Context) {
 		Preload("Members.User").
 		Find(&groups)
 
-	ctx.JSON(iris.Map{"success": true, "groups": groups})
+	// Get last message and unread count for each group
+	var enrichedGroups []map[string]interface{}
+	for _, group := range groups {
+		// Get last message
+		var lastMsg models.GroupMessage
+		if err := storage.DB.Where("group_id = ? AND (expires_at IS NULL OR expires_at > ?)", group.ID, time.Now()).
+			Order("id DESC").
+			Limit(1).
+			Preload("Sender").
+			First(&lastMsg).Error; err == nil {
+			// Message found
+			// Get unread count
+			var lastReadTime time.Time
+			var lastReadObj models.GroupMessageRead
+			if err := storage.DB.Where("group_id = ? AND user_id = ?", group.ID, user.ID).
+				Order("read_at DESC").
+				First(&lastReadObj).Error; err == nil {
+				lastReadTime = lastReadObj.ReadAt
+			}
+
+			var unreadCount int64
+			storage.DB.Model(&models.GroupMessage{}).
+				Where("group_id = ? AND user_id != ? AND created_at > ? AND (expires_at IS NULL OR expires_at > ?)",
+					group.ID, user.ID, lastReadTime, time.Now()).
+				Count(&unreadCount)
+
+			enrichedGroups = append(enrichedGroups, iris.Map{
+				"id":           group.ID,
+				"name":         group.Name,
+				"photoURL":     group.PhotoURL,
+				"status":       group.Status,
+				"privacy":      group.Privacy,
+				"ownerID":      group.OwnerID,
+				"experienceID": group.ExperienceID,
+				"createdAt":    group.CreatedAt,
+				"updatedAt":    group.UpdatedAt,
+				"lastMessage": iris.Map{
+					"content":    lastMsg.Content,
+					"senderName": "User", // We'll need to fetch user details separately if needed
+					"createdAt":  lastMsg.CreatedAt,
+				},
+				"unreadCount": unreadCount,
+				"members":     group.Members,
+				"experience":  group.Experience,
+			})
+		} else {
+			// No messages yet
+			enrichedGroups = append(enrichedGroups, iris.Map{
+				"id":           group.ID,
+				"name":         group.Name,
+				"photoURL":     group.PhotoURL,
+				"status":       group.Status,
+				"privacy":      group.Privacy,
+				"ownerID":      group.OwnerID,
+				"experienceID": group.ExperienceID,
+				"createdAt":    group.CreatedAt,
+				"updatedAt":    group.UpdatedAt,
+				"lastMessage":  nil,
+				"unreadCount":  int64(0),
+				"members":      group.Members,
+				"experience":   group.Experience,
+			})
+		}
+	}
+
+	ctx.JSON(iris.Map{"success": true, "groups": enrichedGroups})
 }
 
 // Get members and their states
@@ -313,6 +465,43 @@ func RemoveGuest(ctx iris.Context) {
 		return
 	}
 	ctx.JSON(iris.Map{"success": true})
+}
+
+// JoinGroup allows a user to join a group
+func JoinGroup(ctx iris.Context) {
+	tok := jsonWT.Get(ctx)
+	if tok == nil {
+		ctx.StopWithStatus(http.StatusUnauthorized)
+		return
+	}
+	user := tok.(*utils.AccessToken)
+	groupID, err := ctx.Params().GetUint("groupId")
+	if err != nil {
+		ctx.StopWithStatus(http.StatusBadRequest)
+		return
+	}
+
+	// Check if user is already a member
+	var existingMember models.ExperienceGroupMember
+	if err := storage.DB.Where("group_id = ? AND user_id = ?", groupID, user.ID).First(&existingMember).Error; err == nil {
+		ctx.JSON(iris.Map{"success": true, "message": "Already a member"})
+		return
+	}
+
+	// Create new membership
+	member := models.ExperienceGroupMember{
+		GroupID: groupID,
+		UserID:  user.ID,
+		State:   "joined",
+		Role:    "member",
+	}
+
+	if err := storage.DB.Create(&member).Error; err != nil {
+		ctx.StopWithStatus(http.StatusInternalServerError)
+		return
+	}
+
+	ctx.JSON(iris.Map{"success": true, "message": "Successfully joined group"})
 }
 
 // DeleteGroup allows the owner to delete the group and its memberships
