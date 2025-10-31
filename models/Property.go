@@ -16,6 +16,8 @@ type Property struct {
 	AddressLine1       string        `json:"addressLine1"`
 	AddressLine2       string        `json:"addressLine2"`
 	City               string        `json:"city"`
+	CityID             *uint         `json:"city_id" gorm:"column:city_id"`
+	ZoneID             *uint         `json:"zone_id" gorm:"column:zone_id"`
 	State              string        `json:"state"`
 	Zip                string        `json:"zip"`
 	Country            string        `json:"country"`
@@ -38,6 +40,8 @@ type Property struct {
 	Reviews            []Review      `json:"reviews"`
 	Reservations       []Reservation `json:"reservations"`
 	Host               User          `json:"host" gorm:"foreignKey:HostID;references:ID"`
+	CityRef            *City         `json:"cityRef" gorm:"foreignKey:CityID;references:ID"`
+	ZoneRef            *Zone         `json:"zoneRef" gorm:"foreignKey:ZoneID;references:ID"`
 
 	// Neighborhood & timing & category mapping
 	NeighborhoodDescription string         `json:"neighborhoodDescription" gorm:"column:neighborhood_description;type:text"`

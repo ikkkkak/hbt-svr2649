@@ -2,7 +2,9 @@ package routes
 
 import (
 	"apartments-clone-server/models"
+	"apartments-clone-server/services"
 	"apartments-clone-server/storage"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -170,6 +172,32 @@ func SendDirectMessage(ctx iris.Context) {
 		ctx.StatusCode(http.StatusInternalServerError)
 		ctx.JSON(iris.Map{"error": "failed to send message"})
 		return
+	}
+
+	// Send push notification to receiver
+	var sender models.User
+	var receiver models.User
+	if err := storage.DB.First(&sender, uid).Error; err == nil {
+		if err := storage.DB.First(&receiver, body.ReceiverID).Error; err == nil {
+			senderName := fmt.Sprintf("%s %s", sender.FirstName, sender.LastName)
+			propertyTitle := "عقار"
+
+			// If message is about a property, get property title
+			if body.RefType == "property" && body.RefID != nil {
+				var property models.Property
+				if err := storage.DB.First(&property, *body.RefID).Error; err == nil {
+					propertyTitle = property.Title
+				}
+			}
+
+			notificationService := services.NewNotificationService()
+			go notificationService.SendMessageNotificationToHost(
+				body.ReceiverID,
+				uid,
+				senderName,
+				propertyTitle,
+			)
+		}
 	}
 
 	ctx.JSON(iris.Map{

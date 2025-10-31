@@ -3,8 +3,11 @@ package main
 import (
 	"apartments-clone-server/models"
 	"apartments-clone-server/routes"
+	"apartments-clone-server/services"
+	pushsvc "apartments-clone-server/services/push"
 	"apartments-clone-server/storage"
 	"apartments-clone-server/utils"
+	websocketHub "apartments-clone-server/websocket"
 	"bytes"
 	"encoding/json"
 	"fmt"
@@ -127,11 +130,15 @@ func main() {
 		}()
 		storage.InitializeDB()
 		fmt.Println("✅ Database initialized successfully")
-		// Auto-migrate moderation tables (idempotent)
-		if err := storage.DB.AutoMigrate(&models.HiddenProperty{}, &models.PropertyReport{}, &models.UserFlag{}, &models.HiddenVideo{}, &models.PropertySaleReport{}, &models.LandmarkReport{}, &models.HiddenPropertySale{}, &models.PropertySaleVideo{}, &models.PropertySaleVideoLike{}, &models.PropertySaleVideoSave{}, &models.PropertySaleVideoComment{}, &models.PropertySaleVideoReport{}, &models.HiddenPropertySaleVideo{}, &models.UserBlockedOrganization{}); err != nil {
+		// Auto-migrate chat and moderation tables (idempotent)
+		if err := storage.DB.AutoMigrate(
+			&models.ChatMessage{},
+			&models.HiddenProperty{}, &models.PropertyReport{}, &models.UserFlag{}, &models.HiddenVideo{}, &models.PropertySaleReport{}, &models.LandmarkReport{}, &models.HiddenPropertySale{}, &models.PropertySaleVideo{}, &models.PropertySaleVideoLike{}, &models.PropertySaleVideoSave{}, &models.PropertySaleVideoComment{}, &models.PropertySaleVideoReport{}, &models.HiddenPropertySaleVideo{}, &models.UserBlockedOrganization{},
+			&models.City{}, &models.Zone{},
+		); err != nil {
 			fmt.Printf("❌ Failed to migrate moderation tables: %v\n", err)
 		} else {
-			fmt.Println("✅ Moderation tables migrated (hidden_properties, property_reports, user_flags, hidden_videos, property_sale_reports, landmark_reports, property_sale_videos, user_blocked_organizations)")
+			fmt.Println("✅ Tables migrated (chat_messages, hidden_properties, property_reports, user_flags, hidden_videos, property_sale_reports, landmark_reports, property_sale_videos, user_blocked_organizations)")
 		}
 	}()
 
@@ -158,6 +165,13 @@ func main() {
 		storage.InitializeRedis()
 		fmt.Println("✅ Redis initialized successfully")
 	}()
+
+	// Start background push worker
+	pushsvc.StartPushWorker()
+
+	fmt.Println("🔧 Initializing WebSocket Hub...")
+	websocketHub.InitHub()
+	fmt.Println("✅ WebSocket Hub initialized successfully")
 
 	fmt.Println("🔧 Creating Iris app...")
 	app := iris.New()
@@ -267,6 +281,36 @@ func main() {
 	// Simple test endpoint
 	app.Get("/test", func(ctx iris.Context) {
 		ctx.JSON(iris.Map{"status": "ok", "message": "Test endpoint working"})
+	})
+
+	// Debug notification settings for a user
+	app.Get("/api/debug/notifications/{userID:uint}", func(ctx iris.Context) {
+		userID, _ := ctx.Params().GetUint("userID")
+
+		var user models.User
+		if err := storage.DB.First(&user, userID).Error; err != nil {
+			ctx.StatusCode(iris.StatusNotFound)
+			ctx.JSON(iris.Map{"error": "User not found"})
+			return
+		}
+
+		// Debug notification settings
+		notificationService := services.NewNotificationService()
+		notificationService.DebugUserNotificationSettings(userID)
+
+		// Return user notification info
+		var pushTokens []string
+		if user.PushTokens != nil {
+			json.Unmarshal(user.PushTokens, &pushTokens)
+		}
+
+		ctx.JSON(iris.Map{
+			"userID":              userID,
+			"allowsNotifications": user.AllowsNotifications != nil && *user.AllowsNotifications,
+			"hasPushTokens":       user.PushTokens != nil,
+			"pushTokenCount":      len(pushTokens),
+			"pushTokens":          pushTokens,
+		})
 	})
 
 	// Test notification endpoints
@@ -460,6 +504,7 @@ func main() {
 		apartment.Delete("/{id}", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.CancelReservation)
 		apartment.Post("/property/{id}/validate", routes.ValidateReservationAvailability)
 		apartment.Get("/host/reservations", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.GetHostReservations)
+		apartment.Patch("/{id}/mark-viewed", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.MarkReservationAsViewed)
 	}
 
 	// New canonical reservations routes
@@ -804,6 +849,11 @@ func main() {
 		groups.Post("/{groupID}/messages/{msgId:uint}/reads", accessTokenVerifierMiddleware, routes.MarkMessageRead)
 		groups.Post("/{groupID}/typing", accessTokenVerifierMiddleware, routes.Typing)
 		groups.Get("/{groupID}/typing", accessTokenVerifierMiddleware, routes.ListTyping)
+		// WebSocket endpoint (use existing authenticated hub)
+		groups.Get("/{groupID:uint}/ws", websocketHub.HandleWebSocket)
+		groups.Get("/{groupID:uint}/ws2", websocketHub.HandleWebSocket)
+		// Broadcast hook for newly created messages (call after DB save)
+		groups.Post("/{groupID:uint}/messages/broadcast", routes.BroadcastGroupMessageHandler)
 		// Wishlist
 		groups.Get("/{groupID}/wishlist", accessTokenVerifierMiddleware, routes.ListGroupWishlist)
 		groups.Post("/{groupID}/wishlist", accessTokenVerifierMiddleware, routes.AddGroupWishlist)
@@ -860,10 +910,16 @@ func main() {
 		locationDiscovery.Post("/assign-properties", routes.AssignPropertiesToCriteriaEndpoint)
 	}
 
+	// Expo push token registration (simple, unauthenticated demo; in prod use JWT)
+	app.Post("/api/users/push-token", routes.RegisterPushToken)
+
+	// Legacy compatibility: conversations endpoint expected by client
+	app.Get("/api/conversations", routes.ListConversationsAlias)
+
 	// Properties Search
 	properties := app.Party("/api/properties")
 	{
-		properties.Get("/search", optionalAuthMiddleware, routes.SearchProperties)
+		properties.Get("/search", routes.SearchProperties)
 		// Public moderation endpoints (optional auth)
 		properties.Post("/{id:uint}/hide", optionalAuthMiddleware, routes.HidePropertyPublic)
 		properties.Post("/{id:uint}/report", optionalAuthMiddleware, routes.ReportPropertyPublic)
@@ -955,6 +1011,30 @@ func main() {
 		adminLandmarks.Get("/", routes.AdminGetAllLandmarks)
 		adminLandmarks.Get("/pending", routes.GetPendingLandmarks)
 		adminLandmarks.Patch("/{id:uint}/verify", routes.VerifyLandmark)
+	}
+
+	// Cities and Zones routes
+	cities := app.Party("/api/cities")
+	{
+		cities.Get("/", routes.GetCities)
+		cities.Get("/{cityId:uint}/zones", routes.GetZonesByCity)
+	}
+
+	// Admin Cities and Zones routes
+	adminCities := app.Party("/api/admin/cities", accessTokenVerifierMiddleware, utils.AdminOnlyMiddleware, utils.UserIDFromTokenMiddleware)
+	{
+		adminCities.Get("/", routes.AdminGetAllCities)
+		adminCities.Post("/", routes.AdminCreateCity)
+		adminCities.Patch("/{id:uint}", routes.AdminUpdateCity)
+		adminCities.Delete("/{id:uint}", routes.AdminDeleteCity)
+	}
+
+	adminZones := app.Party("/api/admin/zones", accessTokenVerifierMiddleware, utils.AdminOnlyMiddleware, utils.UserIDFromTokenMiddleware)
+	{
+		adminZones.Get("/", routes.AdminGetAllZones)
+		adminZones.Post("/", routes.AdminCreateZone)
+		adminZones.Patch("/{id:uint}", routes.AdminUpdateZone)
+		adminZones.Delete("/{id:uint}", routes.AdminDeleteZone)
 	}
 
 	app.Post("/api/refresh", refreshTokenVerifierMiddleware, utils.RefreshToken)

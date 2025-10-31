@@ -52,6 +52,13 @@ func GetLocationCriteria(ctx iris.Context) {
 		})
 	}
 
+	// Debug logging
+	fmt.Printf("🔍 GetLocationCriteria - Returning %d criteria:\n", len(response))
+	for _, criterion := range response {
+		fmt.Printf("  - %s (ID: %d, Lat: %.4f, Lng: %.4f, Radius: %.1fkm)\n",
+			criterion.Name, criterion.ID, criterion.CenterLat, criterion.CenterLng, criterion.Radius)
+	}
+
 	ctx.JSON(iris.Map{
 		"success": true,
 		"data":    response,
@@ -82,6 +89,12 @@ func GetLocationProperties(ctx iris.Context) {
 		ctx.JSON(iris.Map{"message": "Location criteria not found"})
 		return
 	}
+
+	// Log what the user clicked on
+	fmt.Printf("🔍 USER CLICKED ON LOCATION CRITERIA: %s (ID: %d, DisplayName: %s)\n",
+		criteria.Name, criteria.ID, criteria.DisplayName)
+	fmt.Printf("🔍 Criteria Details: Lat=%.4f, Lng=%.4f, Radius=%.1fkm\n",
+		criteria.CenterLat, criteria.CenterLng, criteria.Radius)
 
 	// Extract userID for user-specific exclusions (optional auth)
 	var userID uint = 0
@@ -134,6 +147,13 @@ func GetLocationProperties(ctx iris.Context) {
 		if cp.Property.ID != 0 { // Ensure property exists
 			properties = append(properties, cp.Property)
 		}
+	}
+
+	// Log how many properties were found
+	fmt.Printf("🔍 FOUND %d PROPERTIES FOR CRITERIA '%s':\n", len(properties), criteria.Name)
+	for i, prop := range properties {
+		fmt.Printf("  %d. ID: %d, Title: '%s', Price: %.2f MRU, Host: %s\n",
+			i+1, prop.ID, prop.Title, prop.NightlyPrice, prop.Host.FirstName+" "+prop.Host.LastName)
 	}
 
 	// Convert criteria to response format
@@ -355,12 +375,9 @@ func AssignPropertiesToCriteria() error {
 
 // InitializeLocationCriteria creates default location criteria for Nouakchott
 func InitializeLocationCriteria() error {
-	// Check if criteria already exist
-	var count int64
-	storage.DB.Model(&models.LocationCriteria{}).Count(&count)
-	if count > 0 {
-		return nil // Already initialized
-	}
+	// Force re-initialization by clearing existing criteria first
+	storage.DB.Where("1 = 1").Delete(&models.LocationCriteria{})
+	fmt.Println("🔍 Cleared existing location criteria for re-initialization")
 
 	// Define Nouakchott location criteria
 	criteria := []models.LocationCriteria{
@@ -456,6 +473,30 @@ func InitializeLocationCriteria() error {
 			CenterLng:   -15.9444,
 			Radius:      2.2, // 2.2km radius
 			Priority:    3,
+			IsActive:    true,
+			Icon:        "beach_access",
+			Color:       "#00BCD4",
+		},
+		{
+			Name:        "centre_emetteur",
+			DisplayName: "Centre Emetteur",
+			Description: "Properties near Centre Emetteur broadcasting center",
+			CenterLat:   18.0850,
+			CenterLng:   -15.9650,
+			Radius:      1.5, // 1.5km radius
+			Priority:    2,
+			IsActive:    true,
+			Icon:        "broadcast",
+			Color:       "#FF5722",
+		},
+		{
+			Name:        "cite_plage",
+			DisplayName: "Cite Plage",
+			Description: "Properties in Cite Plage area",
+			CenterLat:   18.0750,
+			CenterLng:   -15.9450,
+			Radius:      2.0, // 2km radius
+			Priority:    1,
 			IsActive:    true,
 			Icon:        "beach_access",
 			Color:       "#00BCD4",

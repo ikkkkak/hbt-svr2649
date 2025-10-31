@@ -61,6 +61,38 @@ func GetHostReservations(ctx iris.Context) {
 	ctx.JSON(reservations)
 }
 
+// MarkReservationAsViewed marks a reservation as viewed by the host
+func MarkReservationAsViewed(ctx iris.Context) {
+	tok := jwt.Get(ctx)
+	if tok == nil {
+		utils.CreateError(iris.StatusUnauthorized, "Unauthorized", "Missing token", ctx)
+		return
+	}
+	user := tok.(*utils.AccessToken)
+
+	params := ctx.Params()
+	reservationID := params.Get("id")
+
+	// Verify that the reservation belongs to this host
+	var reservation models.Reservation
+	err := storage.DB.
+		Joins("JOIN properties p ON p.id = reservations.property_id").
+		Where("reservations.id = ? AND p.host_id = ?", reservationID, user.ID).
+		First(&reservation).Error
+
+	if err != nil {
+		utils.CreateError(iris.StatusNotFound, "Not Found", "Reservation not found or not owned by host", ctx)
+		return
+	}
+
+	// Mark as viewed
+	hostViewed := true
+	reservation.HostViewed = &hostViewed
+	storage.DB.Save(&reservation)
+
+	ctx.JSON(iris.Map{"success": true, "message": "Reservation marked as viewed"})
+}
+
 func GetUserReservations(ctx iris.Context) {
 	params := ctx.Params()
 	userID := params.Get("id")
@@ -158,8 +190,8 @@ func CreateReservation(ctx iris.Context) {
 	// Create notification for host
 	var notification models.Notification
 	notification.UserID = property.HostID
-	notification.Title = "New Reservation Request"
-	notification.Message = fmt.Sprintf("You have a new reservation request for %s from %s to %s", property.Title, input.CheckIn.Format("Jan 2, 2006"), input.CheckOut.Format("Jan 2, 2006"))
+	notification.Title = "🏠 طلب حجز جديد!"
+	notification.Message = fmt.Sprintf("لديك طلب حجز جديد لـ '%s' من %s إلى %s", property.Title, input.CheckIn.Format("Jan 2, 2006"), input.CheckOut.Format("Jan 2, 2006"))
 	notification.Type = "reservation_request"
 	notification.RefID = uint(reservation.ID)
 	notification.RefType = "reservation"
@@ -175,7 +207,7 @@ func CreateReservation(ctx iris.Context) {
 
 	if existingConv.ID == 0 {
 		// Create new conversation with reservation message
-		guestMessage := fmt.Sprintf("Hi! I've requested to book %s from %s to %s for %d guests.",
+		guestMessage := fmt.Sprintf("مرحباً! طلبت حجز %s من %s إلى %s لـ %d ضيوف.",
 			property.Title, input.CheckIn.Format("Jan 2"), input.CheckOut.Format("Jan 2"), input.NumGuests)
 
 		var messages []models.Message
@@ -210,8 +242,48 @@ func CreateReservation(ctx iris.Context) {
 			log.Printf("❌ Failed to create conversation: %v", err)
 		}
 	} else {
-		log.Printf("ℹ️ Conversation already exists between guest %d and host %d for property %d",
+		// Conversation exists, but we still need to add the new reservation message
+		log.Printf("ℹ️ Conversation already exists between guest %d and host %d for property %d - Adding new reservation message",
 			claims.ID, property.HostID, property.ID)
+
+		// Create new reservation message for existing conversation
+		guestMessage := fmt.Sprintf("مرحباً! طلبت حجز %s من %s إلى %s لـ %d ضيوف.",
+			property.Title, input.CheckIn.Format("Jan 2"), input.CheckOut.Format("Jan 2"), input.NumGuests)
+
+		// Add property card message
+		propertyCardMessage := models.Message{
+			ConversationID:  existingConv.ID,
+			SenderID:        claims.ID,
+			ReceiverID:      property.HostID,
+			Type:            "property_card",
+			RefType:         "property",
+			RefID:           &property.ID,
+			PreviewTitle:    property.Title,
+			PreviewSubtitle: property.City,
+			PreviewImageURL: "",
+		}
+
+		// Add text message
+		textMessage := models.Message{
+			ConversationID: existingConv.ID,
+			SenderID:       claims.ID,
+			ReceiverID:     property.HostID,
+			Text:           guestMessage,
+			Type:           "text",
+		}
+
+		// Save both messages
+		if err := storage.DB.Create(&propertyCardMessage).Error; err != nil {
+			log.Printf("❌ Failed to create property card message: %v", err)
+		} else {
+			log.Printf("✅ Created property card message for existing conversation")
+		}
+
+		if err := storage.DB.Create(&textMessage).Error; err != nil {
+			log.Printf("❌ Failed to create text message: %v", err)
+		} else {
+			log.Printf("✅ Created reservation message for existing conversation")
+		}
 	}
 
 	// Send push notification to host
@@ -224,6 +296,10 @@ func CreateReservation(ctx iris.Context) {
 		log.Printf("👤 RESERVATION DEBUG: Guest ID=%d, Name='%s'", claims.ID, guestName)
 
 		notificationService := services.NewNotificationService()
+
+		// Debug host notification settings
+		notificationService.DebugUserNotificationSettings(property.HostID)
+
 		go notificationService.SendReservationNotificationToHost(
 			reservation.ID,
 			property.ID,
@@ -240,8 +316,8 @@ func CreateReservation(ctx iris.Context) {
 				// Create notification for guest
 				var guestNotification models.Notification
 				guestNotification.UserID = claims.ID
-				guestNotification.Title = "Reservation Request Sent"
-				guestNotification.Message = fmt.Sprintf("Your reservation request for %s is pending. The host will respond shortly.", property.Title)
+				guestNotification.Title = "📋 تم إرسال طلب الحجز"
+				guestNotification.Message = fmt.Sprintf("طلب حجزك لـ '%s' قيد الانتظار. سيرد المالك قريباً.", property.Title)
 				guestNotification.Type = "reservation_pending"
 				guestNotification.RefID = uint(reservation.ID)
 				guestNotification.RefType = "reservation"
@@ -258,8 +334,8 @@ func CreateReservation(ctx iris.Context) {
 
 				notificationService.SendNotificationToUser(
 					claims.ID,
-					"Reservation Request Sent",
-					fmt.Sprintf("Your request for %s is pending. The host will respond shortly.", property.Title),
+					"📋 تم إرسال طلب الحجز",
+					fmt.Sprintf("طلبك لـ '%s' قيد الانتظار. سيرد المالك قريباً.", property.Title),
 					data,
 				)
 			}
@@ -349,25 +425,16 @@ func UpdateReservationStatus(ctx iris.Context) {
 		hostName := fmt.Sprintf("%s %s", host.FirstName, host.LastName)
 		notificationService := services.NewNotificationService()
 
-		if input.Status == "confirmed" {
-			go notificationService.SendReservationAcceptanceNotificationToGuest(
-				reservation.ID,
-				reservation.PropertyID,
-				reservation.GuestID,
-				reservation.Property.HostID,
-				hostName,
-				reservation.Property.Title,
-			)
-		} else if input.Status == "rejected" {
-			go notificationService.SendReservationRejectionNotificationToGuest(
-				reservation.ID,
-				reservation.PropertyID,
-				reservation.GuestID,
-				reservation.Property.HostID,
-				hostName,
-				reservation.Property.Title,
-			)
-		}
+		// Send status notification to guest
+		go notificationService.SendReservationStatusNotificationToGuest(
+			reservation.ID,
+			reservation.PropertyID,
+			reservation.GuestID,
+			reservation.Property.HostID,
+			hostName,
+			reservation.Property.Title,
+			input.Status,
+		)
 	}
 
 	ctx.JSON(reservation)

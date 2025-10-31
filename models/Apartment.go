@@ -18,7 +18,8 @@ type Reservation struct {
 	TotalPrice float32   `json:"totalPrice"`
 	Status     string    `json:"status"` // pending, confirmed, rejected, cancelled, completed, expired
 	Note       string    `json:"note"`
-	ExpiresAt  time.Time `json:"expiresAt"` // 24h window for pending requests
+	ExpiresAt  time.Time `json:"expiresAt"`  // 24h window for pending requests
+	HostViewed *bool     `json:"hostViewed"` // Track if host has viewed this reservation
 
 	// Relationships
 	Property *Property `json:"property,omitempty" gorm:"foreignKey:PropertyID"`

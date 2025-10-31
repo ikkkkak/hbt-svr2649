@@ -87,7 +87,7 @@ func GetGroupLastMessage(ctx iris.Context) {
 	}
 
 	// Get last message with sender info
-	var lastMsg models.GroupMessage
+	var lastMsg models.ChatMessage
 	if err := storage.DB.Where("group_id = ? AND (expires_at IS NULL OR expires_at > ?)", groupID, time.Now()).
 		Order("id DESC").
 		Limit(1).
@@ -107,8 +107,8 @@ func GetGroupLastMessage(ctx iris.Context) {
 	}
 
 	var unreadCount int64
-	storage.DB.Model(&models.GroupMessage{}).
-		Where("group_id = ? AND user_id != ? AND created_at > ? AND (expires_at IS NULL OR expires_at > ?)",
+	storage.DB.Model(&models.ChatMessage{}).
+		Where("group_id = ? AND sender_id != ? AND created_at > ? AND (expires_at IS NULL OR expires_at > ?)",
 			groupID, user.ID, lastReadTime, time.Now()).
 		Count(&unreadCount)
 
@@ -117,7 +117,7 @@ func GetGroupLastMessage(ctx iris.Context) {
 			"id":           lastMsg.ID,
 			"content":      lastMsg.Content,
 			"createdAt":    lastMsg.CreatedAt,
-			"senderID":     lastMsg.UserID,
+			"senderID":     lastMsg.SenderID,
 			"senderName":   "User", // We'll need to fetch user details separately if needed
 			"senderAvatar": "",
 		},
@@ -180,7 +180,7 @@ func ListMyGroups(ctx iris.Context) {
 	var enrichedGroups []map[string]interface{}
 	for _, group := range groups {
 		// Get last message
-		var lastMsg models.GroupMessage
+		var lastMsg models.ChatMessage
 		if err := storage.DB.Where("group_id = ? AND (expires_at IS NULL OR expires_at > ?)", group.ID, time.Now()).
 			Order("id DESC").
 			Limit(1).
@@ -197,8 +197,8 @@ func ListMyGroups(ctx iris.Context) {
 			}
 
 			var unreadCount int64
-			storage.DB.Model(&models.GroupMessage{}).
-				Where("group_id = ? AND user_id != ? AND created_at > ? AND (expires_at IS NULL OR expires_at > ?)",
+			storage.DB.Model(&models.ChatMessage{}).
+				Where("group_id = ? AND sender_id != ? AND created_at > ? AND (expires_at IS NULL OR expires_at > ?)",
 					group.ID, user.ID, lastReadTime, time.Now()).
 				Count(&unreadCount)
 

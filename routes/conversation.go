@@ -40,7 +40,7 @@ func CreateConversation(ctx iris.Context) {
 
 	if conversationExists.RowsAffected > 0 {
 		ctx.StatusCode(iris.StatusConflict)
-		ctx.Text("Conversation already exists")
+		ctx.Text("المحادثة موجودة بالفعل")
 		return
 	}
 

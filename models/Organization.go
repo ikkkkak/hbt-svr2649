@@ -96,6 +96,8 @@ type PropertySale struct {
 	// Location
 	Address    string  `json:"address" gorm:"not null"`
 	City       string  `json:"city" gorm:"not null"`
+	CityID     *uint   `json:"city_id" gorm:"column:city_id"`
+	ZoneID     *uint   `json:"zone_id" gorm:"column:zone_id"`
 	State      string  `json:"state" gorm:"not null"`
 	Country    string  `json:"country" gorm:"not null"`
 	PostalCode string  `json:"postal_code"`
@@ -148,6 +150,8 @@ type PropertySale struct {
 	// Relationships
 	TourBookings []PropertyTour    `json:"tour_bookings" gorm:"foreignKey:PropertySaleID"`
 	Inquiries    []PropertyInquiry `json:"inquiries" gorm:"foreignKey:PropertySaleID"`
+	CityRef      *City             `json:"cityRef" gorm:"foreignKey:CityID;references:ID"`
+	ZoneRef      *Zone             `json:"zoneRef" gorm:"foreignKey:ZoneID;references:ID"`
 }
 
 // FloorPlan describes a single floor layout and details

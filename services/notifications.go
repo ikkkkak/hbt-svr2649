@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 )
 
@@ -77,8 +78,15 @@ func (ns *NotificationService) SendNotificationToUser(userID uint, title, body s
 
 	var lastError error
 	for _, token := range tokens {
-		if err := utils.SendNotification(token, title, body, dataMap); err != nil {
-			log.Printf("Failed to send notification to token %s: %v", token, err)
+		// Extract the actual Expo token (before the | separator if present)
+		expoToken := token
+		if strings.Contains(token, "|") {
+			expoToken = strings.Split(token, "|")[0]
+			log.Printf("📱 TOKEN EXTRACTED: Full token: %s, Expo token: %s", token, expoToken)
+		}
+
+		if err := utils.SendNotification(expoToken, title, body, dataMap); err != nil {
+			log.Printf("Failed to send notification to token %s: %v", expoToken, err)
 			lastError = err
 		}
 	}
@@ -91,14 +99,14 @@ func (ns *NotificationService) SendReservationNotificationToHost(reservationID, 
 	log.Printf("📱 NOTIFICATION DEBUG: Attempting to send reservation notification to host %d", hostID)
 	log.Printf("📱 NOTIFICATION DEBUG: Reservation ID: %d, Property: %s, Guest: %s", reservationID, propertyTitle, guestName)
 
-	title := "🏠 Nouvelle Réservation!"
-	body := fmt.Sprintf("%s a fait une réservation pour %s", guestName, propertyTitle)
+	title := "🏠 طلب حجز جديد!"
+	body := fmt.Sprintf("🎉 %s يريد حجز عقارك '%s'. يرجى الرد بسرعة للتأكيد!", guestName, propertyTitle)
 
 	// Create navigation parameters for deep linking
 	params := fmt.Sprintf(`{"reservationId": %d, "propertyId": %d, "guestId": %d}`, reservationID, propertyID, guestID)
 
 	data := NotificationData{
-		Type:       "reservation_created",
+		Type:       "reservation_request",
 		ID:         fmt.Sprintf("%d", reservationID),
 		PropertyID: fmt.Sprintf("%d", propertyID),
 		UserID:     fmt.Sprintf("%d", guestID),
@@ -119,8 +127,8 @@ func (ns *NotificationService) SendReservationNotificationToHost(reservationID, 
 
 // SendMessageNotificationToHost sends notification when a message is received
 func (ns *NotificationService) SendMessageNotificationToHost(hostID, senderID uint, senderName, propertyTitle string) error {
-	title := "💬 Nouveau Message"
-	body := fmt.Sprintf("%s vous a envoyé un message concernant %s", senderName, propertyTitle)
+	title := "💬 رسالة جديدة"
+	body := fmt.Sprintf("%s أرسل لك رسالة بخصوص %s", senderName, propertyTitle)
 
 	// Create navigation parameters for deep linking to messages
 	params := fmt.Sprintf(`{"senderId": %d, "senderName": "%s"}`, senderID, senderName)
@@ -137,20 +145,98 @@ func (ns *NotificationService) SendMessageNotificationToHost(hostID, senderID ui
 	return ns.SendNotificationToUser(hostID, title, body, data)
 }
 
+// SendReservationStatusNotificationToGuest sends notification when reservation status changes
+func (ns *NotificationService) SendReservationStatusNotificationToGuest(reservationID, propertyID, guestID, hostID uint, hostName, propertyTitle, status string) error {
+	log.Printf("📱 NOTIFICATION DEBUG: Sending reservation status notification to guest %d", guestID)
+	log.Printf("📱 NOTIFICATION DEBUG: Status: %s, Property: %s, Host: %s", status, propertyTitle, hostName)
+
+	var title, body string
+	var notificationType string
+
+	switch status {
+	case "confirmed":
+		title = "✅ تم تأكيد الحجز!"
+		body = fmt.Sprintf("🎉 أخبار رائعة! %s أكد حجزك لـ '%s'. استعد لإقامة لا تُنسى!", hostName, propertyTitle)
+		notificationType = "reservation_confirmed"
+	case "cancelled":
+		title = "❌ تم إلغاء الحجز"
+		body = fmt.Sprintf("للأسف، %s ألغى حجزك لـ '%s'. نساعدك في العثور على بديل.", hostName, propertyTitle)
+		notificationType = "reservation_cancelled"
+	case "expired":
+		title = "⏰ انتهت صلاحية الحجز"
+		body = fmt.Sprintf("انتهت صلاحية طلب الحجز لـ '%s'. يمكنك تقديم طلب جديد.", propertyTitle)
+		notificationType = "reservation_expired"
+	default:
+		title = "📋 تحديث الحجز"
+		body = fmt.Sprintf("تحديث بخصوص حجزك لـ '%s'.", propertyTitle)
+		notificationType = "reservation_update"
+	}
+
+	params := fmt.Sprintf(`{"reservationId": %d, "propertyId": %d, "hostId": %d}`, reservationID, propertyID, hostID)
+
+	data := NotificationData{
+		Type:       notificationType,
+		ID:         fmt.Sprintf("%d", reservationID),
+		PropertyID: fmt.Sprintf("%d", propertyID),
+		UserID:     fmt.Sprintf("%d", guestID),
+		HostID:     fmt.Sprintf("%d", hostID),
+		Screen:     "MyReservations",
+		Params:     params,
+		Action:     "view_reservation",
+	}
+
+	err := ns.SendNotificationToUser(guestID, title, body, data)
+	if err != nil {
+		log.Printf("❌ NOTIFICATION ERROR: Failed to send reservation status notification: %v", err)
+	} else {
+		log.Printf("✅ NOTIFICATION SUCCESS: Reservation status notification sent to guest %d", guestID)
+	}
+	return err
+}
+
+// SendReservationReminderNotificationToHost sends reminder notification to host about pending reservations
+func (ns *NotificationService) SendReservationReminderNotificationToHost(reservationID, propertyID, hostID, guestID uint, guestName, propertyTitle string, hoursRemaining int) error {
+	log.Printf("📱 NOTIFICATION DEBUG: Sending reservation reminder to host %d", hostID)
+
+	title := "⏰ تذكير: حجز في الانتظار"
+	body := fmt.Sprintf("طلب الحجز من %s لـ '%s' سينتهي خلال %d ساعات. يرجى الرد الآن!", guestName, propertyTitle, hoursRemaining)
+
+	params := fmt.Sprintf(`{"reservationId": %d, "propertyId": %d, "guestId": %d}`, reservationID, propertyID, guestID)
+
+	data := NotificationData{
+		Type:       "reservation_reminder",
+		ID:         fmt.Sprintf("%d", reservationID),
+		PropertyID: fmt.Sprintf("%d", propertyID),
+		UserID:     fmt.Sprintf("%d", guestID),
+		HostID:     fmt.Sprintf("%d", hostID),
+		Screen:     "HostReservations",
+		Params:     params,
+		Action:     "view_reservation",
+	}
+
+	err := ns.SendNotificationToUser(hostID, title, body, data)
+	if err != nil {
+		log.Printf("❌ NOTIFICATION ERROR: Failed to send reservation reminder: %v", err)
+	} else {
+		log.Printf("✅ NOTIFICATION SUCCESS: Reservation reminder sent to host %d", hostID)
+	}
+	return err
+}
+
 // SendVideoInteractionNotificationToHost sends notification when video is liked/commented
 func (ns *NotificationService) SendVideoInteractionNotificationToHost(hostID, userID uint, userName, interactionType, videoTitle string) error {
 	var title, body string
 
 	switch interactionType {
 	case "like":
-		title = "❤️ Votre Vidéo a été Aimée!"
-		body = fmt.Sprintf("%s a aimé votre vidéo: %s", userName, videoTitle)
+		title = "❤️ تم الإعجاب بفيديوك!"
+		body = fmt.Sprintf("%s أعجب بفيديوك: %s", userName, videoTitle)
 	case "comment":
-		title = "💬 Nouveau Commentaire!"
-		body = fmt.Sprintf("%s a commenté votre vidéo: %s", userName, videoTitle)
+		title = "💬 تعليق جديد!"
+		body = fmt.Sprintf("%s علق على فيديوك: %s", userName, videoTitle)
 	default:
-		title = "📹 Interaction Vidéo"
-		body = fmt.Sprintf("%s a interagi avec votre vidéo: %s", userName, videoTitle)
+		title = "📹 تفاعل مع الفيديو"
+		body = fmt.Sprintf("%s تفاعل مع فيديوك: %s", userName, videoTitle)
 	}
 
 	// Create navigation parameters for deep linking to videos
@@ -226,8 +312,8 @@ func (ns *NotificationService) SendPropertyStatusNotificationToHost(propertyID, 
 
 // SendReservationAcceptanceNotificationToGuest sends notification when reservation is accepted
 func (ns *NotificationService) SendReservationAcceptanceNotificationToGuest(reservationID, propertyID, guestID, hostID uint, hostName, propertyTitle string) error {
-	title := "🎉 Réservation Acceptée!"
-	body := fmt.Sprintf("%s a accepté votre réservation pour %s", hostName, propertyTitle)
+	title := "🎉 تم قبول الحجز!"
+	body := fmt.Sprintf("%s قبل حجزك لـ %s", hostName, propertyTitle)
 
 	// Create navigation parameters for deep linking to guest reservations
 	params := fmt.Sprintf(`{"reservationId": %d, "propertyId": %d, "hostId": %d}`, reservationID, propertyID, hostID)
@@ -248,8 +334,8 @@ func (ns *NotificationService) SendReservationAcceptanceNotificationToGuest(rese
 
 // SendReservationRejectionNotificationToGuest sends notification when reservation is rejected
 func (ns *NotificationService) SendReservationRejectionNotificationToGuest(reservationID, propertyID, guestID, hostID uint, hostName, propertyTitle string) error {
-	title := "😔 Réservation Refusée"
-	body := fmt.Sprintf("%s a refusé votre réservation pour %s", hostName, propertyTitle)
+	title := "😔 تم رفض الحجز"
+	body := fmt.Sprintf("%s رفض حجزك لـ %s", hostName, propertyTitle)
 
 	// Create navigation parameters for deep linking to guest reservations
 	params := fmt.Sprintf(`{"reservationId": %d, "propertyId": %d, "hostId": %d}`, reservationID, propertyID, hostID)
@@ -270,8 +356,8 @@ func (ns *NotificationService) SendReservationRejectionNotificationToGuest(reser
 
 // SendWelcomeNotificationToNewUser sends welcome notification to new users
 func (ns *NotificationService) SendWelcomeNotificationToNewUser(userID uint, firstName string) error {
-	title := "🎉 Bienvenue sur habitat!"
-	body := fmt.Sprintf("Bonjour %s! Découvrez des logements incroyables en Mauritanie.", firstName)
+	title := "🎉 مرحباً بك في habitat!"
+	body := fmt.Sprintf("مرحباً %s! اكتشف مساكن رائعة في موريتانيا.", firstName)
 
 	data := NotificationData{
 		Type:   "welcome",
@@ -288,11 +374,11 @@ func (ns *NotificationService) SendReminderNotificationToGuest(reservationID, pr
 	var title, body string
 
 	if daysUntil == 1 {
-		title = "⏰ Rappel: Réservation Demain!"
-		body = fmt.Sprintf("N'oubliez pas votre séjour à %s demain!", propertyTitle)
+		title = "⏰ تذكير: الحجز غداً!"
+		body = fmt.Sprintf("لا تنس إقامتك في %s غداً!", propertyTitle)
 	} else {
-		title = "📅 Rappel de Réservation"
-		body = fmt.Sprintf("Votre séjour à %s commence dans %d jours!", propertyTitle, daysUntil)
+		title = "📅 تذكير الحجز"
+		body = fmt.Sprintf("تبدأ إقامتك في %s خلال %d أيام!", propertyTitle, daysUntil)
 	}
 
 	data := NotificationData{
@@ -307,3 +393,32 @@ func (ns *NotificationService) SendReminderNotificationToGuest(reservationID, pr
 
 // Global notification service instance
 var NotificationServiceInstance = NewNotificationService()
+
+// DebugUserNotificationSettings logs detailed information about a user's notification settings
+func (ns *NotificationService) DebugUserNotificationSettings(userID uint) {
+	log.Printf("🔍 NOTIFICATION DEBUG: Checking notification settings for user %d", userID)
+
+	var user models.User
+	if err := storage.DB.First(&user, userID).Error; err != nil {
+		log.Printf("❌ NOTIFICATION DEBUG: User %d not found: %v", userID, err)
+		return
+	}
+
+	log.Printf("📱 NOTIFICATION DEBUG: User %d settings:", userID)
+	log.Printf("  - AllowsNotifications: %v", user.AllowsNotifications != nil && *user.AllowsNotifications)
+	log.Printf("  - PushTokens: %v", user.PushTokens != nil)
+
+	if user.PushTokens != nil {
+		var tokens []string
+		if err := json.Unmarshal(user.PushTokens, &tokens); err == nil {
+			log.Printf("  - Token count: %d", len(tokens))
+			for i, token := range tokens {
+				if i < 3 { // Show first 3 tokens
+					log.Printf("  - Token %d: %s...", i+1, token[:20])
+				}
+			}
+		} else {
+			log.Printf("  - Error unmarshaling tokens: %v", err)
+		}
+	}
+}

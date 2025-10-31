@@ -2,8 +2,10 @@ package routes
 
 import (
 	"apartments-clone-server/models"
+	pushsvc "apartments-clone-server/services/push"
 	"apartments-clone-server/storage"
 	"apartments-clone-server/utils"
+	websocketHub "apartments-clone-server/websocket"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -120,6 +122,13 @@ func SendGroupMessage(ctx iris.Context) {
 	}
 	// preload sender for client display
 	storage.DB.Preload("Sender").First(&msg, msg.ID)
+
+    // Pre-broadcast: log push recipients snapshot
+    pushsvc.LogGroupTokens(groupID, user.ID)
+    // Broadcast new message to WebSocket clients (will also send pushes)
+    websocketHub.BroadcastNewMessage(groupID, msg)
+    // Post-broadcast: confirm summary will be printed by broadcast path as well
+
 	ctx.JSON(iris.Map{"success": true, "message": msg})
 }
 
@@ -153,7 +162,7 @@ func StartDirectConversation(ctx iris.Context) {
 		First(&group)
 
 	if group.ID == 0 {
-		group = models.ExperienceGroup{Name: "Conversation", OwnerID: user.ID, Privacy: "direct", Status: "active"}
+		group = models.ExperienceGroup{Name: "محادثة", OwnerID: user.ID, Privacy: "direct", Status: "active"}
 		if err := storage.DB.Create(&group).Error; err != nil {
 			ctx.StopWithStatus(http.StatusInternalServerError)
 			return

@@ -50,6 +50,8 @@ func CreatePropertySale(ctx iris.Context) {
 		// Step 6: Location with Map
 		Address    string  `json:"address" validate:"required"`
 		City       string  `json:"city" validate:"required"`
+		CityID     *uint   `json:"city_id"`
+		ZoneID     *uint   `json:"zone_id"`
 		State      string  `json:"state"`
 		Country    string  `json:"country"`
 		PostalCode string  `json:"postal_code"`
@@ -121,6 +123,8 @@ func CreatePropertySale(ctx iris.Context) {
 		"category":        "residential",
 		"address":         input.Address,
 		"city":            input.City,
+		"city_id":         input.CityID,
+		"zone_id":         input.ZoneID,
 		"state":           input.State,
 		"country":         input.Country,
 		"postal_code":     input.PostalCode,
@@ -795,7 +799,7 @@ func GetPublishedProperties(ctx iris.Context) {
 		}
 	}
 
-	q := storage.DB.Model(&models.PropertySale{}).
+    q := storage.DB.Model(&models.PropertySale{}).
 		Preload("Organization").
 		Preload("Agent.User").
 		Where("property_sales.status = ? OR property_sales.is_published = ?", "published", true)
@@ -816,7 +820,34 @@ func GetPublishedProperties(ctx iris.Context) {
 		fmt.Printf("🔍 GetPublishedProperties: No user ID, showing all property sales\n")
 	}
 
-	var properties []models.PropertySale
+    // Apply optional filters
+    if v := ctx.URLParam("bedrooms"); v != "" {
+        if n, err := strconv.Atoi(v); err == nil {
+            q = q.Where("property_sales.bedrooms >= ?", n)
+        }
+    }
+    if v := ctx.URLParam("bathrooms"); v != "" {
+        if n, err := strconv.Atoi(v); err == nil {
+            q = q.Where("property_sales.bathrooms >= ?", n)
+        }
+    }
+    if v := ctx.URLParam("year_built"); v != "" {
+        if n, err := strconv.Atoi(v); err == nil && n > 0 {
+            q = q.Where("property_sales.year_built >= ?", n)
+        }
+    }
+    if v := ctx.URLParam("city_id"); v != "" {
+        if n, err := strconv.Atoi(v); err == nil && n > 0 {
+            q = q.Where("property_sales.city_id = ?", n)
+        }
+    }
+    if v := ctx.URLParam("zone_id"); v != "" {
+        if n, err := strconv.Atoi(v); err == nil && n > 0 {
+            q = q.Where("property_sales.zone_id = ?", n)
+        }
+    }
+
+    var properties []models.PropertySale
 	if err := q.Order("property_sales.created_at DESC").Find(&properties).Error; err != nil {
 		ctx.StatusCode(http.StatusInternalServerError)
 		ctx.JSON(iris.Map{"error": "Failed to fetch properties"})

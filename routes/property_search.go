@@ -18,6 +18,7 @@ func SearchProperties(ctx iris.Context) {
 	fmt.Printf("🔍 SearchProperties called with parameters:\n")
 	fmt.Printf("  city: %s\n", ctx.URLParam("city"))
 	fmt.Printf("  propertyType: %s\n", ctx.URLParam("propertyType"))
+	fmt.Printf("  type: %s\n", ctx.URLParam("type"))
 	fmt.Printf("  categoryId: %s\n", ctx.URLParam("categoryId"))
 	fmt.Printf("  minPrice: %s\n", ctx.URLParam("minPrice"))
 	fmt.Printf("  maxPrice: %s\n", ctx.URLParam("maxPrice"))
@@ -69,9 +70,14 @@ func SearchProperties(ctx iris.Context) {
 	}
 
 	// Property attributes
-	if pType := strings.TrimSpace(ctx.URLParam("propertyType")); pType != "" {
-		fmt.Printf("🔍 Applying property type filter: %s\n", pType)
-		q = q.Where("property_type = ?", pType)
+	// Support both propertyType and type as aliases
+	pTypeParam := strings.TrimSpace(ctx.URLParam("propertyType"))
+	if pTypeParam == "" {
+		pTypeParam = strings.TrimSpace(ctx.URLParam("type"))
+	}
+	if pTypeParam != "" {
+		fmt.Printf("🔍 Applying property type filter: %s\n", pTypeParam)
+		q = q.Where("property_type = ?", pTypeParam)
 	}
 
 	// Property category filter
@@ -98,6 +104,11 @@ func SearchProperties(ctx iris.Context) {
 	if minBathrooms, err := ctx.URLParamInt("minBathrooms"); err == nil && minBathrooms > 0 {
 		fmt.Printf("🔍 Applying min bathrooms filter: %d\n", minBathrooms)
 		q = q.Where("bathrooms >= ?", minBathrooms)
+	}
+	// Optional minimum year built
+	if minYearBuilt, err := ctx.URLParamInt("minYearBuilt"); err == nil && minYearBuilt > 0 {
+		fmt.Printf("🔍 Applying min year built filter: %d\n", minYearBuilt)
+		q = q.Where("year_built >= ?", minYearBuilt)
 	}
 	if minRating, err := ctx.URLParamInt("minRating"); err == nil && minRating > 0 {
 		fmt.Printf("🔍 Applying min rating filter: %d\n", minRating)

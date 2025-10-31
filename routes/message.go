@@ -50,7 +50,7 @@ func CreateMessage(ctx iris.Context) {
 	if err := storage.DB.First(&sender, req.SenderID).Error; err == nil {
 		if err := storage.DB.First(&receiver, req.ReceiverID).Error; err == nil {
 			senderName := fmt.Sprintf("%s %s", sender.FirstName, sender.LastName)
-			propertyTitle := "une propriété"
+			propertyTitle := "عقار"
 
 			// If message is about a property, get property title
 			if req.RefType == "property" && req.RefID != nil {

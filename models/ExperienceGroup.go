@@ -44,3 +44,6 @@ type ExperienceGroupMember struct {
 	CreatedAt time.Time `json:"createdAt"`
 	UpdatedAt time.Time `json:"updatedAt"`
 }
+
+// Force explicit table name to avoid any naming mismatch
+func (ExperienceGroupMember) TableName() string { return "experience_group_members" }
