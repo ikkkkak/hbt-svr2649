@@ -2,10 +2,12 @@ package push
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
 	"strings"
+	"time"
 
 	firebase "firebase.google.com/go/v4"
 	"firebase.google.com/go/v4/messaging"
@@ -16,8 +18,11 @@ var fcmClient *messaging.Client
 var fcmInitialized bool
 
 // InitializeFCM initializes Firebase Cloud Messaging client
-// Requires GOOGLE_APPLICATION_CREDENTIALS environment variable pointing to service account JSON
-// OR FCM_CREDENTIALS_PATH pointing to the service account JSON file
+// Supports multiple credential sources:
+// 1. FCM_CREDENTIALS_JSON - JSON content as environment variable (BEST for Render/production)
+// 2. FCM_CREDENTIALS_PATH - Path to service account JSON file
+// 3. GOOGLE_APPLICATION_CREDENTIALS - Standard Google Cloud credentials path
+// 4. Default file locations - ./service-account.json, etc.
 func InitializeFCM() error {
 	if fcmInitialized {
 		return nil
@@ -25,59 +30,107 @@ func InitializeFCM() error {
 
 	ctx := context.Background()
 
-	// Try to get credentials path from environment
-	credsPath := os.Getenv("FCM_CREDENTIALS_PATH")
-	if credsPath == "" {
-		credsPath = os.Getenv("GOOGLE_APPLICATION_CREDENTIALS")
-	}
-	if credsPath == "" {
-		// Try default locations (skip google-services.json as it's for client-side use only)
-		possiblePaths := []string{
-			"./service-account.json",
-			"./fcm-credentials.json",
-			"../service-account.json",
-		}
-		for _, path := range possiblePaths {
-			if _, err := os.Stat(path); err == nil {
-				credsPath = path
-				break
-			}
-		}
-	}
-
 	var app *firebase.App
 	var err error
 
-	if credsPath != "" {
-		// Validate that we're not using google-services.json (client config)
-		if strings.Contains(credsPath, "google-services.json") {
-			log.Printf("⚠️ google-services.json is for client-side use only, not for FCM Admin SDK")
-			log.Printf("⚠️ Please download service-account.json from Firebase Console")
-			log.Printf("⚠️ Go to: Firebase Console → Project Settings → Service Accounts → Generate new private key")
-			return fmt.Errorf("google-services.json cannot be used for FCM Admin SDK - need service-account.json")
+	// Option 1: Check for FCM_CREDENTIALS_JSON (JSON content as environment variable) - BEST for Render
+	credsJSON := os.Getenv("FCM_CREDENTIALS_JSON")
+	if credsJSON != "" {
+		log.Printf("🔥 Initializing FCM with credentials from FCM_CREDENTIALS_JSON environment variable")
+
+		// Parse JSON to validate format
+		var jsonData map[string]interface{}
+		if err := json.Unmarshal([]byte(credsJSON), &jsonData); err != nil {
+			log.Printf("⚠️ FCM_CREDENTIALS_JSON is not valid JSON: %v", err)
+			log.Printf("⚠️ FCM will be disabled. Make sure FCM_CREDENTIALS_JSON contains valid service-account.json content")
+			return fmt.Errorf("invalid JSON in FCM_CREDENTIALS_JSON: %v", err)
 		}
 
-		log.Printf("🔥 Initializing FCM with credentials from: %s", credsPath)
-		opt := option.WithCredentialsFile(credsPath)
-		app, err = firebase.NewApp(ctx, nil, opt)
+		// Create a temporary file with the credentials
+		tmpFile, err := os.CreateTemp("", "fcm-credentials-*.json")
 		if err != nil {
-			log.Printf("⚠️ Failed to initialize FCM with credentials file: %v", err)
-			log.Printf("⚠️ FCM will be disabled. Make sure the file is a valid service-account.json from Firebase Console")
+			log.Printf("⚠️ Failed to create temporary file for FCM credentials: %v", err)
+			return fmt.Errorf("failed to create temp file: %v", err)
+		}
+
+		// Write JSON to temporary file
+		if _, err := tmpFile.Write([]byte(credsJSON)); err != nil {
+			tmpFile.Close()
+			os.Remove(tmpFile.Name())
+			log.Printf("⚠️ Failed to write FCM credentials to temp file: %v", err)
+			return fmt.Errorf("failed to write temp file: %v", err)
+		}
+		tmpFile.Close()
+
+		// Use temporary file for credentials
+		log.Printf("🔥 Using temporary file: %s", tmpFile.Name())
+		opt := option.WithCredentialsFile(tmpFile.Name())
+		app, err = firebase.NewApp(ctx, nil, opt)
+
+		// Clean up temp file after initialization (with small delay to ensure it's read)
+		go func() {
+			time.Sleep(2 * time.Second)
+			os.Remove(tmpFile.Name())
+			log.Printf("🧹 Cleaned up temporary FCM credentials file")
+		}()
+
+		if err != nil {
+			log.Printf("⚠️ Failed to initialize FCM with FCM_CREDENTIALS_JSON: %v", err)
+			log.Printf("⚠️ FCM will be disabled. Make sure the JSON content is valid service-account.json")
 			return err
 		}
 	} else {
-		log.Printf("⚠️ No FCM credentials found.")
-		log.Printf("⚠️ To enable FCM, download service-account.json from Firebase Console:")
-		log.Printf("⚠️   1. Go to Firebase Console → Project Settings → Service Accounts")
-		log.Printf("⚠️   2. Click 'Generate new private key'")
-		log.Printf("⚠️   3. Save as 'service-account.json' in server root")
-		log.Printf("⚠️   4. Or set FCM_CREDENTIALS_PATH environment variable")
-		// Try with default credentials (GCP service account)
-		app, err = firebase.NewApp(ctx, nil)
-		if err != nil {
-			log.Printf("⚠️ Failed to initialize FCM: %v", err)
-			log.Printf("⚠️ FCM will be disabled. Push notifications will use Expo Push fallback.")
-			return err
+		// Option 2: Try to get credentials path from environment
+		credsPath := os.Getenv("FCM_CREDENTIALS_PATH")
+		if credsPath == "" {
+			credsPath = os.Getenv("GOOGLE_APPLICATION_CREDENTIALS")
+		}
+		if credsPath == "" {
+			// Try default locations (skip google-services.json as it's for client-side use only)
+			possiblePaths := []string{
+				"./service-account.json",
+				"./fcm-credentials.json",
+				"../service-account.json",
+			}
+			for _, path := range possiblePaths {
+				if _, err := os.Stat(path); err == nil {
+					credsPath = path
+					break
+				}
+			}
+		}
+
+		if credsPath != "" {
+			// Validate that we're not using google-services.json (client config)
+			if strings.Contains(credsPath, "google-services.json") {
+				log.Printf("⚠️ google-services.json is for client-side use only, not for FCM Admin SDK")
+				log.Printf("⚠️ Please download service-account.json from Firebase Console")
+				log.Printf("⚠️ Go to: Firebase Console → Project Settings → Service Accounts → Generate new private key")
+				return fmt.Errorf("google-services.json cannot be used for FCM Admin SDK - need service-account.json")
+			}
+
+			log.Printf("🔥 Initializing FCM with credentials from: %s", credsPath)
+			opt := option.WithCredentialsFile(credsPath)
+			app, err = firebase.NewApp(ctx, nil, opt)
+			if err != nil {
+				log.Printf("⚠️ Failed to initialize FCM with credentials file: %v", err)
+				log.Printf("⚠️ FCM will be disabled. Make sure the file is a valid service-account.json from Firebase Console")
+				return err
+			}
+		} else {
+			log.Printf("⚠️ No FCM credentials found.")
+			log.Printf("⚠️ To enable FCM, use one of these options:")
+			log.Printf("⚠️   1. (BEST for Render) Set FCM_CREDENTIALS_JSON environment variable with JSON content")
+			log.Printf("⚠️   2. Set FCM_CREDENTIALS_PATH to point to service-account.json file")
+			log.Printf("⚠️   3. Place service-account.json in server root directory")
+			log.Printf("⚠️   Download from: Firebase Console → Project Settings → Service Accounts → Generate new private key")
+			// Try with default credentials (GCP service account)
+			app, err = firebase.NewApp(ctx, nil)
+			if err != nil {
+				log.Printf("⚠️ Failed to initialize FCM: %v", err)
+				log.Printf("⚠️ FCM will be disabled. Push notifications will use Expo Push fallback.")
+				return err
+			}
 		}
 	}
 
