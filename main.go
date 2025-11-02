@@ -166,6 +166,23 @@ func main() {
 		fmt.Println("✅ Redis initialized successfully")
 	}()
 
+	// Initialize FCM (Firebase Cloud Messaging)
+	fmt.Println("🔧 Initializing FCM...")
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				fmt.Printf("❌ Panic during FCM initialization: %v\n", r)
+				fmt.Println("⚠️  Continuing without FCM (will use Expo Push fallback)...")
+			}
+		}()
+		if err := pushsvc.InitializeFCM(); err != nil {
+			log.Printf("⚠️ FCM initialization failed: %v", err)
+			log.Printf("⚠️ Push notifications will fall back to Expo Push service")
+		} else {
+			fmt.Println("✅ FCM initialized successfully")
+		}
+	}()
+
 	// Start background push worker
 	pushsvc.StartPushWorker()
 
@@ -351,7 +368,7 @@ func main() {
 		user.Post("/feedback", accessTokenVerifierMiddleware, routes.CreateFeedback)
 
 		// User Profile routes
-		user.Get("/profile", accessTokenVerifierMiddleware, routes.GetUserProfile)
+		user.Get("/profile", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.GetUserProfile)
 		user.Post("/profile", accessTokenVerifierMiddleware, routes.CreateOrUpdateUserProfile)
 		user.Put("/profile", accessTokenVerifierMiddleware, routes.CreateOrUpdateUserProfile)
 		user.Delete("/profile", accessTokenVerifierMiddleware, routes.DeleteUserProfile)
@@ -904,7 +921,7 @@ func main() {
 	locationDiscovery := app.Party("/api/location-discovery")
 	{
 		locationDiscovery.Get("/criteria", routes.GetLocationCriteria)
-		locationDiscovery.Get("/criteria/{criteriaId}/properties", optionalAuthMiddleware, routes.GetLocationProperties)
+		locationDiscovery.Get("/criteria/{criteriaId}/properties", routes.GetLocationProperties)
 		locationDiscovery.Get("/property/{propertyId}/criteria", routes.GetPropertyLocationCriteria)
 		locationDiscovery.Post("/initialize", routes.InitializeLocationCriteriaEndpoint)
 		locationDiscovery.Post("/assign-properties", routes.AssignPropertiesToCriteriaEndpoint)

@@ -28,11 +28,11 @@ func EnqueuePush(tokens []string, title, body string) error {
 	defer cancel()
 	if storage.Redis == nil {
 		log.Printf("⚠️ Redis not initialized, sending push synchronously")
-		return SendExpoPush(tokens, title, body)
+		return SendPush(tokens, title, body)
 	}
 	if err := storage.Redis.LPush(ctx, pushQueueKey, b).Err(); err != nil {
 		log.Printf("⚠️ Failed to enqueue push job: %v — falling back to direct send", err)
-		return SendExpoPush(tokens, title, body)
+		return SendPush(tokens, title, body)
 	}
 	log.Printf("🧾 Enqueued push job for %d tokens", len(tokens))
 	return nil
@@ -44,7 +44,7 @@ func StartPushWorker() {
 		log.Printf("⚠️ Redis not initialized, push worker disabled (pushes will be sent synchronously)")
 		return
 	}
-	
+
 	// Verify Redis connection before starting worker
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -52,13 +52,13 @@ func StartPushWorker() {
 		log.Printf("⚠️ Redis connection failed: %v — push worker disabled (pushes will be sent synchronously)", err)
 		return
 	}
-	
+
 	go func() {
 		ctx := context.Background()
 		backoffSeconds := 1
 		lastErrorTime := time.Time{}
 		errorCount := 0
-		
+
 		for {
 			// BLPOP blocks until a job is available
 			res, err := storage.Redis.BLPop(ctx, 30*time.Second, pushQueueKey).Result()
@@ -69,17 +69,17 @@ func StartPushWorker() {
 					errorCount = 0
 					continue
 				}
-				
+
 				// Exponential backoff for connection errors
 				now := time.Now()
 				errorCount++
-				
+
 				// Only log errors every 10 seconds to reduce spam
 				if now.Sub(lastErrorTime) >= 10*time.Second || errorCount == 1 {
 					log.Printf("⚠️ Push worker Redis error (count: %d, backoff: %ds): %v", errorCount, backoffSeconds, err)
 					lastErrorTime = now
 				}
-				
+
 				// Exponential backoff: 1s, 2s, 4s, 8s, 16s, max 30s
 				time.Sleep(time.Duration(backoffSeconds) * time.Second)
 				if backoffSeconds < 30 {
@@ -87,11 +87,11 @@ func StartPushWorker() {
 				}
 				continue
 			}
-			
+
 			// Success - reset backoff
 			backoffSeconds = 1
 			errorCount = 0
-			
+
 			if len(res) < 2 {
 				continue
 			}
@@ -102,8 +102,8 @@ func StartPushWorker() {
 			}
 			log.Printf("🚚 Dequeued push job: %d tokens", len(job.Tokens))
 			// send pushes
-			if err := SendExpoPush(job.Tokens, job.Title, job.Body); err != nil {
-				log.Printf("⚠️ Expo push send error: %v", err)
+			if err := SendPush(job.Tokens, job.Title, job.Body); err != nil {
+				log.Printf("⚠️ Push send error: %v", err)
 			}
 		}
 	}()

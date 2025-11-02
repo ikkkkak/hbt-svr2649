@@ -82,10 +82,11 @@ func GetPropertySaleVideoFeed(ctx iris.Context) {
 	offset := (page - 1) * limit
 
 	// Get property sales that have videos
+	// More lenient filter: show property sales that are published OR have videos
 	query := storage.DB.
 		Model(&models.PropertySale{}).
 		Preload("Organization").
-		Where("status = ? OR is_published = ?", "published", true)
+		Where("(status = ? OR is_published = ? OR status IS NULL) AND videos IS NOT NULL", "published", true)
 
 	if userID > 0 {
 		fmt.Printf("🔍 Property Sale Video Feed - Filtering for user ID: %d\n", userID)
@@ -98,10 +99,13 @@ func GetPropertySaleVideoFeed(ctx iris.Context) {
 
 	var propertySales []models.PropertySale
 	if err := query.Order("property_sales.created_at DESC").Limit(limit).Offset(offset).Find(&propertySales).Error; err != nil {
+		fmt.Printf("❌ Error fetching property sales: %v\n", err)
 		ctx.StatusCode(http.StatusInternalServerError)
 		ctx.JSON(iris.Map{"error": "Failed to fetch property sales with videos"})
 		return
 	}
+
+	fmt.Printf("📹 Found %d property sales with videos (before filtering empty videos)\n", len(propertySales))
 
 	// Convert property sales to video format
 	var videos []map[string]interface{}
@@ -129,18 +133,25 @@ func GetPropertySaleVideoFeed(ctx iris.Context) {
 				saved = saveCount > 0
 			}
 
-			// Get organization branding
+			// Get organization branding (handle empty organization gracefully)
 			orgLogo := ""
-			orgName := ps.Organization.Name
-			if ps.Organization.Logo != "" {
-				orgLogo = ps.Organization.Logo
+			orgName := ""
+			orgOwnerID := uint(0)
+			orgID := uint(0)
+			if ps.OrganizationID > 0 && ps.Organization.ID > 0 {
+				orgName = ps.Organization.Name
+				if ps.Organization.Logo != "" {
+					orgLogo = ps.Organization.Logo
+				}
+				orgOwnerID = ps.Organization.OwnerID
+				orgID = ps.Organization.ID
 			}
 
 			video := map[string]interface{}{
 				"ID":             videoID, // Unique ID for each video
 				"propertySaleID": ps.ID,
 				"propertySale":   ps,
-				"userID":         ps.Organization.OwnerID,
+				"userID":         orgOwnerID,
 				"videoURL":       videoURL,
 				"thumbnailURL":   "", // Will be generated from video
 				"durationSec":    0,  // Will be calculated
@@ -154,7 +165,7 @@ func GetPropertySaleVideoFeed(ctx iris.Context) {
 				"liked":          liked,
 				"saved":          saved,
 				"organization": map[string]interface{}{
-					"id":      ps.Organization.ID,
+					"id":      orgID,
 					"name":    orgName,
 					"logoURL": orgLogo,
 				},

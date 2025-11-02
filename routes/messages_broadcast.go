@@ -42,7 +42,7 @@ func BroadcastGroupMessageHandler(ctx iris.Context) {
     if len(tokens) > 0 {
         body := dto.Content
         if len(body) > 120 { body = body[:120] + "…" }
-        _ = pushsvc.SendExpoPush(tokens, dto.Sender, body)
+        _ = pushsvc.SendPush(tokens, dto.Sender, body)
     }
 
     ctx.StatusCode(204)

@@ -3,11 +3,18 @@ package push
 import (
 	"encoding/json"
 	"log"
+	"regexp"
 	"strings"
 
 	"apartments-clone-server/models"
 	"apartments-clone-server/storage"
 )
+
+// isHexString checks if a string contains only hexadecimal characters
+func isHexString(s string) bool {
+	matched, _ := regexp.MatchString(`^[0-9a-fA-F]+$`, s)
+	return matched
+}
 
 // parseTokensJSON robustly extracts a slice of tokens from various JSON shapes
 func parseTokensJSON(raw json.RawMessage) []string {
@@ -45,8 +52,10 @@ func SetUserPushToken(userID uint, token string) {
 		log.Printf("⚠️ SetUserPushToken: invalid params userID=%d tokenLen=%d", userID, len(token))
 		return
 	}
-	// Validate token length (Expo tokens are typically 41 characters: "ExponentPushToken[...]")
-	if len(token) < 30 {
+	// Validate token length
+	// Expo tokens: "ExponentPushToken[...]" (~41 chars)
+	// FCM tokens: typically 152+ characters
+	if len(token) < 20 {
 		log.Printf("⚠️ SetUserPushToken: token too short! userID=%d tokenLen=%d token=%s", userID, len(token), token)
 		return
 	}
@@ -153,11 +162,20 @@ func GetGroupPushTokens(groupID uint, excludeUserID uint) []string {
 				continue
 			}
 			// Filter out invalid/truncated tokens
-			if len(t) < 30 {
+			// Allow APNs tokens (64 chars), Expo tokens (~41 chars), and FCM tokens (152+ chars)
+			if len(t) < 30 && !strings.HasPrefix(t, "ExponentPushToken") && !strings.HasPrefix(t, "ExpoPushToken") {
 				log.Printf("   ⚠️ Skipping truncated token for userID=%d: length=%d", m.UserID, len(t))
 				continue
 			}
-			if !strings.HasPrefix(t, "ExponentPushToken") && !strings.HasPrefix(t, "ExpoPushToken") {
+			// Accept multiple token formats:
+			// - Expo tokens: "ExponentPushToken[...]"
+			// - FCM tokens: 152+ character strings (full FCM registration tokens)
+			// - APNs tokens: 64 hex character strings (iOS device tokens)
+			// - Native Android tokens: 152+ character base64-like strings
+			isExpoToken := strings.HasPrefix(t, "ExponentPushToken") || strings.HasPrefix(t, "ExpoPushToken")
+			isAPNsToken := len(t) == 64 && !isExpoToken && isHexString(t) // iOS APNs tokens are 64 hex chars
+			isFCMToken := len(t) > 50 && !isExpoToken && !isAPNsToken
+			if !isExpoToken && !isFCMToken && !isAPNsToken {
 				continue
 			}
 			out = append(out, t)

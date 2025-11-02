@@ -1,2 +1,6 @@
 .env
 access.log
+service-account.json
+google-services.json
+fcm-credentials.json
+*.json.bak

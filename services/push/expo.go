@@ -17,6 +17,10 @@ type ExpoMessage struct {
 	Title    string `json:"title,omitempty"`
 	Body     string `json:"body,omitempty"`
 	Priority string `json:"priority,omitempty"`
+	// iOS-specific fields
+	Badge    *int   `json:"badge,omitempty"`
+	// Android-specific fields
+	ChannelID string `json:"channelId,omitempty"`
 }
 
 func SendExpoPush(tokens []string, title, body string) error {
@@ -49,28 +53,58 @@ func SendExpoPush(tokens []string, title, body string) error {
 	}
 	defer resp.Body.Close()
 	rb, _ := ioutil.ReadAll(resp.Body)
-	log.Printf("🔔 Expo push response: status=%d body=%s", resp.StatusCode, string(rb))
-	// prune invalid tokens
+	bodyStr := string(rb)
+	log.Printf("🔔 Expo push response: status=%d body=%s", resp.StatusCode, bodyStr)
+	
+	// Parse response to check for errors
 	var parsed struct {
 		Data []struct {
 			Status  string `json:"status"`
+			ID      string `json:"id,omitempty"`
 			Details struct {
 				Error     string `json:"error"`
 				ExpoToken string `json:"expoPushToken"`
-			} `json:"details"`
+				Reason    string `json:"reason,omitempty"`
+			} `json:"details,omitempty"`
 		} `json:"data"`
 	}
-	_ = json.Unmarshal(rb, &parsed)
-	for _, it := range parsed.Data {
-		if strings.EqualFold(it.Details.Error, "DeviceNotRegistered") || strings.Contains(strings.ToLower(it.Status), "error") {
-			token := it.Details.ExpoToken
-			if token == "" && len(tokens) == 1 {
-				token = tokens[0]
+	
+	if err := json.Unmarshal(rb, &parsed); err != nil {
+		log.Printf("⚠️ Failed to parse Expo response: %v", err)
+		return nil
+	}
+	
+	// Check each response and log/remove invalid tokens
+	for i, it := range parsed.Data {
+		token := it.Details.ExpoToken
+		if token == "" && len(tokens) > i {
+			token = tokens[i]
+		}
+		
+		if it.Status != "ok" {
+			log.Printf("⚠️ Push failed for token %d: status=%s error=%s reason=%s", i+1, it.Status, it.Details.Error, it.Details.Reason)
+			
+			// Remove invalid tokens
+			if strings.EqualFold(it.Details.Error, "DeviceNotRegistered") || 
+			   strings.EqualFold(it.Details.Error, "InvalidCredentials") ||
+			   strings.Contains(strings.ToLower(it.Status), "error") {
+				if token != "" {
+					tokenPreview := token
+					if len(token) > 30 {
+						tokenPreview = token[:30] + "..."
+					}
+					log.Printf("🗑️ Removing invalid token: %s", tokenPreview)
+					RemoveTokenGlobally(token)
+				}
 			}
-			if token != "" {
-				RemoveTokenGlobally(token)
-			}
+		} else {
+			log.Printf("✅ Push sent successfully for token %d: id=%s", i+1, it.ID)
 		}
 	}
+	
+	if resp.StatusCode != 200 {
+		log.Printf("⚠️ Expo API returned non-200 status: %d", resp.StatusCode)
+	}
+	
 	return nil
 }
