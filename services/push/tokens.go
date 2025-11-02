@@ -18,7 +18,7 @@ func isHexString(s string) bool {
 
 // parseTokensJSON robustly extracts a slice of tokens from various JSON shapes
 func parseTokensJSON(raw json.RawMessage) []string {
-	if raw == nil || len(raw) == 0 {
+	if len(raw) == 0 {
 		return nil
 	}
 	var arr []string
@@ -120,6 +120,49 @@ func RemoveTokenGlobally(token string) {
 	}
 }
 
+// GetUserPushTokens fetches push tokens for a single user
+func GetUserPushTokens(userID uint) []string {
+	var user models.User
+	if err := storage.DB.First(&user, userID).Error; err != nil {
+		log.Printf("🔔 Push lookup error for user %d: %v", userID, err)
+		return nil
+	}
+	
+	var tokens []string
+	if user.PushTokens != nil {
+		tokens = parseTokensJSON(json.RawMessage(user.PushTokens))
+	}
+	
+	if len(tokens) == 0 {
+		log.Printf("🔔 No push tokens found for user %d", userID)
+		return nil
+	}
+	
+	var validTokens []string
+	for _, t := range tokens {
+		if t == "" {
+			continue
+		}
+		// Filter out invalid/truncated tokens
+		// Allow APNs tokens (64 chars), Expo tokens (~41 chars), and FCM tokens (152+ chars)
+		if len(t) < 30 && !strings.HasPrefix(t, "ExponentPushToken") && !strings.HasPrefix(t, "ExpoPushToken") {
+			log.Printf("   ⚠️ Skipping truncated token for userID=%d: length=%d", userID, len(t))
+			continue
+		}
+		// Accept multiple token formats
+		isExpoToken := strings.HasPrefix(t, "ExponentPushToken") || strings.HasPrefix(t, "ExpoPushToken")
+		isAPNsToken := len(t) == 64 && !isExpoToken && isHexString(t)
+		isFCMToken := len(t) > 50 && !isExpoToken && !isAPNsToken
+		if !isExpoToken && !isFCMToken && !isAPNsToken {
+			continue
+		}
+		validTokens = append(validTokens, t)
+	}
+	
+	log.Printf("🔔 Push tokens for user %d: %d valid tokens", userID, len(validTokens))
+	return validTokens
+}
+
 // GetGroupPushTokens fetches members of the group and returns all Expo tokens except the sender's
 func GetGroupPushTokens(groupID uint, excludeUserID uint) []string {
 	var members []models.ExperienceGroupMember
@@ -217,4 +260,66 @@ func LogGroupTokens(groupID uint, excludeUserID uint) {
 		}
 		log.Printf("   • member userID=%d tokens=%d [%s]", m.UserID, len(tokens), strings.Join(previews, ", "))
 	}
+}
+
+// GetAllUsersWithPushTokens returns all push tokens from users who allow notifications
+func GetAllUsersWithPushTokens() []string {
+	var users []models.User
+	
+	// Get all users who have push tokens and allow notifications
+	query := storage.DB.Where("push_tokens IS NOT NULL AND push_tokens != 'null' AND push_tokens != ''")
+	query = query.Where("(allows_notifications IS NULL OR allows_notifications = true)")
+	
+	if err := query.Find(&users).Error; err != nil {
+		log.Printf("🔔 Error fetching users with push tokens: %v", err)
+		return nil
+	}
+	
+	if len(users) == 0 {
+		log.Printf("🔔 No users with push tokens found")
+		return nil
+	}
+	
+	var allTokens []string
+	userCount := 0
+	
+	for _, user := range users {
+		// Check if user explicitly allows notifications (skip if false)
+		if user.AllowsNotifications != nil && !*user.AllowsNotifications {
+			continue
+		}
+		
+		var tokens []string
+		if user.PushTokens != nil {
+			tokens = parseTokensJSON(json.RawMessage(user.PushTokens))
+		}
+		
+		if len(tokens) == 0 {
+			continue
+		}
+		
+		userCount++
+		
+		// Validate and filter tokens
+		for _, t := range tokens {
+			if t == "" {
+				continue
+			}
+			// Filter out invalid/truncated tokens
+			if len(t) < 30 && !strings.HasPrefix(t, "ExponentPushToken") && !strings.HasPrefix(t, "ExpoPushToken") {
+				continue
+			}
+			// Accept multiple token formats
+			isExpoToken := strings.HasPrefix(t, "ExponentPushToken") || strings.HasPrefix(t, "ExpoPushToken")
+			isAPNsToken := len(t) == 64 && !isExpoToken && isHexString(t)
+			isFCMToken := len(t) > 50 && !isExpoToken && !isAPNsToken
+			if !isExpoToken && !isFCMToken && !isAPNsToken {
+				continue
+			}
+			allTokens = append(allTokens, t)
+		}
+	}
+	
+	log.Printf("🔔 Found %d users with valid push tokens (total tokens: %d)", userCount, len(allTokens))
+	return allTokens
 }

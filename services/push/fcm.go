@@ -146,8 +146,14 @@ func InitializeFCM() error {
 	return nil
 }
 
-// SendFCMPush sends push notification via FCM
+// SendFCMPush sends push notification via FCM (without image)
 func SendFCMPush(tokens []string, title, body string) error {
+	return SendFCMPushWithImage(tokens, title, body, "")
+}
+
+// SendFCMPushWithImage sends push notification via FCM with optional image/avatar URL
+// imageURL: URL to sender's avatar (shown instead of app icon, positioned below)
+func SendFCMPushWithImage(tokens []string, title, body, imageURL string) error {
 	if !fcmInitialized || fcmClient == nil {
 		log.Printf("⚠️ FCM not initialized, cannot send push notifications")
 		return nil
@@ -199,11 +205,12 @@ func SendFCMPush(tokens []string, title, body string) error {
 
 	ctx := context.Background()
 
-	// FCM message
+	// FCM message with image support
 	message := &messaging.MulticastMessage{
 		Notification: &messaging.Notification{
-			Title: title,
-			Body:  body,
+			Title:    title,
+			Body:     body,
+			ImageURL: imageURL, // Sender avatar URL (replaces app icon)
 		},
 		Android: &messaging.AndroidConfig{
 			Priority: "high",
@@ -212,6 +219,8 @@ func SendFCMPush(tokens []string, title, body string) error {
 				ChannelID:    "default",
 				Priority:     messaging.PriorityMax,
 				DefaultSound: true,
+				ImageURL:     imageURL, // Android: Large icon (avatar)
+				// Icon appears below notification title on Android
 			},
 		},
 		APNS: &messaging.APNSConfig{
@@ -221,8 +230,13 @@ func SendFCMPush(tokens []string, title, body string) error {
 			Payload: &messaging.APNSPayload{
 				Aps: &messaging.Aps{
 					Sound:            "default",
-					Badge:            nil, // Set badge count if needed
+					Badge:            nil,
 					ContentAvailable: false,
+				},
+				// Custom data for iOS to display avatar
+				CustomData: map[string]interface{}{
+					"imageURL":  imageURL,
+					"avatarURL": imageURL, // iOS custom key for avatar
 				},
 			},
 		},
@@ -237,7 +251,7 @@ func SendFCMPush(tokens []string, title, body string) error {
 		if strings.Contains(err.Error(), "invalid") || strings.Contains(err.Error(), "not found") {
 			// Try sending individually to identify bad tokens
 			log.Printf("🔄 Attempting individual sends to identify invalid tokens...")
-			return sendIndividualFCMPush(ctx, validTokens, title, body)
+			return sendIndividualFCMPushWithImage(ctx, validTokens, title, body, imageURL)
 		}
 		return err
 	}
@@ -272,11 +286,17 @@ func SendFCMPush(tokens []string, title, body string) error {
 
 // sendIndividualFCMPush sends FCM messages individually (used when batch fails)
 func sendIndividualFCMPush(ctx context.Context, tokens []string, title, body string) error {
+	return sendIndividualFCMPushWithImage(ctx, tokens, title, body, "")
+}
+
+// sendIndividualFCMPushWithImage sends FCM messages individually with image
+func sendIndividualFCMPushWithImage(ctx context.Context, tokens []string, title, body, imageURL string) error {
 	for _, token := range tokens {
 		message := &messaging.Message{
 			Notification: &messaging.Notification{
-				Title: title,
-				Body:  body,
+				Title:    title,
+				Body:     body,
+				ImageURL: imageURL, // Sender avatar URL
 			},
 			Android: &messaging.AndroidConfig{
 				Priority: "high",
@@ -285,16 +305,21 @@ func sendIndividualFCMPush(ctx context.Context, tokens []string, title, body str
 					ChannelID:    "default",
 					Priority:     messaging.PriorityMax,
 					DefaultSound: true,
+					ImageURL:     imageURL, // Android: Large icon (avatar)
 				},
 			},
 			APNS: &messaging.APNSConfig{
 				Headers: map[string]string{
-					"apns-priority": "10", // High priority for notifications
+					"apns-priority": "10",
 				},
 				Payload: &messaging.APNSPayload{
 					Aps: &messaging.Aps{
 						Sound:            "default",
 						ContentAvailable: false,
+					},
+					CustomData: map[string]interface{}{
+						"imageURL":  imageURL,
+						"avatarURL": imageURL,
 					},
 				},
 			},

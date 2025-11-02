@@ -4,8 +4,10 @@ import (
 	"apartments-clone-server/models"
 	"apartments-clone-server/storage"
 	"apartments-clone-server/utils"
+	pushsvc "apartments-clone-server/services/push"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"strconv"
 	"strings"
@@ -141,6 +143,53 @@ func CreateProperty(ctx iris.Context) {
 		// Log the error but don't fail the property creation
 		fmt.Printf("⚠️ Failed to auto-assign property %d to location criteria: %v\n", property.ID, err)
 	}
+
+	// Send push notification to all users with push tokens about the new property (in Arabic)
+	go func() {
+		allTokens := pushsvc.GetAllUsersWithPushTokens()
+		if len(allTokens) == 0 {
+			log.Printf("🔔 No users with push tokens found, skipping property notification")
+			return
+		}
+
+		// Format Arabic notification message
+		propertyTitle := property.Title
+		if len(propertyTitle) > 40 {
+			propertyTitle = propertyTitle[:40] + "…"
+		}
+
+		location := property.City
+		if location == "" && property.State != "" {
+			location = property.State
+		}
+		if location == "" {
+			location = property.Country
+		}
+		if location == "" {
+			location = "موقع جديد"
+		}
+
+		// Arabic message: "تمت إضافة عقار جديد: [title] في [location]"
+		arabicTitle := fmt.Sprintf("تمت إضافة عقار جديد")
+		arabicBody := fmt.Sprintf("تحقق من هذا العقار في %s: %s", location, propertyTitle)
+
+		// If we have property images, use the first one as notification image
+		var notificationImageURL string
+		if property.Images != "" {
+			var images []string
+			if err := json.Unmarshal([]byte(property.Images), &images); err == nil && len(images) > 0 {
+				notificationImageURL = images[0]
+			}
+		}
+
+		// Send push notification to all users
+		err := pushsvc.SendPushWithImage(allTokens, arabicTitle, arabicBody, notificationImageURL)
+		if err != nil {
+			log.Printf("⚠️ Failed to send property notification to users: %v", err)
+		} else {
+			log.Printf("✅ Sent property notification to %d users: %s - %s", len(allTokens), arabicTitle, arabicBody)
+		}
+	}()
 
 	ctx.JSON(property)
 }

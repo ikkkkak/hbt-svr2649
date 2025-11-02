@@ -2,10 +2,11 @@ package routes
 
 import (
 	"apartments-clone-server/models"
-	"apartments-clone-server/services"
 	"apartments-clone-server/storage"
 	"apartments-clone-server/utils"
+	pushsvc "apartments-clone-server/services/push"
 	"fmt"
+	"log"
 	"net/http"
 	"time"
 
@@ -44,29 +45,46 @@ func CreateMessage(ctx iris.Context) {
 
 	storage.DB.Create(&message)
 
-	// Send push notification to receiver
+	// Send push notification to receiver with sender's avatar
 	var sender models.User
 	var receiver models.User
 	if err := storage.DB.First(&sender, req.SenderID).Error; err == nil {
 		if err := storage.DB.First(&receiver, req.ReceiverID).Error; err == nil {
-			senderName := fmt.Sprintf("%s %s", sender.FirstName, sender.LastName)
-			propertyTitle := "عقار"
+			// Check if receiver allows notifications
+			if receiver.AllowsNotifications != nil && !*receiver.AllowsNotifications {
+				log.Printf("🔔 User %d has notifications disabled, skipping push", req.ReceiverID)
+			} else {
+				senderName := fmt.Sprintf("%s %s", sender.FirstName, sender.LastName)
+				messageBody := req.Text
+				if len(messageBody) > 120 {
+					messageBody = messageBody[:120] + "…"
+				}
 
-			// If message is about a property, get property title
-			if req.RefType == "property" && req.RefID != nil {
-				var property models.Property
-				if err := storage.DB.First(&property, *req.RefID).Error; err == nil {
-					propertyTitle = property.Title
+				// Get sender's avatar URL (use AvatarURL if available, otherwise empty)
+				senderAvatarURL := ""
+				if sender.AvatarURL != "" {
+					senderAvatarURL = sender.AvatarURL
+					log.Printf("🖼️ Using sender avatar: %s", senderAvatarURL)
+				} else {
+					log.Printf("⚠️ No avatar URL for sender %d", req.SenderID)
+				}
+
+				// Get receiver's push tokens and send notification with sender avatar
+				receiverTokens := pushsvc.GetUserPushTokens(req.ReceiverID)
+				if len(receiverTokens) > 0 {
+					title := senderName
+					go func() {
+						err := pushsvc.SendPushWithImage(receiverTokens, title, messageBody, senderAvatarURL)
+						if err != nil {
+							log.Printf("⚠️ Failed to send push notification: %v", err)
+						} else {
+							log.Printf("✅ Sent direct message notification to user %d with avatar: %v", req.ReceiverID, senderAvatarURL != "")
+						}
+					}()
+				} else {
+					log.Printf("🔔 No push tokens found for receiver %d", req.ReceiverID)
 				}
 			}
-
-			notificationService := services.NewNotificationService()
-			go notificationService.SendMessageNotificationToHost(
-				req.ReceiverID,
-				req.SenderID,
-				senderName,
-				propertyTitle,
-			)
 		}
 	}
 

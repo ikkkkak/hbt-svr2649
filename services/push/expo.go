@@ -12,18 +12,25 @@ import (
 )
 
 type ExpoMessage struct {
-	To       string `json:"to"`
-	Sound    string `json:"sound,omitempty"`
-	Title    string `json:"title,omitempty"`
-	Body     string `json:"body,omitempty"`
-	Priority string `json:"priority,omitempty"`
+	To       string                 `json:"to"`
+	Sound    string                 `json:"sound,omitempty"`
+	Title    string                 `json:"title,omitempty"`
+	Body     string                 `json:"body,omitempty"`
+	Priority string                 `json:"priority,omitempty"`
+	Data     map[string]interface{} `json:"data,omitempty"` // Custom data including image/avatar URL
 	// iOS-specific fields
-	Badge    *int   `json:"badge,omitempty"`
+	Badge *int `json:"badge,omitempty"`
 	// Android-specific fields
 	ChannelID string `json:"channelId,omitempty"`
 }
 
 func SendExpoPush(tokens []string, title, body string) error {
+	return SendExpoPushWithImage(tokens, title, body, "")
+}
+
+// SendExpoPushWithImage sends Expo push notifications with optional image/avatar URL
+// imageURL: URL to sender's avatar (shown instead of app icon)
+func SendExpoPushWithImage(tokens []string, title, body, imageURL string) error {
 	if len(tokens) == 0 {
 		return nil
 	}
@@ -38,10 +45,26 @@ func SendExpoPush(tokens []string, title, body string) error {
 			preview[i] = t[:16] + "…"
 		}
 	}
-	log.Printf("🔔 Sending Expo push to %d tokens [%s]", len(tokens), strings.Join(preview, ", "))
+	log.Printf("🔔 Sending Expo push to %d tokens [%s] (with image: %v)", len(tokens), strings.Join(preview, ", "), imageURL != "")
 	var payload []ExpoMessage
 	for _, t := range tokens {
-		payload = append(payload, ExpoMessage{To: t, Sound: "default", Title: title, Body: body, Priority: "high"})
+		msg := ExpoMessage{
+			To:       t,
+			Sound:    "default",
+			Title:    title,
+			Body:     body,
+			Priority: "high",
+			ChannelID: "default",
+		}
+		// Add image URL to data payload for Expo to handle
+		if imageURL != "" {
+			msg.Data = map[string]interface{}{
+				"imageURL":  imageURL,
+				"avatarURL": imageURL, // Both keys for compatibility
+				"type":      "message", // Notification type
+			}
+		}
+		payload = append(payload, msg)
 	}
 	b, _ := json.Marshal(payload)
 	req, _ := http.NewRequest("POST", "https://exp.host/--/api/v2/push/send", bytes.NewReader(b))
