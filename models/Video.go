@@ -8,8 +8,8 @@ import (
 
 type Video struct {
 	gorm.Model
-	PropertyID uint     `json:"propertyID" gorm:"not null;index"`
-	Property   Property `json:"property" gorm:"foreignKey:PropertyID;references:ID"`
+	PropertyID *uint    `json:"propertyID" gorm:"index"` // Nullable for promotional videos
+	Property   *Property `json:"property" gorm:"foreignKey:PropertyID;references:ID"`
 
 	UserID uint `json:"userID" gorm:"not null;index"`
 	User   User `json:"user" gorm:"foreignKey:UserID;references:ID"`
@@ -27,6 +27,11 @@ type Video struct {
 	ViewCount int64  `json:"viewCount" gorm:"default:0;index"`
 	IsFlagged bool   `json:"isFlagged" gorm:"default:false;index"`
 	Status    string `json:"status" gorm:"type:varchar(20);default:'pending';index"` // pending, approved, rejected
+	
+	// Promotional video fields (admin-uploaded app demos, tutorials, promotional content)
+	IsPromotional bool   `json:"isPromotional" gorm:"default:false;index"` // Mark as promotional/admin video
+	Title         string `json:"title" gorm:"type:varchar(255)"`            // Title for promotional videos (e.g., "How to Book a Property")
+	Description   string `json:"description" gorm:"type:text"`             // Description for promotional videos
 }
 
 type VideoLike struct {

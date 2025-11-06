@@ -40,11 +40,29 @@ func UserIDFromTokenMiddleware(ctx iris.Context) {
 
 // AdminOnlyMiddleware ensures the requester has admin or super_admin role
 func AdminOnlyMiddleware(ctx iris.Context) {
-	claims := jwt.Get(ctx).(*AccessToken)
+	claimsInterface := jwt.Get(ctx)
+	if claimsInterface == nil {
+		ctx.StatusCode(iris.StatusUnauthorized)
+		ctx.JSON(iris.Map{"error": "unauthorized", "message": "authentication required"})
+		return
+	}
+	
+	claims, ok := claimsInterface.(*AccessToken)
+	if !ok || claims == nil {
+		ctx.StatusCode(iris.StatusUnauthorized)
+		ctx.JSON(iris.Map{"error": "unauthorized", "message": "invalid token"})
+		return
+	}
+	
 	role := claims.Role
 	if role != "admin" && role != "super_admin" {
 		ctx.StatusCode(iris.StatusForbidden)
-		ctx.JSON(iris.Map{"error": "forbidden", "message": "admin access required"})
+		ctx.JSON(iris.Map{
+			"error": "forbidden", 
+			"message": "admin access required",
+			"user_role": role,
+			"user_id": claims.ID,
+		})
 		return
 	}
 	// Ensure userID is available to downstream handlers

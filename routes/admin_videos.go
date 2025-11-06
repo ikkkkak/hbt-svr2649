@@ -7,6 +7,7 @@ import (
 	"net/http"
 
 	"github.com/kataras/iris/v12"
+	jsonWT "github.com/kataras/iris/v12/middleware/jwt"
 )
 
 // GET /admin/videos
@@ -173,5 +174,190 @@ func AdminDeleteVideoComment(ctx iris.Context) {
 		return
 	}
 	utils.Audit(ctx, "video_comment.delete", "video_comment", before.ID, before, nil)
+	ctx.StatusCode(http.StatusNoContent)
+}
+
+// POST /admin/videos/promotional - Create promotional video (app demo, tutorial, etc.)
+func AdminCreatePromotionalVideo(ctx iris.Context) {
+	claims := jsonWT.Get(ctx)
+	if claims == nil {
+		utils.JSONError(ctx, http.StatusUnauthorized, "unauthorized", "authentication required")
+		return
+	}
+	
+	var input struct {
+		VideoURL     string  `json:"videoURL" validate:"required,url"`
+		ThumbnailURL string  `json:"thumbnailURL"`
+		DurationSec  float64 `json:"durationSec"`
+		Title         string  `json:"title" validate:"required"`
+		Description   string  `json:"description"`
+		Caption       string  `json:"caption"`
+		PropertyID    *uint   `json:"propertyID"` // Optional - can be null for promotional videos
+	}
+	
+	if err := ctx.ReadJSON(&input); err != nil {
+		utils.JSONError(ctx, http.StatusBadRequest, "invalid_payload", err.Error())
+		return
+	}
+	
+	// Get admin user ID from token
+	accessToken, ok := claims.(*utils.AccessToken)
+	if !ok {
+		utils.JSONError(ctx, http.StatusUnauthorized, "unauthorized", "invalid token")
+		return
+	}
+	adminUserID := accessToken.ID
+	
+	// If PropertyID is provided, verify it exists
+	if input.PropertyID != nil && *input.PropertyID > 0 {
+		var prop models.Property
+		if err := storage.DB.Where("id = ?", *input.PropertyID).First(&prop).Error; err != nil {
+			utils.JSONError(ctx, http.StatusBadRequest, "property_not_found", "property not found")
+			return
+		}
+	}
+	
+	// Create promotional video
+	// For promotional videos, PropertyID should be nil (not set)
+	var propertyID *uint = nil
+	if input.PropertyID != nil && *input.PropertyID > 0 {
+		propertyID = input.PropertyID
+	}
+	
+	video := models.Video{
+		UserID:        adminUserID,
+		PropertyID:    propertyID, // nil for promotional videos
+		VideoURL:      input.VideoURL,
+		ThumbnailURL:  input.ThumbnailURL,
+		DurationSec:   input.DurationSec,
+		Caption:       input.Caption,
+		IsPromotional: true,
+		Title:         input.Title,
+		Description:   input.Description,
+		Status:        "approved", // Auto-approve promotional videos
+	}
+	
+	if err := storage.DB.Create(&video).Error; err != nil {
+		utils.JSONError(ctx, http.StatusInternalServerError, "server_error", err.Error())
+		return
+	}
+	
+	// Load relationships
+	storage.DB.Preload("Property").Preload("User").First(&video, video.ID)
+	
+	utils.Audit(ctx, "promotional_video.create", "video", video.ID, nil, video)
+	ctx.JSON(iris.Map{"success": true, "data": video})
+}
+
+// GET /admin/videos/promotional - List all promotional videos
+func AdminListPromotionalVideos(ctx iris.Context) {
+	page := ctx.URLParamIntDefault("page", 1)
+	perPage := ctx.URLParamIntDefault("per_page", 25)
+	if perPage <= 0 || perPage > 100 {
+		perPage = 25
+	}
+	
+	q := storage.DB.Model(&models.Video{}).
+		Where("is_promotional = ?", true).
+		Order("created_at DESC")
+	
+	var total int64
+	q.Count(&total)
+	var items []models.Video
+	if err := q.Preload("Property").Preload("User").Offset((page - 1) * perPage).Limit(perPage).Find(&items).Error; err != nil {
+		utils.JSONError(ctx, http.StatusInternalServerError, "server_error", err.Error())
+		return
+	}
+	utils.JSONPage(ctx, items, page, perPage, total)
+}
+
+// PATCH /admin/videos/promotional/:id - Update promotional video
+func AdminUpdatePromotionalVideo(ctx iris.Context) {
+	id, err := ctx.Params().GetUint("id")
+	if err != nil {
+		utils.JSONError(ctx, http.StatusBadRequest, "invalid_id", "invalid id")
+		return
+	}
+	
+	var v models.Video
+	if err := storage.DB.First(&v, id).Error; err != nil {
+		utils.JSONError(ctx, http.StatusNotFound, "not_found", "video not found")
+		return
+	}
+	
+	if !v.IsPromotional {
+		utils.JSONError(ctx, http.StatusBadRequest, "not_promotional", "video is not promotional")
+		return
+	}
+	
+	var body struct {
+		VideoURL     *string `json:"videoURL"`
+		ThumbnailURL *string `json:"thumbnailURL"`
+		Title        *string `json:"title"`
+		Description  *string `json:"description"`
+		Caption      *string `json:"caption"`
+		Status       *string `json:"status"`
+	}
+	
+	if err := ctx.ReadJSON(&body); err != nil {
+		utils.JSONError(ctx, http.StatusUnprocessableEntity, "invalid_payload", err.Error())
+		return
+	}
+	
+	before := v
+	if body.VideoURL != nil {
+		v.VideoURL = *body.VideoURL
+	}
+	if body.ThumbnailURL != nil {
+		v.ThumbnailURL = *body.ThumbnailURL
+	}
+	if body.Title != nil {
+		v.Title = *body.Title
+	}
+	if body.Description != nil {
+		v.Description = *body.Description
+	}
+	if body.Caption != nil {
+		v.Caption = *body.Caption
+	}
+	if body.Status != nil {
+		v.Status = *body.Status
+	}
+	
+	if err := storage.DB.Save(&v).Error; err != nil {
+		utils.JSONError(ctx, http.StatusInternalServerError, "server_error", err.Error())
+		return
+	}
+	
+	utils.Audit(ctx, "promotional_video.update", "video", v.ID, before, v)
+	ctx.JSON(iris.Map{"success": true, "data": v})
+}
+
+// DELETE /admin/videos/promotional/:id - Delete promotional video
+func AdminDeletePromotionalVideo(ctx iris.Context) {
+	id, err := ctx.Params().GetUint("id")
+	if err != nil {
+		utils.JSONError(ctx, http.StatusBadRequest, "invalid_id", "invalid id")
+		return
+	}
+	
+	var v models.Video
+	if err := storage.DB.First(&v, id).Error; err != nil {
+		utils.JSONError(ctx, http.StatusNotFound, "not_found", "video not found")
+		return
+	}
+	
+	if !v.IsPromotional {
+		utils.JSONError(ctx, http.StatusBadRequest, "not_promotional", "video is not promotional")
+		return
+	}
+	
+	before := v
+	if err := storage.DB.Delete(&v).Error; err != nil {
+		utils.JSONError(ctx, http.StatusInternalServerError, "server_error", err.Error())
+		return
+	}
+	
+	utils.Audit(ctx, "promotional_video.delete", "video", before.ID, before, nil)
 	ctx.StatusCode(http.StatusNoContent)
 }

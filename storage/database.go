@@ -100,6 +100,9 @@ func performMigrations(db *gorm.DB) {
 
 	// Allow direct chat groups without an experience by making experience_id nullable
 	db.Exec("ALTER TABLE experience_groups ALTER COLUMN experience_id DROP NOT NULL;")
+	
+	// Allow promotional videos without a property by making property_id nullable
+	db.Exec("ALTER TABLE videos ALTER COLUMN property_id DROP NOT NULL;")
 }
 
 func InitializeDB() *gorm.DB {

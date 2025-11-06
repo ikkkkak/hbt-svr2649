@@ -466,6 +466,11 @@ func main() {
 		admin.Post("/videos/{id:uint}/force_unpublish", routes.AdminForceUnpublishVideo)
 		admin.Get("/videos/{id:uint}/comments", routes.AdminListVideoComments)
 		admin.Delete("/videos/{id:uint}/comments/{comment_id:uint}", routes.AdminDeleteVideoComment)
+		// Promotional videos management
+		admin.Post("/videos/promotional", routes.AdminCreatePromotionalVideo)
+		admin.Get("/videos/promotional", routes.AdminListPromotionalVideos)
+		admin.Patch("/videos/promotional/{id:uint}", routes.AdminUpdatePromotionalVideo)
+		admin.Delete("/videos/promotional/{id:uint}", routes.AdminDeletePromotionalVideo)
 		admin.Get("/feedback", routes.AdminListFeedback)
 		admin.Get("/stats", routes.AdminStats)
 		admin.Get("/activity", routes.AdminActivity)

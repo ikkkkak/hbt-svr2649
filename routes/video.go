@@ -38,7 +38,7 @@ func CreateVideo(ctx iris.Context) {
 	}
 
 	video := models.Video{
-		PropertyID:   input.PropertyID,
+		PropertyID:   &input.PropertyID,
 		UserID:       userID,
 		VideoURL:     input.VideoURL,
 		ThumbnailURL: input.ThumbnailURL,
@@ -96,13 +96,14 @@ func GetVideoFeed(ctx iris.Context) {
 	sortOrder := ctx.URLParamDefault("sortOrder", "DESC") // ASC, DESC
 
 	// Build query with filters: only videos for approved/live & active properties; exclude flagged/rejected videos
-	query := storage.DB.
-		Joins("JOIN properties ON videos.property_id = properties.id").
-		Where("COALESCE(properties.is_active, ?) = ? AND properties.status IN (?)", true, true, []string{"approved", "live"}).
+	// Exclude promotional videos (they are handled separately)
+	query := storage.DB.Model(&models.Video{}).
+		Where("COALESCE(videos.is_promotional, ?) = ?", false, false).
+		Joins("LEFT JOIN properties ON videos.property_id = properties.id").
+		Where("properties.id IS NOT NULL AND COALESCE(properties.is_active, ?) = ? AND properties.status IN (?)", true, true, []string{"approved", "live"}).
 		// Exclude only explicitly rejected videos; allow pending/empty/approved
 		Where("(videos.status IS NULL OR LOWER(videos.status) <> ?)", "rejected").
 		Where("COALESCE(videos.is_flagged, ?) = ?", false, false).
-		Select("videos.*").
 		Preload("Property").Preload("User")
 
 	// If user is authenticated, exclude hidden videos, reported videos, and flagged users
@@ -200,6 +201,24 @@ func GetVideoFeed(ctx iris.Context) {
 		return
 	}
 
+	// Fetch active promotional videos (admin-uploaded app demos/tutorials)
+	var promotionalVideos []models.Video
+	promoQuery := storage.DB.Model(&models.Video{}).
+		Where("is_promotional = ?", true).
+		Where("(status IS NULL OR LOWER(status) <> ?)", "rejected").
+		Where("COALESCE(is_flagged, ?) = ?", false, false).
+		Order("created_at DESC")
+	
+	// If user is authenticated, exclude hidden/reported promotional videos
+	if userID > 0 {
+		promoQuery = promoQuery.Where("id NOT IN (SELECT video_id FROM hidden_videos WHERE user_id = ? AND deleted_at IS NULL)", userID).
+			Where("id NOT IN (SELECT video_id FROM video_reports WHERE reporter_id = ? AND deleted_at IS NULL)", userID)
+	}
+	
+	if err := promoQuery.Find(&promotionalVideos).Error; err == nil && len(promotionalVideos) > 0 {
+		fmt.Printf("🎬 Found %d promotional videos to intersperse\n", len(promotionalVideos))
+	}
+
 	fmt.Printf("📹 Returning %d videos for user ID: %d (page: %d, limit: %d)\n", len(videos), userID, page, limit)
 
 	// Get user's liked and saved video IDs for this batch
@@ -228,6 +247,85 @@ func GetVideoFeed(ctx iris.Context) {
 		savedMap[id] = true
 	}
 
+	// Randomly intersperse promotional videos (not at the beginning, skip first 2-3 videos)
+	// Only if we have promotional videos and regular videos
+	var finalVideos []models.Video
+	if len(promotionalVideos) > 0 && len(videos) > 2 {
+		finalVideos = make([]models.Video, 0, len(videos)+len(promotionalVideos))
+		
+		// Always start with regular videos (skip promotional at the beginning)
+		skipCount := 2
+		if len(videos) < skipCount {
+			skipCount = len(videos)
+		}
+		finalVideos = append(finalVideos, videos[:skipCount]...)
+		
+		// Randomly intersperse promotional videos after the first few videos
+		remainingVideos := videos[skipCount:]
+		remainingPromo := promotionalVideos
+		
+		// Use a simple randomization: insert 1 promotional video every 3-5 regular videos
+		insertInterval := 3
+		promoIndex := 0
+		regularIndex := 0
+		
+		for regularIndex < len(remainingVideos) {
+			// Insert regular video
+			finalVideos = append(finalVideos, remainingVideos[regularIndex])
+			regularIndex++
+			
+			// Every N videos, insert a promotional video (but not at the very beginning)
+			if regularIndex > 0 && regularIndex%insertInterval == 0 && promoIndex < len(remainingPromo) {
+				finalVideos = append(finalVideos, remainingPromo[promoIndex])
+				promoIndex++
+				// Cycle through promotional videos if we have more
+				if promoIndex >= len(remainingPromo) {
+					promoIndex = 0
+				}
+			}
+		}
+		
+		// Add any remaining promotional videos at the end if we have space
+		if promoIndex < len(remainingPromo) {
+			remaining := remainingPromo[promoIndex:]
+			if len(remaining) > 0 && len(finalVideos) < limit*2 {
+				finalVideos = append(finalVideos, remaining...)
+			}
+		}
+		
+		fmt.Printf("🎬 Interspersed %d promotional videos into feed (total: %d videos)\n", promoIndex, len(finalVideos))
+	} else {
+		// No promotional videos or not enough regular videos, just return regular videos
+		finalVideos = videos
+	}
+	
+	// Collect all video IDs for like/save lookup
+	var allVideoIDs []uint
+	for _, v := range finalVideos {
+		allVideoIDs = append(allVideoIDs, v.ID)
+	}
+	
+	// Get user's liked and saved video IDs for all videos (including promotional)
+	var allLikedVideoIDs []uint
+	if len(allVideoIDs) > 0 {
+		storage.DB.Model(&models.VideoLike{}).Where("video_id IN ? AND user_id = ?", allVideoIDs, userID).Pluck("video_id", &allLikedVideoIDs)
+	}
+	
+	var allSavedVideoIDs []uint
+	if len(allVideoIDs) > 0 {
+		storage.DB.Model(&models.VideoSave{}).Where("video_id IN ? AND user_id = ?", allVideoIDs, userID).Pluck("video_id", &allSavedVideoIDs)
+	}
+	
+	// Create maps for quick lookup
+	allLikedMap := make(map[uint]bool)
+	for _, id := range allLikedVideoIDs {
+		allLikedMap[id] = true
+	}
+	allSavedMap := make(map[uint]bool)
+	for _, id := range allSavedVideoIDs {
+		allSavedMap[id] = true
+	}
+
 	// Add isLiked and isSaved to each video
 	type VideoWithUserState struct {
 		models.Video
@@ -236,11 +334,11 @@ func GetVideoFeed(ctx iris.Context) {
 	}
 
 	var videosWithState []VideoWithUserState
-	for _, video := range videos {
+	for _, video := range finalVideos {
 		videosWithState = append(videosWithState, VideoWithUserState{
 			Video:   video,
-			IsLiked: likedMap[video.ID],
-			IsSaved: savedMap[video.ID],
+			IsLiked: allLikedMap[video.ID],
+			IsSaved: allSavedMap[video.ID],
 		})
 	}
 
