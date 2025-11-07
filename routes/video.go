@@ -208,13 +208,13 @@ func GetVideoFeed(ctx iris.Context) {
 		Where("(status IS NULL OR LOWER(status) <> ?)", "rejected").
 		Where("COALESCE(is_flagged, ?) = ?", false, false).
 		Order("created_at DESC")
-	
+
 	// If user is authenticated, exclude hidden/reported promotional videos
 	if userID > 0 {
 		promoQuery = promoQuery.Where("id NOT IN (SELECT video_id FROM hidden_videos WHERE user_id = ? AND deleted_at IS NULL)", userID).
 			Where("id NOT IN (SELECT video_id FROM video_reports WHERE reporter_id = ? AND deleted_at IS NULL)", userID)
 	}
-	
+
 	if err := promoQuery.Find(&promotionalVideos).Error; err == nil && len(promotionalVideos) > 0 {
 		fmt.Printf("🎬 Found %d promotional videos to intersperse\n", len(promotionalVideos))
 	}
@@ -252,28 +252,28 @@ func GetVideoFeed(ctx iris.Context) {
 	var finalVideos []models.Video
 	if len(promotionalVideos) > 0 && len(videos) > 2 {
 		finalVideos = make([]models.Video, 0, len(videos)+len(promotionalVideos))
-		
+
 		// Always start with regular videos (skip promotional at the beginning)
 		skipCount := 2
 		if len(videos) < skipCount {
 			skipCount = len(videos)
 		}
 		finalVideos = append(finalVideos, videos[:skipCount]...)
-		
+
 		// Randomly intersperse promotional videos after the first few videos
 		remainingVideos := videos[skipCount:]
 		remainingPromo := promotionalVideos
-		
+
 		// Use a simple randomization: insert 1 promotional video every 3-5 regular videos
 		insertInterval := 3
 		promoIndex := 0
 		regularIndex := 0
-		
+
 		for regularIndex < len(remainingVideos) {
 			// Insert regular video
 			finalVideos = append(finalVideos, remainingVideos[regularIndex])
 			regularIndex++
-			
+
 			// Every N videos, insert a promotional video (but not at the very beginning)
 			if regularIndex > 0 && regularIndex%insertInterval == 0 && promoIndex < len(remainingPromo) {
 				finalVideos = append(finalVideos, remainingPromo[promoIndex])
@@ -284,7 +284,7 @@ func GetVideoFeed(ctx iris.Context) {
 				}
 			}
 		}
-		
+
 		// Add any remaining promotional videos at the end if we have space
 		if promoIndex < len(remainingPromo) {
 			remaining := remainingPromo[promoIndex:]
@@ -292,30 +292,30 @@ func GetVideoFeed(ctx iris.Context) {
 				finalVideos = append(finalVideos, remaining...)
 			}
 		}
-		
+
 		fmt.Printf("🎬 Interspersed %d promotional videos into feed (total: %d videos)\n", promoIndex, len(finalVideos))
 	} else {
 		// No promotional videos or not enough regular videos, just return regular videos
 		finalVideos = videos
 	}
-	
+
 	// Collect all video IDs for like/save lookup
 	var allVideoIDs []uint
 	for _, v := range finalVideos {
 		allVideoIDs = append(allVideoIDs, v.ID)
 	}
-	
+
 	// Get user's liked and saved video IDs for all videos (including promotional)
 	var allLikedVideoIDs []uint
 	if len(allVideoIDs) > 0 {
 		storage.DB.Model(&models.VideoLike{}).Where("video_id IN ? AND user_id = ?", allVideoIDs, userID).Pluck("video_id", &allLikedVideoIDs)
 	}
-	
+
 	var allSavedVideoIDs []uint
 	if len(allVideoIDs) > 0 {
 		storage.DB.Model(&models.VideoSave{}).Where("video_id IN ? AND user_id = ?", allVideoIDs, userID).Pluck("video_id", &allSavedVideoIDs)
 	}
-	
+
 	// Create maps for quick lookup
 	allLikedMap := make(map[uint]bool)
 	for _, id := range allLikedVideoIDs {
@@ -488,8 +488,14 @@ func CreateVideoComment(ctx iris.Context) {
 }
 
 func GetVideoComments(ctx iris.Context) {
-	claims := jsonWT.Get(ctx).(*utils.AccessToken)
-	userID := claims.ID
+	// Safely get user ID if authenticated (optional)
+	var userID uint = 0
+	if claims := jsonWT.Get(ctx); claims != nil {
+		if accessToken, ok := claims.(*utils.AccessToken); ok {
+			userID = accessToken.ID
+		}
+	}
+
 	videoID := ctx.Params().Get("videoID")
 
 	var comments []models.VideoComment
@@ -503,23 +509,25 @@ func GetVideoComments(ctx iris.Context) {
 		return
 	}
 
-	// Get user's liked comment IDs
-	var commentIDs []uint
-	for _, comment := range comments {
-		commentIDs = append(commentIDs, comment.ID)
-		for _, reply := range comment.Replies {
-			commentIDs = append(commentIDs, reply.ID)
+	// Get user's liked comment IDs (only if authenticated)
+	var likedMap map[uint]bool = make(map[uint]bool)
+	if userID > 0 {
+		var commentIDs []uint
+		for _, comment := range comments {
+			commentIDs = append(commentIDs, comment.ID)
+			for _, reply := range comment.Replies {
+				commentIDs = append(commentIDs, reply.ID)
+			}
 		}
-	}
 
-	var likedCommentIDs []uint
-	if len(commentIDs) > 0 {
-		storage.DB.Model(&models.VideoCommentLike{}).Where("comment_id IN ? AND user_id = ?", commentIDs, userID).Pluck("comment_id", &likedCommentIDs)
-	}
+		var likedCommentIDs []uint
+		if len(commentIDs) > 0 {
+			storage.DB.Model(&models.VideoCommentLike{}).Where("comment_id IN ? AND user_id = ?", commentIDs, userID).Pluck("comment_id", &likedCommentIDs)
+		}
 
-	likedMap := make(map[uint]bool)
-	for _, id := range likedCommentIDs {
-		likedMap[id] = true
+		for _, id := range likedCommentIDs {
+			likedMap[id] = true
+		}
 	}
 
 	// Add isLiked to comments

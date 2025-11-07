@@ -16,7 +16,6 @@ import (
 	"github.com/kataras/iris/v12"
 	"github.com/kataras/iris/v12/middleware/jwt"
 	"gorm.io/datatypes"
-	"gorm.io/gorm/clause"
 )
 
 func CreateProperty(ctx iris.Context) {
@@ -209,9 +208,47 @@ func GetProperty(ctx iris.Context) {
 func GetPropertiesByUserID(ctx iris.Context) {
 	params := ctx.Params()
 	id := params.Get("id")
+	excludeID := ctx.URLParam("exclude") // Optional: exclude a specific property ID
+
+	query := storage.DB.Preload("Host").Preload("Reviews").
+		Where("host_id = ?", id).
+		Where("is_active = ?", true).
+		Where("status IN ?", []string{"approved", "live"})
+
+	// Exclude specific property if provided
+	if excludeID != "" {
+		query = query.Where("id != ?", excludeID)
+	}
+
+	// Extract userID for user-specific exclusions (optional auth)
+	var userID uint = 0
+	if v := ctx.Values().Get("userID"); v != nil {
+		if id, ok := v.(uint); ok {
+			userID = id
+		}
+	}
+	if userID == 0 {
+		if auth := ctx.GetHeader("Authorization"); len(auth) > 7 && auth[:7] == "Bearer " {
+			verifier := jwt.NewVerifier(jwt.HS256, []byte(os.Getenv("ACCESS_TOKEN_SECRET")))
+			verifier.WithDefaultBlocklist()
+			if token, err := verifier.VerifyToken([]byte(auth[7:])); err == nil {
+				var claims utils.AccessToken
+				if err := token.Claims(&claims); err == nil {
+					userID = claims.ID
+				}
+			}
+		}
+	}
+
+	// Apply user-specific exclusions if authenticated
+	if userID > 0 {
+		query = query.Where("id NOT IN (SELECT property_id FROM hidden_properties WHERE user_id = ?)", userID)
+		query = query.Where("id NOT IN (SELECT property_id FROM property_reports WHERE reporter_id = ?)", userID)
+		query = query.Where("host_id NOT IN (SELECT flagged_user_id FROM user_flags WHERE flagger_id = ? AND status='active')", userID)
+	}
 
 	var properties []models.Property
-	propertiesExist := storage.DB.Preload(clause.Associations).Where("host_id = ?", id).Find(&properties)
+	propertiesExist := query.Order("created_at DESC").Limit(20).Find(&properties)
 
 	if propertiesExist.Error != nil {
 		utils.CreateError(
