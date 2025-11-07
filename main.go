@@ -183,8 +183,9 @@ func main() {
 		}
 	}()
 
-	// Start background push worker
+	// Start background push workers
 	pushsvc.StartPushWorker()
+	pushsvc.StartMarketingReminderWorker()
 
 	fmt.Println("🔧 Initializing WebSocket Hub...")
 	websocketHub.InitHub()
@@ -562,6 +563,8 @@ func main() {
 		upload.Post("/video", routes.UploadVideo)
 	}
 	{
+		notifications.Post("/marketing/device", routes.RegisterMarketingDevice)
+		notifications.Put("/marketing/device/link", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.LinkMarketingDeviceToUser)
 		notifications.Post("/test-push", routes.SendTestNotification)
 		notifications.Post("/test-detailed/{userID:int}", routes.SendDetailedTestNotification)
 		notifications.Post("/welcome", routes.SendWelcomeNotification)
@@ -757,6 +760,12 @@ func main() {
 				"message": "Background notification scheduled",
 			})
 		})
+	}
+
+	// Video utilities
+	videos := app.Party("/api/videos")
+	{
+		videos.Get("/watermark", routes.GetWatermarkedVideo)
 	}
 
 	collection := app.Party("/api/collection")

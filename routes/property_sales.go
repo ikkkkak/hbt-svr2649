@@ -831,9 +831,12 @@ func GetPublishedProperties(ctx iris.Context) {
             q = q.Where("property_sales.bathrooms >= ?", n)
         }
     }
+    // Year built filter - minimum year built (properties built in this year or later)
+    // IMPORTANT: Exclude properties with NULL or 0 year_built values
     if v := ctx.URLParam("year_built"); v != "" {
         if n, err := strconv.Atoi(v); err == nil && n > 0 {
-            q = q.Where("property_sales.year_built >= ?", n)
+            fmt.Printf("🔍 GetPublishedProperties: Applying year_built filter: >= %d (excluding NULL/0 values)\n", n)
+            q = q.Where("property_sales.year_built >= ? AND property_sales.year_built > 0", n)
         }
     }
     if v := ctx.URLParam("city_id"); v != "" {
