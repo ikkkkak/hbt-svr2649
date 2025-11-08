@@ -164,20 +164,29 @@ func SendFCMPushWithImage(tokens []string, title, body, imageURL string) error {
 	}
 
 	// Filter out invalid/empty tokens
+	// Note: Expo tokens should be filtered out in service.go before calling this function
 	validTokens := make([]string, 0, len(tokens))
 	for _, token := range tokens {
 		trimmed := strings.TrimSpace(token)
-		// Accept multiple token formats:
-		// - Expo tokens: "ExponentPushToken[...]" (~41 chars)
+		if trimmed == "" {
+			continue
+		}
+
+		// Reject Expo tokens - they should be sent via Expo Push service, not FCM
+		isExpoToken := strings.HasPrefix(trimmed, "ExponentPushToken") || strings.HasPrefix(trimmed, "ExpoPushToken")
+		if isExpoToken {
+			log.Printf("⚠️ Skipping Expo token (should use Expo Push service): %s...", trimmed[:min(30, len(trimmed))])
+			continue
+		}
+
+		// Accept FCM and APNs tokens only
 		// - FCM tokens: 152+ character strings (Android full FCM registration tokens)
 		// - APNs tokens: 64 hex character strings (iOS device tokens)
-		if trimmed != "" && len(trimmed) >= 20 {
-			// Validate token format
-			isExpoToken := strings.HasPrefix(trimmed, "ExponentPushToken") || strings.HasPrefix(trimmed, "ExpoPushToken")
-			isAPNsToken := len(trimmed) == 64 && !isExpoToken && isHexString(trimmed)
-			isFCMToken := len(trimmed) > 50 && !isExpoToken
+		if len(trimmed) >= 20 {
+			isAPNsToken := len(trimmed) == 64 && isHexString(trimmed)
+			isFCMToken := len(trimmed) > 50
 
-			if isExpoToken || isAPNsToken || isFCMToken {
+			if isAPNsToken || isFCMToken {
 				validTokens = append(validTokens, trimmed)
 			} else {
 				log.Printf("⚠️ Skipping invalid token format (length=%d): %s...", len(trimmed), trimmed[:min(20, len(trimmed))])
