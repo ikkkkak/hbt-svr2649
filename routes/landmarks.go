@@ -15,16 +15,29 @@ import (
 	jwt "github.com/kataras/iris/v12/middleware/jwt"
 )
 
-// CreateLandmark creates a new landmark for an organization
+// CreateLandmark creates a new landmark for an organization or individual owner
 func CreateLandmark(ctx iris.Context) {
 	userID := ctx.Values().Get("userID").(uint)
 
-	// Get user's agent record to find organization
-	var agent models.Agent
-	if err := storage.DB.Preload("Organization").Where("user_id = ?", userID).First(&agent).Error; err != nil {
-		ctx.StatusCode(http.StatusNotFound)
-		ctx.JSON(iris.Map{"error": "User must be an agent to create landmarks"})
-		return
+	// Check if user has an organization (optional - can be nil for individual owners)
+	var organizationID *uint
+	
+	// Try to get user's organization directly
+	var organization models.Organization
+	if err := storage.DB.Where("owner_id = ?", userID).First(&organization).Error; err == nil {
+		// User has an organization, use it
+		organizationID = &organization.ID
+	} else {
+		// Try to get through agent
+		var agent models.Agent
+		if err := storage.DB.Preload("Organization").Where("user_id = ?", userID).First(&agent).Error; err == nil {
+			// User is an agent, use their organization
+			organizationID = &agent.OrganizationID
+		} else {
+			// User doesn't have an organization - allow creating as individual owner
+			// organizationID will remain nil
+			organizationID = nil
+		}
 	}
 
 	var input struct {
@@ -91,8 +104,11 @@ func CreateLandmark(ctx iris.Context) {
 	papersJSON, _ := json.Marshal(input.PropertyPapers)
 	sidesJSON, _ := json.Marshal(input.Sides)
 
+	// Ensure owner_id is always set (use pointer to uint)
+	ownerIDPtr := &userID
 	landmark := models.Landmark{
-		OrganizationID: agent.OrganizationID,
+		OrganizationID: organizationID, // Can be nil for individual owners
+		OwnerID:        ownerIDPtr,     // ALWAYS set owner_id to track individual owner
 		Title:          input.Title,
 		Description:    input.Description,
 		Images:         imagesJSON,
@@ -133,20 +149,29 @@ func CreateLandmark(ctx iris.Context) {
 	ctx.JSON(landmark)
 }
 
-// GetOrganizationLandmarks gets all landmarks for a user's organization
+// GetOrganizationLandmarks gets all landmarks for a user (organization or individual)
 func GetOrganizationLandmarks(ctx iris.Context) {
 	userID := ctx.Values().Get("userID").(uint)
 
-	// Get user's agent record to find organization
-	var agent models.Agent
-	if err := storage.DB.Preload("Organization").Where("user_id = ?", userID).First(&agent).Error; err != nil {
-		ctx.StatusCode(http.StatusNotFound)
-		ctx.JSON(iris.Map{"error": "User must be an agent to view landmarks"})
-		return
-	}
+	// Check if user has an organization
+	var organization models.Organization
+	hasOrganization := storage.DB.Where("owner_id = ?", userID).First(&organization).Error == nil
 
 	var landmarks []models.Landmark
-	if err := storage.DB.Where("organization_id = ?", agent.OrganizationID).Find(&landmarks).Error; err != nil {
+	query := storage.DB.Preload("Organization").Preload("Owner")
+	
+	if hasOrganization {
+		// Fetch landmarks from organization OR individual landmarks owned by user
+		query = query.Where(
+			"organization_id = ? OR (organization_id IS NULL AND owner_id = ?)",
+			organization.ID, userID,
+		)
+	} else {
+		// User has no organization - fetch only individual landmarks
+		query = query.Where("organization_id IS NULL AND owner_id = ?", userID)
+	}
+	
+	if err := query.Find(&landmarks).Error; err != nil {
 		ctx.StatusCode(http.StatusInternalServerError)
 		ctx.JSON(iris.Map{"error": "Failed to fetch landmarks"})
 		return

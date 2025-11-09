@@ -138,7 +138,7 @@ func GetPropertySaleVideoFeed(ctx iris.Context) {
 			orgName := ""
 			orgOwnerID := uint(0)
 			orgID := uint(0)
-			if ps.OrganizationID > 0 && ps.Organization.ID > 0 {
+			if ps.OrganizationID != nil && *ps.OrganizationID > 0 && ps.Organization != nil && ps.Organization.ID > 0 {
 				orgName = ps.Organization.Name
 				if ps.Organization.Logo != "" {
 					orgLogo = ps.Organization.Logo

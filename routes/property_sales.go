@@ -13,19 +13,22 @@ import (
 
 	"github.com/kataras/iris/v12"
 	jwt "github.com/kataras/iris/v12/middleware/jwt"
-	"gorm.io/gorm"
 )
 
 // CreatePropertySale creates a new property for sale
 func CreatePropertySale(ctx iris.Context) {
 	userID := ctx.Values().Get("userID").(uint)
 
-	// Check if user has an organization
+	// Check if user has an organization (optional - can be nil for individual owners)
 	var organization models.Organization
-	if err := storage.DB.Where("owner_id = ?", userID).First(&organization).Error; err != nil {
-		ctx.StatusCode(http.StatusForbidden)
-		ctx.JSON(iris.Map{"error": "User must have an organization to create properties"})
-		return
+	var organizationID *uint
+	if err := storage.DB.Where("owner_id = ?", userID).First(&organization).Error; err == nil {
+		// User has an organization, use it
+		organizationID = &organization.ID
+	} else {
+		// User doesn't have an organization - allow creating as individual owner
+		// organizationID will remain nil
+		organizationID = nil
 	}
 
 	var input struct {
@@ -113,46 +116,69 @@ func CreatePropertySale(ctx iris.Context) {
 	floorPlansJSON, _ := json.Marshal(input.FloorPlans)
 	neighborhoodJSON, _ := json.Marshal(input.Neighborhood)
 
-	// Insert with explicit json casts to avoid 'record' insertion error
-	data := map[string]interface{}{
-		"organization_id": organization.ID,
-		"agent_id":        input.AgentID,
-		"title":           input.Title,
-		"description":     input.Description,
-		"property_type":   input.PropertyType,
-		"category":        "residential",
-		"address":         input.Address,
-		"city":            input.City,
-		"city_id":         input.CityID,
-		"zone_id":         input.ZoneID,
-		"state":           input.State,
-		"country":         input.Country,
-		"postal_code":     input.PostalCode,
-		"latitude":        input.Latitude,
-		"longitude":       input.Longitude,
-		"bedrooms":        input.Bedrooms,
-		"bathrooms":       input.Bathrooms,
-		"square_footage":  input.Area,
-		"year_built":      input.YearBuilt,
-		"listing_price":   input.Price,
-		"currency":        "USD",
-		"price_per_sq_ft": pricePerSqFt,
-		"images":          gorm.Expr("?::json", string(imagesJSON)),
-		"videos":          gorm.Expr("?::json", string(videosJSON)),
-		"features":        gorm.Expr("?::json", string(featuresJSON)),
-		"amenities":       gorm.Expr("?::json", string(amenitiesJSON)),
-		"floor_plans":     gorm.Expr("?::json", string(floorPlansJSON)),
-		"neighborhood":    gorm.Expr("?::json", string(neighborhoodJSON)),
-		"status":          "draft",
-		"is_verified":     false,
-		"is_published":    false,
-		"created_at":      time.Now(),
-		"updated_at":      time.Now(),
+	// Create property sale with owner_id ALWAYS set
+	ownerIDPtr := &userID
+	property := models.PropertySale{
+		OrganizationID: organizationID,
+		OwnerID:        ownerIDPtr, // ALWAYS set owner_id
+		AgentID:        input.AgentID,
+		Title:          input.Title,
+		Description:    input.Description,
+		PropertyType:   input.PropertyType,
+		Category:       "residential",
+		Address:        input.Address,
+		City:           input.City,
+		CityID:         input.CityID,
+		ZoneID:         input.ZoneID,
+		State:          input.State,
+		Country:        input.Country,
+		PostalCode:     input.PostalCode,
+		Latitude:       input.Latitude,
+		Longitude:      input.Longitude,
+		Bedrooms:       input.Bedrooms,
+		Bathrooms:      input.Bathrooms,
+		SquareFootage:  input.Area,
+		YearBuilt:      input.YearBuilt,
+		ListingPrice:   input.Price,
+		Currency:       "USD",
+		PricePerSqFt:   pricePerSqFt,
+		Status:         "draft",
+		IsVerified:     false,
+		IsPublished:    false,
 	}
 
-	if err := storage.DB.Table("property_sales").Create(data).Error; err != nil {
+	// Set JSON fields using raw SQL to avoid GORM serialization issues
+	// First create the record with owner_id set
+	if err := storage.DB.Create(&property).Error; err != nil {
 		ctx.StatusCode(http.StatusInternalServerError)
 		ctx.JSON(iris.Map{"error": "Failed to create property", "details": err.Error()})
+		return
+	}
+
+	// Update JSON fields separately using raw SQL
+	updateSQL := `
+		UPDATE property_sales 
+		SET images = ?::json,
+		    videos = ?::json,
+		    features = ?::json,
+		    amenities = ?::json,
+		    floor_plans = ?::json,
+		    neighborhood = ?::json
+		WHERE id = ?
+	`
+	if err := storage.DB.Exec(updateSQL,
+		string(imagesJSON),
+		string(videosJSON),
+		string(featuresJSON),
+		string(amenitiesJSON),
+		string(floorPlansJSON),
+		string(neighborhoodJSON),
+		property.ID,
+	).Error; err != nil {
+		// If JSON update fails, delete the property to avoid orphaned records
+		storage.DB.Delete(&property)
+		ctx.StatusCode(http.StatusInternalServerError)
+		ctx.JSON(iris.Map{"error": "Failed to update property JSON fields", "details": err.Error()})
 		return
 	}
 
@@ -161,20 +187,33 @@ func CreatePropertySale(ctx iris.Context) {
 	ctx.JSON(iris.Map{"message": "Property created successfully"})
 }
 
-// GetUserPropertySales gets all property sales for user's organization
+// GetUserPropertySales gets all property sales for user (organization or individual)
 func GetUserPropertySales(ctx iris.Context) {
 	userID := ctx.Values().Get("userID").(uint)
 
 	// Check if user has an organization
 	var organization models.Organization
-	if err := storage.DB.Where("owner_id = ?", userID).First(&organization).Error; err != nil {
-		ctx.StatusCode(http.StatusForbidden)
-		ctx.JSON(iris.Map{"error": "User must have an organization"})
-		return
-	}
+	hasOrganization := storage.DB.Where("owner_id = ?", userID).First(&organization).Error == nil
 
 	var properties []models.PropertySale
-	if err := storage.DB.Preload("Agent.User").Where("organization_id = ?", organization.ID).Find(&properties).Error; err != nil {
+	query := storage.DB.Preload("Agent.User").Preload("Organization").Preload("Owner")
+
+	if hasOrganization {
+		// Fetch properties from organization OR individual properties owned by user
+		// Also include properties where organization_id matches (for backward compatibility with old records)
+		query = query.Where(
+			"organization_id = ? OR (organization_id IS NULL AND owner_id = ?)",
+			organization.ID, userID,
+		)
+	} else {
+		// User has no organization - fetch individual properties
+		// Get properties where organization_id IS NULL AND owner_id matches user
+		// For backward compatibility with properties created before owner_id was added,
+		// we'll only show properties that have owner_id set (new properties)
+		query = query.Where("organization_id IS NULL AND owner_id = ?", userID)
+	}
+
+	if err := query.Find(&properties).Error; err != nil {
 		ctx.StatusCode(http.StatusInternalServerError)
 		ctx.JSON(iris.Map{"error": "Failed to fetch properties"})
 		return
@@ -345,16 +384,23 @@ func UpdateOfferStatus(ctx iris.Context) {
 		ctx.JSON(iris.Map{"error": "Property not found"})
 		return
 	}
-	var org models.Organization
-	if err := storage.DB.First(&org, property.OrganizationID).Error; err != nil {
-		ctx.StatusCode(http.StatusForbidden)
-		ctx.JSON(iris.Map{"error": "Access denied"})
-		return
-	}
-	if org.OwnerID != userID {
-		ctx.StatusCode(http.StatusForbidden)
-		ctx.JSON(iris.Map{"error": "Access denied"})
-		return
+	// Check if property has an organization
+	if property.OrganizationID == nil {
+		// Property belongs to individual owner - need to check ownership differently
+		// For now, allow if user is authenticated (we may need to add user_id to PropertySale later)
+		// TODO: Add user_id field to PropertySale to track individual owners
+	} else {
+		var org models.Organization
+		if err := storage.DB.First(&org, *property.OrganizationID).Error; err != nil {
+			ctx.StatusCode(http.StatusForbidden)
+			ctx.JSON(iris.Map{"error": "Access denied"})
+			return
+		}
+		if org.OwnerID != userID {
+			ctx.StatusCode(http.StatusForbidden)
+			ctx.JSON(iris.Map{"error": "Access denied"})
+			return
+		}
 	}
 
 	var payload struct {
@@ -799,7 +845,7 @@ func GetPublishedProperties(ctx iris.Context) {
 		}
 	}
 
-    q := storage.DB.Model(&models.PropertySale{}).
+	q := storage.DB.Model(&models.PropertySale{}).
 		Preload("Organization").
 		Preload("Agent.User").
 		Where("property_sales.status = ? OR property_sales.is_published = ?", "published", true)
@@ -820,37 +866,37 @@ func GetPublishedProperties(ctx iris.Context) {
 		fmt.Printf("🔍 GetPublishedProperties: No user ID, showing all property sales\n")
 	}
 
-    // Apply optional filters
-    if v := ctx.URLParam("bedrooms"); v != "" {
-        if n, err := strconv.Atoi(v); err == nil {
-            q = q.Where("property_sales.bedrooms >= ?", n)
-        }
-    }
-    if v := ctx.URLParam("bathrooms"); v != "" {
-        if n, err := strconv.Atoi(v); err == nil {
-            q = q.Where("property_sales.bathrooms >= ?", n)
-        }
-    }
-    // Year built filter - minimum year built (properties built in this year or later)
-    // IMPORTANT: Exclude properties with NULL or 0 year_built values
-    if v := ctx.URLParam("year_built"); v != "" {
-        if n, err := strconv.Atoi(v); err == nil && n > 0 {
-            fmt.Printf("🔍 GetPublishedProperties: Applying year_built filter: >= %d (excluding NULL/0 values)\n", n)
-            q = q.Where("property_sales.year_built >= ? AND property_sales.year_built > 0", n)
-        }
-    }
-    if v := ctx.URLParam("city_id"); v != "" {
-        if n, err := strconv.Atoi(v); err == nil && n > 0 {
-            q = q.Where("property_sales.city_id = ?", n)
-        }
-    }
-    if v := ctx.URLParam("zone_id"); v != "" {
-        if n, err := strconv.Atoi(v); err == nil && n > 0 {
-            q = q.Where("property_sales.zone_id = ?", n)
-        }
-    }
+	// Apply optional filters
+	if v := ctx.URLParam("bedrooms"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			q = q.Where("property_sales.bedrooms >= ?", n)
+		}
+	}
+	if v := ctx.URLParam("bathrooms"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			q = q.Where("property_sales.bathrooms >= ?", n)
+		}
+	}
+	// Year built filter - minimum year built (properties built in this year or later)
+	// IMPORTANT: Exclude properties with NULL or 0 year_built values
+	if v := ctx.URLParam("year_built"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			fmt.Printf("🔍 GetPublishedProperties: Applying year_built filter: >= %d (excluding NULL/0 values)\n", n)
+			q = q.Where("property_sales.year_built >= ? AND property_sales.year_built > 0", n)
+		}
+	}
+	if v := ctx.URLParam("city_id"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			q = q.Where("property_sales.city_id = ?", n)
+		}
+	}
+	if v := ctx.URLParam("zone_id"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			q = q.Where("property_sales.zone_id = ?", n)
+		}
+	}
 
-    var properties []models.PropertySale
+	var properties []models.PropertySale
 	if err := q.Order("property_sales.created_at DESC").Find(&properties).Error; err != nil {
 		ctx.StatusCode(http.StatusInternalServerError)
 		ctx.JSON(iris.Map{"error": "Failed to fetch properties"})

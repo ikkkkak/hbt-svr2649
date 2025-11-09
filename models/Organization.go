@@ -81,9 +81,11 @@ type Agent struct {
 
 // PropertySale represents a property for sale
 type PropertySale struct {
-	ID             uint         `json:"id" gorm:"primaryKey"`
-	OrganizationID uint         `json:"organization_id" gorm:"not null"`
-	Organization   Organization `json:"organization" gorm:"foreignKey:OrganizationID"`
+	ID             uint          `json:"id" gorm:"primaryKey"`
+	OrganizationID *uint         `json:"organization_id"` // Optional - can be nil for individual owners
+	Organization   *Organization `json:"organization" gorm:"foreignKey:OrganizationID"`
+	OwnerID        *uint         `json:"owner_id"` // Optional - tracks individual owner when organization_id is nil
+	Owner          *User         `json:"owner" gorm:"foreignKey:OwnerID"`
 	AgentID        *uint        `json:"agent_id"` // Optional - can be assigned later
 	Agent          *Agent       `json:"agent" gorm:"foreignKey:AgentID"`
 
@@ -249,9 +251,11 @@ type PropertyOffer struct {
 
 // Landmark represents a custom land plot with full property information
 type Landmark struct {
-	ID             uint         `json:"id" gorm:"primaryKey"`
-	OrganizationID uint         `json:"organization_id" gorm:"index;not null"`
-	Organization   Organization `json:"organization" gorm:"foreignKey:OrganizationID;constraint:OnDelete:CASCADE"`
+	ID             uint          `json:"id" gorm:"primaryKey"`
+	OrganizationID *uint         `json:"organization_id" gorm:"index"` // Optional - can be nil for individual owners
+	Organization   *Organization `json:"organization" gorm:"foreignKey:OrganizationID;constraint:OnDelete:CASCADE"`
+	OwnerID        *uint         `json:"owner_id"` // Optional - tracks individual owner when organization_id is nil
+	Owner          *User         `json:"owner" gorm:"foreignKey:OwnerID"`
 
 	// Basic Information
 	Title       string         `json:"title" gorm:"not null"`
