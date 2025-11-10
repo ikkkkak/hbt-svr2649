@@ -50,6 +50,7 @@ func performMigrations(db *gorm.DB) {
 		&models.VideoSave{},
 		&models.VideoComment{},
 		&models.VideoCommentLike{},
+		&models.VideoFeedHistory{},
 		&models.Experience{},
 		&models.ExperienceBooking{},
 		&models.ExperienceCollection{},

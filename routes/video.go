@@ -6,10 +6,13 @@ import (
 	"apartments-clone-server/storage"
 	"apartments-clone-server/utils"
 	"fmt"
+	"strings"
+	"time"
 
 	"github.com/kataras/iris/v12"
 	jsonWT "github.com/kataras/iris/v12/middleware/jwt"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // CreateVideo stores a new video record after upload is completed (client uploads to CDN)
@@ -57,11 +60,13 @@ func CreateVideo(ctx iris.Context) {
 
 // GetVideoFeed returns paginated videos with property and user data
 func GetVideoFeed(ctx iris.Context) {
-	// Get user ID if authenticated, otherwise use 0 for public access
-	var userID uint = 0
+	// Identify the viewer (optional authentication)
+	var userID uint
+	hasAuth := false
 	if claims := jsonWT.Get(ctx); claims != nil {
 		if accessToken, ok := claims.(*utils.AccessToken); ok {
 			userID = accessToken.ID
+			hasAuth = userID > 0
 			fmt.Printf("🔍 JWT Token parsed - User ID: %d\n", userID)
 		} else {
 			fmt.Printf("❌ Failed to parse JWT token as AccessToken\n")
@@ -70,18 +75,21 @@ func GetVideoFeed(ctx iris.Context) {
 		fmt.Printf("❌ No JWT claims found in request\n")
 	}
 
-	// simple pagination
+	// Pagination parameters
 	page := ctx.URLParamIntDefault("page", 1)
 	limit := ctx.URLParamIntDefault("limit", 10)
 	if page < 1 {
 		page = 1
 	}
-	if limit < 1 || limit > 50 {
+	if limit < 1 {
 		limit = 10
+	}
+	if limit > 50 {
+		limit = 50
 	}
 	offset := (page - 1) * limit
 
-	// Enhanced filtering parameters for TikTok-quality experience
+	// Filters from query
 	city := ctx.URLParam("city")
 	propertyType := ctx.URLParam("propertyType")
 	minPrice := ctx.URLParamFloat64Default("minPrice", 0)
@@ -90,95 +98,84 @@ func GetVideoFeed(ctx iris.Context) {
 	maxBedrooms := ctx.URLParamIntDefault("maxBedrooms", 0)
 	minBathrooms := ctx.URLParamIntDefault("minBathrooms", 0)
 	maxBathrooms := ctx.URLParamIntDefault("maxBathrooms", 0)
+	sortBy := strings.ToLower(ctx.URLParamDefault("sort", "recent"))
+	sortOrder := strings.ToUpper(ctx.URLParamDefault("sortOrder", "DESC"))
+	if sortOrder != "ASC" && sortOrder != "DESC" {
+		sortOrder = "DESC"
+	}
 
-	// TikTok-style sorting options
-	sortBy := ctx.URLParamDefault("sort", "recent")       // recent, most_liked, most_commented, most_viewed, most_saved, price_low, price_high, rating
-	sortOrder := ctx.URLParamDefault("sortOrder", "DESC") // ASC, DESC
-
-	// Build query with filters: only videos for approved/live & active properties; exclude flagged/rejected videos
-	// Exclude promotional videos (they are handled separately)
-	query := storage.DB.Model(&models.Video{}).
+	// Base query (non-promotional videos only; promotional handled separately)
+	baseQuery := storage.DB.Model(&models.Video{}).
 		Where("COALESCE(videos.is_promotional, ?) = ?", false, false).
 		Joins("LEFT JOIN properties ON videos.property_id = properties.id").
 		Where("properties.id IS NOT NULL AND COALESCE(properties.is_active, ?) = ? AND properties.status IN (?)", true, true, []string{"approved", "live"}).
-		// Exclude only explicitly rejected videos; allow pending/empty/approved
 		Where("(videos.status IS NULL OR LOWER(videos.status) <> ?)", "rejected").
 		Where("COALESCE(videos.is_flagged, ?) = ?", false, false).
-		Preload("Property").Preload("User")
+		Preload("Property").
+		Preload("User")
 
-	// If user is authenticated, exclude hidden videos, reported videos, and flagged users
-	if userID > 0 {
-		fmt.Printf("🔍 Filtering videos for user ID: %d\n", userID)
-
-		// Check how many videos are hidden by this user
-		var hiddenCount int64
-		storage.DB.Model(&models.HiddenVideo{}).Where("user_id = ?", userID).Count(&hiddenCount)
-		fmt.Printf("📊 User has hidden %d videos\n", hiddenCount)
-
-		// Check how many videos are reported by this user
-		var reportedCount int64
-		storage.DB.Model(&models.VideoReport{}).Where("reporter_id = ?", userID).Count(&reportedCount)
-		fmt.Printf("📊 User has reported %d videos\n", reportedCount)
-
-		// Exclude videos hidden by this user (ignore soft-deleted rows)
-		query = query.Where("videos.id NOT IN (SELECT video_id FROM hidden_videos WHERE user_id = ? AND deleted_at IS NULL)", userID)
-
-		// Exclude videos reported by this user (ignore soft-deleted rows if any)
-		query = query.Where("videos.id NOT IN (SELECT video_id FROM video_reports WHERE reporter_id = ? AND deleted_at IS NULL)", userID)
-
-		// Exclude videos from users flagged by this user
-		query = query.Where("videos.user_id NOT IN (SELECT flagged_user_id FROM user_flags WHERE flagger_id = ? AND status = 'active')", userID)
-
-		fmt.Printf("✅ Applied user-specific filters (hidden, reported, flagged users)\n")
+	if hasAuth {
+		fmt.Printf("🔍 Applying personalised filters for user %d\n", userID)
+		baseQuery = baseQuery.
+			Where("videos.id NOT IN (SELECT video_id FROM hidden_videos WHERE user_id = ? AND deleted_at IS NULL)", userID).
+			Where("videos.id NOT IN (SELECT video_id FROM video_reports WHERE reporter_id = ? AND deleted_at IS NULL)", userID).
+			Where("videos.user_id NOT IN (SELECT flagged_user_id FROM user_flags WHERE flagger_id = ? AND status = 'active')", userID)
 	} else {
-		fmt.Printf("⚠️ No user authentication - showing all videos\n")
+		fmt.Printf("⚠️ No user authentication - serving public feed\n")
 	}
 
-	// Apply property filters
+	// Apply property-based filters
 	if city != "" {
-		query = query.Joins("JOIN properties ON videos.property_id = properties.id").
-			Where("properties.city ILIKE ?", "%"+city+"%")
+		baseQuery = baseQuery.Where("properties.city ILIKE ?", "%"+city+"%")
 	}
 	if propertyType != "" {
-		query = query.Joins("JOIN properties ON videos.property_id = properties.id").
-			Where("properties.property_type = ?", propertyType)
+		baseQuery = baseQuery.Where("properties.property_type = ?", propertyType)
 	}
 	if minPrice > 0 {
-		query = query.Joins("JOIN properties ON videos.property_id = properties.id").
-			Where("properties.price >= ?", minPrice)
+		baseQuery = baseQuery.Where("properties.price >= ?", minPrice)
 	}
 	if maxPrice > 0 {
-		query = query.Joins("JOIN properties ON videos.property_id = properties.id").
-			Where("properties.price <= ?", maxPrice)
+		baseQuery = baseQuery.Where("properties.price <= ?", maxPrice)
 	}
 	if minBedrooms > 0 {
-		query = query.Joins("JOIN properties ON videos.property_id = properties.id").
-			Where("properties.bedrooms >= ?", minBedrooms)
+		baseQuery = baseQuery.Where("properties.bedrooms >= ?", minBedrooms)
 	}
 	if maxBedrooms > 0 {
-		query = query.Joins("JOIN properties ON videos.property_id = properties.id").
-			Where("properties.bedrooms <= ?", maxBedrooms)
+		baseQuery = baseQuery.Where("properties.bedrooms <= ?", maxBedrooms)
 	}
 	if minBathrooms > 0 {
-		query = query.Joins("JOIN properties ON videos.property_id = properties.id").
-			Where("properties.bathrooms >= ?", minBathrooms)
+		baseQuery = baseQuery.Where("properties.bathrooms >= ?", minBathrooms)
 	}
 	if maxBathrooms > 0 {
-		query = query.Joins("JOIN properties ON videos.property_id = properties.id").
-			Where("properties.bathrooms <= ?", maxBathrooms)
+		baseQuery = baseQuery.Where("properties.bathrooms <= ?", maxBathrooms)
 	}
 
-	// Apply TikTok-style sorting with property correlation
+	// Simple rotation: exclude videos seen in last 2 hours
+	var excludedVideoIDs []uint
+	if hasAuth {
+		cutoff := time.Now().Add(-2 * time.Hour)
+		if err := storage.DB.Model(&models.VideoFeedHistory{}).
+			Where("user_id = ? AND last_delivered_at >= ?", userID, cutoff).
+			Limit(100).
+			Pluck("video_id", &excludedVideoIDs).Error; err == nil {
+			fmt.Printf("🔄 Excluding %d recently seen videos\n", len(excludedVideoIDs))
+		}
+	}
+
+	// Apply exclusion to base query
+	if len(excludedVideoIDs) > 0 {
+		baseQuery = baseQuery.Where("videos.id NOT IN ?", excludedVideoIDs)
+	}
+
+	// Build order clause based on sort parameter
 	var orderClause string
 	switch sortBy {
-	case "recent":
-		orderClause = "videos.created_at " + sortOrder
 	case "most_liked":
 		orderClause = "videos.likes_count " + sortOrder + ", videos.created_at DESC"
 	case "most_commented":
 		orderClause = "videos.comments_count " + sortOrder + ", videos.created_at DESC"
 	case "most_viewed":
-		orderClause = "videos.views_count " + sortOrder + ", videos.created_at DESC"
+		orderClause = "videos.view_count " + sortOrder + ", videos.created_at DESC"
 	case "most_saved":
 		orderClause = "videos.saves_count " + sortOrder + ", videos.created_at DESC"
 	case "price_low":
@@ -187,162 +184,148 @@ func GetVideoFeed(ctx iris.Context) {
 		orderClause = "properties.nightly_price DESC, videos.created_at DESC"
 	case "rating":
 		orderClause = "properties.rating " + sortOrder + ", videos.created_at DESC"
-	case "bedrooms":
-		orderClause = "properties.bedrooms " + sortOrder + ", videos.created_at DESC"
-	case "bathrooms":
-		orderClause = "properties.bathrooms " + sortOrder + ", videos.created_at DESC"
-	default:
+	case "recent":
 		orderClause = "videos.created_at " + sortOrder
+	default:
+		// Default: mix of recent and trending
+		orderClause = "(videos.likes_count * 2 + videos.comments_count * 3 + videos.saves_count + videos.view_count) DESC, videos.created_at DESC"
 	}
 
-	var videos []models.Video
-	if err := query.Order(orderClause).Limit(limit).Offset(offset).Find(&videos).Error; err != nil {
+	// Fetch videos with proper preloading
+	var selectedVideos []models.Video
+	if err := baseQuery.
+		Order(orderClause).
+		Limit(limit).
+		Offset(offset).
+		Find(&selectedVideos).Error; err != nil {
 		utils.CreateInternalServerError(ctx)
 		return
 	}
 
-	// Fetch active promotional videos (admin-uploaded app demos/tutorials)
+	// Promotional videos (admin content) - intersperse every 4-5 videos
 	var promotionalVideos []models.Video
 	promoQuery := storage.DB.Model(&models.Video{}).
 		Where("is_promotional = ?", true).
 		Where("(status IS NULL OR LOWER(status) <> ?)", "rejected").
 		Where("COALESCE(is_flagged, ?) = ?", false, false).
-		Order("created_at DESC")
+		Preload("Property").
+		Preload("User").
+		Order("created_at DESC").
+		Limit(5)
 
-	// If user is authenticated, exclude hidden/reported promotional videos
-	if userID > 0 {
-		promoQuery = promoQuery.Where("id NOT IN (SELECT video_id FROM hidden_videos WHERE user_id = ? AND deleted_at IS NULL)", userID).
+	if hasAuth {
+		if len(excludedVideoIDs) > 0 {
+			promoQuery = promoQuery.Where("id NOT IN ?", excludedVideoIDs)
+		}
+		promoQuery = promoQuery.
+			Where("id NOT IN (SELECT video_id FROM hidden_videos WHERE user_id = ? AND deleted_at IS NULL)", userID).
 			Where("id NOT IN (SELECT video_id FROM video_reports WHERE reporter_id = ? AND deleted_at IS NULL)", userID)
 	}
 
 	if err := promoQuery.Find(&promotionalVideos).Error; err == nil && len(promotionalVideos) > 0 {
-		fmt.Printf("🎬 Found %d promotional videos to intersperse\n", len(promotionalVideos))
+		fmt.Printf("🎬 Found %d promotional videos\n", len(promotionalVideos))
 	}
 
-	fmt.Printf("📹 Returning %d videos for user ID: %d (page: %d, limit: %d)\n", len(videos), userID, page, limit)
-
-	// Get user's liked and saved video IDs for this batch
-	var videoIDs []uint
-	for _, v := range videos {
-		videoIDs = append(videoIDs, v.ID)
-	}
-
-	var likedVideoIDs []uint
-	if len(videoIDs) > 0 {
-		storage.DB.Model(&models.VideoLike{}).Where("video_id IN ? AND user_id = ?", videoIDs, userID).Pluck("video_id", &likedVideoIDs)
-	}
-
-	var savedVideoIDs []uint
-	if len(videoIDs) > 0 {
-		storage.DB.Model(&models.VideoSave{}).Where("video_id IN ? AND user_id = ?", videoIDs, userID).Pluck("video_id", &savedVideoIDs)
-	}
-
-	// Create maps for quick lookup
-	likedMap := make(map[uint]bool)
-	for _, id := range likedVideoIDs {
-		likedMap[id] = true
-	}
-	savedMap := make(map[uint]bool)
-	for _, id := range savedVideoIDs {
-		savedMap[id] = true
-	}
-
-	// Randomly intersperse promotional videos (not at the beginning, skip first 2-3 videos)
-	// Only if we have promotional videos and regular videos
-	var finalVideos []models.Video
-	if len(promotionalVideos) > 0 && len(videos) > 2 {
-		finalVideos = make([]models.Video, 0, len(videos)+len(promotionalVideos))
-
-		// Always start with regular videos (skip promotional at the beginning)
-		skipCount := 2
-		if len(videos) < skipCount {
-			skipCount = len(videos)
-		}
-		finalVideos = append(finalVideos, videos[:skipCount]...)
-
-		// Randomly intersperse promotional videos after the first few videos
-		remainingVideos := videos[skipCount:]
-		remainingPromo := promotionalVideos
-
-		// Use a simple randomization: insert 1 promotional video every 3-5 regular videos
-		insertInterval := 3
+	// Intersperse promotional videos
+	finalVideos := make([]models.Video, 0, limit+len(promotionalVideos))
+	if len(promotionalVideos) > 0 && len(selectedVideos) > 0 {
+		insertInterval := 4
 		promoIndex := 0
-		regularIndex := 0
-
-		for regularIndex < len(remainingVideos) {
-			// Insert regular video
-			finalVideos = append(finalVideos, remainingVideos[regularIndex])
-			regularIndex++
-
-			// Every N videos, insert a promotional video (but not at the very beginning)
-			if regularIndex > 0 && regularIndex%insertInterval == 0 && promoIndex < len(remainingPromo) {
-				finalVideos = append(finalVideos, remainingPromo[promoIndex])
+		for idx, video := range selectedVideos {
+			if len(finalVideos) >= limit {
+				break
+			}
+			finalVideos = append(finalVideos, video)
+			if (idx+1)%insertInterval == 0 && promoIndex < len(promotionalVideos) && len(finalVideos) < limit {
+				finalVideos = append(finalVideos, promotionalVideos[promoIndex])
 				promoIndex++
-				// Cycle through promotional videos if we have more
-				if promoIndex >= len(remainingPromo) {
-					promoIndex = 0
+			}
+		}
+	} else {
+		finalVideos = selectedVideos
+	}
+
+	if len(finalVideos) > limit {
+		finalVideos = finalVideos[:limit]
+	}
+
+	fmt.Printf("📹 Returning %d videos for user %d (page %d)\n", len(finalVideos), userID, page)
+
+	// Update feed history asynchronously (don't block response)
+	if hasAuth && len(finalVideos) > 0 {
+		go func(videos []models.Video, uid uint) {
+			now := time.Now()
+			histories := make([]models.VideoFeedHistory, 0, len(videos))
+			for _, video := range videos {
+				histories = append(histories, models.VideoFeedHistory{
+					UserID:          uid,
+					VideoID:         video.ID,
+					LastDeliveredAt: now,
+					SeenCount:       1,
+				})
+			}
+			if err := storage.DB.Clauses(clause.OnConflict{
+				Columns: []clause.Column{{Name: "user_id"}, {Name: "video_id"}},
+				DoUpdates: clause.Assignments(map[string]interface{}{
+					"last_delivered_at": now,
+					"seen_count":        gorm.Expr("video_feed_histories.seen_count + 1"),
+					"updated_at":        now,
+				}),
+			}).Create(&histories).Error; err != nil {
+				fmt.Printf("⚠️ Failed to upsert video feed history: %v\n", err)
+			}
+		}(finalVideos, userID)
+	}
+
+	// Build liked/saved lookup
+	likedMap := make(map[uint]bool)
+	savedMap := make(map[uint]bool)
+	if hasAuth {
+		videoIDs := make([]uint, 0, len(finalVideos))
+		for _, video := range finalVideos {
+			videoIDs = append(videoIDs, video.ID)
+		}
+		if len(videoIDs) > 0 {
+			var likedIDs []uint
+			if err := storage.DB.Model(&models.VideoLike{}).
+				Where("video_id IN ? AND user_id = ?", videoIDs, userID).
+				Pluck("video_id", &likedIDs).Error; err == nil {
+				for _, id := range likedIDs {
+					likedMap[id] = true
+				}
+			}
+			var savedIDs []uint
+			if err := storage.DB.Model(&models.VideoSave{}).
+				Where("video_id IN ? AND user_id = ?", videoIDs, userID).
+				Pluck("video_id", &savedIDs).Error; err == nil {
+				for _, id := range savedIDs {
+					savedMap[id] = true
 				}
 			}
 		}
-
-		// Add any remaining promotional videos at the end if we have space
-		if promoIndex < len(remainingPromo) {
-			remaining := remainingPromo[promoIndex:]
-			if len(remaining) > 0 && len(finalVideos) < limit*2 {
-				finalVideos = append(finalVideos, remaining...)
-			}
-		}
-
-		fmt.Printf("🎬 Interspersed %d promotional videos into feed (total: %d videos)\n", promoIndex, len(finalVideos))
-	} else {
-		// No promotional videos or not enough regular videos, just return regular videos
-		finalVideos = videos
 	}
 
-	// Collect all video IDs for like/save lookup
-	var allVideoIDs []uint
-	for _, v := range finalVideos {
-		allVideoIDs = append(allVideoIDs, v.ID)
-	}
-
-	// Get user's liked and saved video IDs for all videos (including promotional)
-	var allLikedVideoIDs []uint
-	if len(allVideoIDs) > 0 {
-		storage.DB.Model(&models.VideoLike{}).Where("video_id IN ? AND user_id = ?", allVideoIDs, userID).Pluck("video_id", &allLikedVideoIDs)
-	}
-
-	var allSavedVideoIDs []uint
-	if len(allVideoIDs) > 0 {
-		storage.DB.Model(&models.VideoSave{}).Where("video_id IN ? AND user_id = ?", allVideoIDs, userID).Pluck("video_id", &allSavedVideoIDs)
-	}
-
-	// Create maps for quick lookup
-	allLikedMap := make(map[uint]bool)
-	for _, id := range allLikedVideoIDs {
-		allLikedMap[id] = true
-	}
-	allSavedMap := make(map[uint]bool)
-	for _, id := range allSavedVideoIDs {
-		allSavedMap[id] = true
-	}
-
-	// Add isLiked and isSaved to each video
+	// Serialize response with user state
 	type VideoWithUserState struct {
 		models.Video
 		IsLiked bool `json:"isLiked"`
 		IsSaved bool `json:"isSaved"`
 	}
 
-	var videosWithState []VideoWithUserState
+	videosWithState := make([]VideoWithUserState, 0, len(finalVideos))
 	for _, video := range finalVideos {
 		videosWithState = append(videosWithState, VideoWithUserState{
 			Video:   video,
-			IsLiked: allLikedMap[video.ID],
-			IsSaved: allSavedMap[video.ID],
+			IsLiked: likedMap[video.ID],
+			IsSaved: savedMap[video.ID],
 		})
 	}
 
-	ctx.JSON(iris.Map{"success": true, "videos": videosWithState, "page": page})
+	ctx.JSON(iris.Map{
+		"success": true,
+		"videos":  videosWithState,
+		"page":    page,
+	})
 }
 
 func LikeVideo(ctx iris.Context) {

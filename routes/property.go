@@ -260,6 +260,66 @@ func GetPropertiesByUserID(ctx iris.Context) {
 	ctx.JSON(properties)
 }
 
+// GetHostPropertiesByPropertyID returns other properties by the same host as the given property
+// URL: /api/property/host-properties/{propertyID}?exclude={id}
+func GetHostPropertiesByPropertyID(ctx iris.Context) {
+	propertyID := ctx.Params().Get("id")
+	excludeID := ctx.URLParam("exclude")
+
+	// Load the property to find the host_id
+	var base models.Property
+	if err := storage.DB.Select("id, host_id").
+		Where("id = ?", propertyID).
+		First(&base).Error; err != nil {
+		utils.CreateError(iris.StatusNotFound, "Not Found", "Property not found", ctx)
+		return
+	}
+
+	// Build query for same host's properties
+	query := storage.DB.Preload("Host").Preload("Reviews").
+		Where("host_id = ?", base.HostID).
+		Where("is_active = ?", true).
+		Where("status IN ?", []string{"approved", "live"})
+
+	// Exclude the current property or any explicitly excluded id
+	if excludeID != "" {
+		query = query.Where("id != ?", excludeID)
+	} else {
+		query = query.Where("id != ?", propertyID)
+	}
+
+	// Optional auth for user-specific exclusions
+	var userID uint = 0
+	if v := ctx.Values().Get("userID"); v != nil {
+		if id, ok := v.(uint); ok {
+			userID = id
+		}
+	}
+	if userID == 0 {
+		if auth := ctx.GetHeader("Authorization"); len(auth) > 7 && auth[:7] == "Bearer " {
+			verifier := jwt.NewVerifier(jwt.HS256, []byte(os.Getenv("ACCESS_TOKEN_SECRET")))
+			verifier.WithDefaultBlocklist()
+			if token, err := verifier.VerifyToken([]byte(auth[7:])); err == nil {
+				var claims utils.AccessToken
+				if err := token.Claims(&claims); err == nil {
+					userID = claims.ID
+				}
+			}
+		}
+	}
+	if userID > 0 {
+		query = query.Where("id NOT IN (SELECT property_id FROM hidden_properties WHERE user_id = ?)", userID)
+		query = query.Where("id NOT IN (SELECT property_id FROM property_reports WHERE reporter_id = ?)", userID)
+		query = query.Where("host_id NOT IN (SELECT flagged_user_id FROM user_flags WHERE flagger_id = ? AND status='active')", userID)
+	}
+
+	var properties []models.Property
+	if err := query.Order("created_at DESC").Limit(20).Find(&properties).Error; err != nil {
+		utils.CreateError(iris.StatusInternalServerError, "Error", err.Error(), ctx)
+		return
+	}
+	ctx.JSON(properties)
+}
 func DeleteProperty(ctx iris.Context) {
 	params := ctx.Params()
 	id := params.Get("id")

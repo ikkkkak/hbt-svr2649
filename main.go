@@ -404,6 +404,7 @@ func main() {
 		property.Post("/", routes.CreateProperty)
 		property.Get("/{id}", routes.GetProperty)
 		property.Get("/userid/{id}", accessTokenVerifierMiddleware, utils.UserIDMiddleware, routes.GetPropertiesByUserID)
+		property.Get("/host-properties/{id}", optionalAuthMiddleware, routes.GetHostPropertiesByPropertyID)
 		property.Delete("/{id}", accessTokenVerifierMiddleware, routes.DeleteProperty)
 		property.Patch("/update/{id}", accessTokenVerifierMiddleware, routes.UpdateProperty)
 		property.Post("/search", optionalAuthMiddleware, routes.GetPropertiesByBoundingBox)
