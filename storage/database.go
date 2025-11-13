@@ -89,6 +89,10 @@ func performMigrations(db *gorm.DB) {
 		&models.VideoReport{},
 		&models.UserFlag{},
 		&models.HiddenVideo{},
+		// Stories
+		&models.Story{},
+		&models.StoryView{},
+		&models.StoryLike{},
 		// Group Management Models
 		&models.Group{},
 		&models.GroupMember{},

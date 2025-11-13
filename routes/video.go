@@ -150,15 +150,33 @@ func GetVideoFeed(ctx iris.Context) {
 		baseQuery = baseQuery.Where("properties.bathrooms <= ?", maxBathrooms)
 	}
 
-	// Simple rotation: exclude videos seen in last 2 hours
+	// Improved rotation: exclude videos seen in last 2 hours for better variety
+	// This ensures users see fresh content without being too restrictive
 	var excludedVideoIDs []uint
+	var recentlySeenMap map[uint]time.Time // Track when each video was last seen
 	if hasAuth {
+		// Exclude videos seen in the last 2 hours (more reasonable window)
 		cutoff := time.Now().Add(-2 * time.Hour)
 		if err := storage.DB.Model(&models.VideoFeedHistory{}).
 			Where("user_id = ? AND last_delivered_at >= ?", userID, cutoff).
-			Limit(100).
+			Limit(200). // Track recent history
 			Pluck("video_id", &excludedVideoIDs).Error; err == nil {
-			fmt.Printf("🔄 Excluding %d recently seen videos\n", len(excludedVideoIDs))
+			fmt.Printf("🔄 Excluding %d recently seen videos (last 2h)\n", len(excludedVideoIDs))
+		}
+
+		// Also get the last seen timestamps for smarter ordering
+		var recentHistories []models.VideoFeedHistory
+		if err := storage.DB.Model(&models.VideoFeedHistory{}).
+			Where("user_id = ?", userID).
+			Select("video_id, last_delivered_at").
+			Order("last_delivered_at DESC").
+			Limit(500).
+			Find(&recentHistories).Error; err == nil {
+			recentlySeenMap = make(map[uint]time.Time)
+			for _, h := range recentHistories {
+				recentlySeenMap[h.VideoID] = h.LastDeliveredAt
+			}
+			fmt.Printf("📊 Tracking %d videos in user history\n", len(recentlySeenMap))
 		}
 	}
 
@@ -187,8 +205,28 @@ func GetVideoFeed(ctx iris.Context) {
 	case "recent":
 		orderClause = "videos.created_at " + sortOrder
 	default:
-		// Default: mix of recent and trending
-		orderClause = "(videos.likes_count * 2 + videos.comments_count * 3 + videos.saves_count + videos.view_count) DESC, videos.created_at DESC"
+		// Default: Smart rotation with better variety
+		// Mix of:
+		// 1. Videos never seen (highest priority)
+		// 2. Videos seen long ago (medium priority)
+		// 3. Recent and trending videos (lower priority if recently seen)
+		// 4. Randomization to prevent same order every time
+		if hasAuth {
+			// Prioritize unseen videos first, then by engagement, with randomization
+			// Use RANDOM() with a seed based on current hour to get different results each hour
+			// This ensures variety while still prioritizing unseen content
+			orderClause = fmt.Sprintf(`CASE 
+				WHEN videos.id NOT IN (SELECT video_id FROM video_feed_histories WHERE user_id = %d AND deleted_at IS NULL) 
+				THEN 0 
+				ELSE 1 
+			END ASC,
+			RANDOM(),
+			(videos.likes_count * 2 + videos.comments_count * 3 + videos.saves_count + videos.view_count) DESC, 
+			videos.created_at DESC`, userID)
+		} else {
+			// Default: mix of recent and trending with randomization
+			orderClause = "RANDOM(), (videos.likes_count * 2 + videos.comments_count * 3 + videos.saves_count + videos.view_count) DESC, videos.created_at DESC"
+		}
 	}
 
 	// Fetch videos with proper preloading

@@ -14,35 +14,35 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/go-playground/validator/v10"
 	"github.com/joho/godotenv"
 	"github.com/kataras/iris/v12"
-	"github.com/kataras/iris/v12/middleware/jwt"
+	irisjwt "github.com/kataras/iris/v12/middleware/jwt"
 	"gorm.io/gorm"
 )
 
 // Optional authentication middleware - allows requests with or without JWT tokens
 func optionalAuthMiddleware(ctx iris.Context) {
 	authHeader := ctx.GetHeader("Authorization")
-	if authHeader != "" && len(authHeader) > 7 && authHeader[:7] == "Bearer " {
-		// Token present, try to verify it
-		accessTokenVerifier := jwt.NewVerifier(jwt.HS256, []byte(os.Getenv("ACCESS_TOKEN_SECRET")))
-		accessTokenVerifier.WithDefaultBlocklist()
-		accessTokenVerifierMiddleware := accessTokenVerifier.Verify(func() interface{} {
-			return new(utils.AccessToken)
-		})
-
-		// Attempt verification (do not rely on status code)
-		accessTokenVerifierMiddleware(ctx)
-		if claims := jwt.Get(ctx); claims != nil {
-			if accessToken, ok := claims.(*utils.AccessToken); ok {
-				ctx.Values().Set("userID", accessToken.ID)
-				fmt.Printf("🔍 Optional auth: User ID %d authenticated\n", accessToken.ID)
+	if token := strings.TrimSpace(authHeader); strings.HasPrefix(token, "Bearer ") {
+		rawToken := strings.TrimPrefix(token, "Bearer ")
+		if rawToken != "" {
+			verifier := irisjwt.NewVerifier(irisjwt.HS256, []byte(os.Getenv("ACCESS_TOKEN_SECRET")))
+			verifier.WithDefaultBlocklist()
+			claims := new(utils.AccessToken)
+			if verifiedToken, err := verifier.VerifyToken([]byte(rawToken)); err == nil && verifiedToken != nil {
+				if err := verifiedToken.Claims(claims); err == nil && claims != nil {
+					ctx.Values().Set("userID", claims.ID)
+					fmt.Printf("🔍 Optional auth: User ID %d authenticated\n", claims.ID)
+				} else {
+					fmt.Printf("🔍 Optional auth: Failed to decode claims (%v) - ignoring and continuing\n", err)
+				}
+			} else {
+				fmt.Printf("🔍 Optional auth: Invalid token (%v) - ignoring and continuing\n", err)
 			}
-		} else {
-			fmt.Printf("🔍 Optional auth: Invalid token - proceeding without auth\n")
 		}
 	} else {
 		fmt.Printf("🔍 Optional auth: No token or invalid token - proceeding without auth\n")
@@ -224,57 +224,46 @@ func main() {
 	app.Use(iris.Compression)
 
 	// JWT Verifiers
-	resetTokenVerifier := jwt.NewVerifier(jwt.HS256, []byte(os.Getenv("EMAIL_TOKEN_SECRET")))
+	resetTokenVerifier := irisjwt.NewVerifier(irisjwt.HS256, []byte(os.Getenv("EMAIL_TOKEN_SECRET")))
 	resetTokenVerifier.WithDefaultBlocklist()
 	resetTokenVerifierMiddleware := resetTokenVerifier.Verify(func() interface{} {
 		return new(utils.ForgotPasswordToken)
 	})
 
-	accessTokenVerifier := jwt.NewVerifier(jwt.HS256, []byte(os.Getenv("ACCESS_TOKEN_SECRET")))
+	accessTokenVerifier := irisjwt.NewVerifier(irisjwt.HS256, []byte(os.Getenv("ACCESS_TOKEN_SECRET")))
 	accessTokenVerifier.WithDefaultBlocklist()
-	accessTokenVerifierMiddleware := accessTokenVerifier.Verify(func() interface{} {
-		return new(utils.AccessToken)
-	})
-	// Fixed JWT middleware - ensure userID is set before handler
 	originalVerifier := accessTokenVerifier.Verify(func() interface{} {
 		return new(utils.AccessToken)
 	})
-
-	accessTokenVerifierMiddleware = func(ctx iris.Context) {
-		fmt.Printf("🔍 JWT Middleware - Starting authentication\n")
-
-		// Call the original middleware
-		originalVerifier(ctx)
-
-		// Extract userID from claims if token was valid
-		if claims := jwt.Get(ctx); claims != nil {
+	// Fixed JWT middleware - ensure userID is set before handler
+	attachUserMiddleware := func(ctx iris.Context) {
+		if claims := irisjwt.Get(ctx); claims != nil {
 			if accessToken, ok := claims.(*utils.AccessToken); ok {
+				if accessToken.ID == 0 {
+					ctx.StopWithJSON(iris.StatusUnauthorized, iris.Map{"error": "unauthorized"})
+					return
+				}
 				ctx.Values().Set("userID", accessToken.ID)
-				fmt.Printf("✅ JWT Middleware - User ID %d authenticated and set in context\n", accessToken.ID)
+				ctx.Values().Set("userRole", accessToken.Role)
 			} else {
-				fmt.Printf("❌ JWT Middleware - Claims not AccessToken type: %T\n", claims)
+				ctx.StopWithJSON(iris.StatusUnauthorized, iris.Map{"error": "unauthorized"})
+				return
 			}
 		} else {
-			fmt.Printf("❌ JWT Middleware - No claims found\n")
-		}
-
-		// Verify userID is set before calling next
-		if userID, ok := ctx.Values().Get("userID").(uint); ok && userID > 0 {
-			fmt.Printf("✅ JWT Middleware - UserID %d confirmed in context before next\n", userID)
-		} else {
-			fmt.Printf("❌ JWT Middleware - UserID not properly set in context - BLOCKING REQUEST\n")
-			ctx.StatusCode(401)
-			ctx.JSON(iris.Map{"error": "unauthorized"})
+			ctx.StopWithJSON(iris.StatusUnauthorized, iris.Map{"error": "unauthorized"})
 			return
 		}
-
 		ctx.Next()
 	}
+	accessTokenVerifierMiddleware := func(ctx iris.Context) {
+		ctx.AddHandler(attachUserMiddleware)
+		originalVerifier(ctx)
+	}
 
-	refreshTokenVerifier := jwt.NewVerifier(jwt.HS256, []byte(os.Getenv("REFRESH_TOKEN_SECRET")))
+	refreshTokenVerifier := irisjwt.NewVerifier(irisjwt.HS256, []byte(os.Getenv("REFRESH_TOKEN_SECRET")))
 	refreshTokenVerifier.WithDefaultBlocklist()
 	refreshTokenVerifierMiddleware := refreshTokenVerifier.Verify(func() interface{} {
-		return new(jwt.Claims)
+		return new(irisjwt.Claims)
 	})
 
 	refreshTokenVerifier.Extractors = append(refreshTokenVerifier.Extractors, func(ctx iris.Context) string {
@@ -384,6 +373,21 @@ func main() {
 		user.Get("/blocked", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.GetBlockedUsers)
 		user.Get("/hidden-properties", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.GetHiddenProperties)
 		user.Get("/hidden-videos", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.GetHiddenVideos)
+	}
+
+	// Stories routes under /api with auth on protected endpoints (verifier then attacher)
+	// Inbox endpoint uses optional auth to show read status
+	storiesParty := app.Party("/api/stories")
+	{
+		// Protected routes
+		storiesParty.Post("/upload", originalVerifier, attachUserMiddleware, routes.UploadStory)
+		storiesParty.Post("/{storyId:uint}/view", originalVerifier, attachUserMiddleware, routes.PostStoryView)
+		storiesParty.Post("/{storyId:uint}/like", originalVerifier, attachUserMiddleware, routes.PostStoryLikeToggle)
+		storiesParty.Delete("/{storyId:uint}", originalVerifier, attachUserMiddleware, routes.DeleteStory)
+		
+		// Public routes (inbox uses optional auth for read status)
+		storiesParty.Get("/inbox", optionalAuthMiddleware, routes.GetStoriesInbox)
+		storiesParty.Get("/{userId:uint}", routes.GetUserStories)
 	}
 
 	// Video reporting routes (Public - optional auth for better filtering)
