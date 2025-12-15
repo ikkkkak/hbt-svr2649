@@ -267,7 +267,8 @@ func GetAllUsersWithPushTokens() []string {
 	var users []models.User
 	
 	// Get all users who have push tokens and allow notifications
-	query := storage.DB.Where("push_tokens IS NOT NULL AND push_tokens != 'null' AND push_tokens != ''")
+	// Only require non-NULL JSON; content validity is handled when parsing
+	query := storage.DB.Where("push_tokens IS NOT NULL")
 	query = query.Where("(allows_notifications IS NULL OR allows_notifications = true)")
 	
 	if err := query.Find(&users).Error; err != nil {

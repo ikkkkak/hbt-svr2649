@@ -8,6 +8,7 @@ import (
 	"math"
 	"os"
 	"strconv"
+	"strings"
 
 	"github.com/kataras/iris/v12"
 	"github.com/kataras/iris/v12/middleware/jwt"
@@ -147,6 +148,19 @@ func GetLocationProperties(ctx iris.Context) {
 		if cp.Property.ID != 0 { // Ensure property exists
 			properties = append(properties, cp.Property)
 		}
+	}
+
+	// Localize property fields based on requested language
+	lang := strings.ToLower(strings.TrimSpace(ctx.URLParamDefault("lang", "en")))
+	for i := range properties {
+		p := &properties[i]
+		p.Title = utils.ResolveLocalizedText(p.Title, p.TitleTranslations, lang)
+		p.Description = utils.ResolveLocalizedText(p.Description, p.DescriptionTranslations, lang)
+		p.NeighborhoodDescription = utils.ResolveLocalizedText(
+			p.NeighborhoodDescription,
+			p.NeighborhoodDescriptionTranslations,
+			lang,
+		)
 	}
 
 	// Log how many properties were found

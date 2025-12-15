@@ -284,7 +284,13 @@ func SavePropertySaleVideo(ctx iris.Context) {
 	// Update saves count
 	storage.DB.Model(&models.PropertySaleVideo{}).Where("id = ?", videoID).Update("saves_count", gorm.Expr("saves_count + 1"))
 
-	ctx.JSON(iris.Map{"success": true, "message": "Video saved"})
+	// Get updated saves count
+	var video models.PropertySaleVideo
+	if err := storage.DB.First(&video, videoID).Error; err == nil {
+		ctx.JSON(iris.Map{"success": true, "message": "Video saved", "savesCount": video.SavesCount})
+	} else {
+		ctx.JSON(iris.Map{"success": true, "message": "Video saved"})
+	}
 }
 
 // UnsavePropertySaleVideo handles unsaving a property sale video
@@ -311,7 +317,13 @@ func UnsavePropertySaleVideo(ctx iris.Context) {
 		storage.DB.Model(&models.PropertySaleVideo{}).Where("id = ?", videoID).Update("saves_count", gorm.Expr("saves_count - 1"))
 	}
 
-	ctx.JSON(iris.Map{"success": true, "message": "Video unsaved"})
+	// Get updated saves count
+	var video models.PropertySaleVideo
+	if err := storage.DB.First(&video, videoID).Error; err == nil {
+		ctx.JSON(iris.Map{"success": true, "message": "Video unsaved", "savesCount": video.SavesCount})
+	} else {
+		ctx.JSON(iris.Map{"success": true, "message": "Video unsaved"})
+	}
 }
 
 // GetPropertySaleVideoComments gets comments for a property sale video

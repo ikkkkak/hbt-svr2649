@@ -34,8 +34,10 @@ func optionalAuthMiddleware(ctx iris.Context) {
 			verifier.WithDefaultBlocklist()
 			claims := new(utils.AccessToken)
 			if verifiedToken, err := verifier.VerifyToken([]byte(rawToken)); err == nil && verifiedToken != nil {
-				if err := verifiedToken.Claims(claims); err == nil && claims != nil {
+				if err := verifiedToken.Claims(claims); err == nil && claims != nil && claims.ID > 0 {
 					ctx.Values().Set("userID", claims.ID)
+					// Also set in JWT context for compatibility with jsonWT.Get(ctx)
+					ctx.Values().Set("jwt.claims", claims)
 					fmt.Printf("🔍 Optional auth: User ID %d authenticated\n", claims.ID)
 				} else {
 					fmt.Printf("🔍 Optional auth: Failed to decode claims (%v) - ignoring and continuing\n", err)
@@ -335,6 +337,7 @@ func main() {
 	// Routes
 	user := app.Party("/api/user")
 	{
+		user.Post("/check-exists", routes.CheckUserExists)
 		user.Post("/register", routes.Register)
 		user.Post("/login", routes.Login)
 		user.Post("/register-phone", routes.RegisterPhone)
@@ -384,7 +387,7 @@ func main() {
 		storiesParty.Post("/{storyId:uint}/view", originalVerifier, attachUserMiddleware, routes.PostStoryView)
 		storiesParty.Post("/{storyId:uint}/like", originalVerifier, attachUserMiddleware, routes.PostStoryLikeToggle)
 		storiesParty.Delete("/{storyId:uint}", originalVerifier, attachUserMiddleware, routes.DeleteStory)
-		
+
 		// Public routes (inbox uses optional auth for read status)
 		storiesParty.Get("/inbox", optionalAuthMiddleware, routes.GetStoriesInbox)
 		storiesParty.Get("/{userId:uint}", routes.GetUserStories)
@@ -800,7 +803,7 @@ func main() {
 
 	video := app.Party("/api/video")
 	{
-		video.Post("/", routes.CreateVideo)
+		video.Post("/", accessTokenVerifierMiddleware, routes.CreateVideo)
 		video.Get("/feed", routes.GetVideoFeed)
 		video.Post("/like", accessTokenVerifierMiddleware, routes.LikeVideo)
 		video.Post("/unlike", accessTokenVerifierMiddleware, routes.UnlikeVideo)
@@ -815,6 +818,8 @@ func main() {
 		video.Delete("/{id}", accessTokenVerifierMiddleware, routes.DeleteVideo)
 		video.Get("/liked", accessTokenVerifierMiddleware, routes.GetLikedVideos)
 		video.Get("/saved", accessTokenVerifierMiddleware, routes.GetSavedVideos)
+		video.Post("/{videoID:uint}/view", optionalAuthMiddleware, routes.RecordVideoView)
+		video.Get("/{videoID:uint}/viewers", accessTokenVerifierMiddleware, routes.GetVideoViewers)
 	}
 
 	// Property Sale Videos routes

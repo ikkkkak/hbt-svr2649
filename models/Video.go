@@ -73,3 +73,25 @@ func (vc *VideoComment) BeforeCreate(tx *gorm.DB) (err error) {
 	}
 	return
 }
+
+// VideoView tracks individual video views (both authenticated and anonymous)
+type VideoView struct {
+	gorm.Model
+	VideoID  uint    `json:"videoID" gorm:"index;not null"`
+	Video    Video   `json:"video" gorm:"foreignKey:VideoID;references:ID"`
+	UserID   *uint   `json:"userID" gorm:"index"` // Nullable for anonymous viewers
+	User     *User   `json:"user" gorm:"foreignKey:UserID;references:ID"`
+	DeviceID *string `json:"deviceID" gorm:"index;size:191"` // For anonymous viewers
+	IPAddress string `json:"ipAddress" gorm:"size:45"` // IPv6 max length
+	ViewedAt  time.Time `json:"viewedAt" gorm:"index"`
+}
+
+// VideoViewer represents a viewer for dashboard analytics (aggregated)
+type VideoViewer struct {
+	UserID    *uint   `json:"userID"`
+	User      *User   `json:"user"`
+	DeviceID  *string `json:"deviceID"`
+	ViewCount int64   `json:"viewCount"`
+	FirstViewedAt time.Time `json:"firstViewedAt"`
+	LastViewedAt  time.Time `json:"lastViewedAt"`
+}

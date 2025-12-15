@@ -2,6 +2,7 @@ package routes
 
 import (
 	"apartments-clone-server/models"
+	"apartments-clone-server/services"
 	"apartments-clone-server/storage"
 	"apartments-clone-server/utils"
 	"encoding/json"
@@ -9,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/kataras/iris/v12"
@@ -147,6 +149,16 @@ func CreatePropertySale(ctx iris.Context) {
 		IsPublished:    false,
 	}
 
+	// One-time translations for title & description
+	titleTranslations := services.TranslateAllLanguages(property.Title)
+	descTranslations := services.TranslateAllLanguages(property.Description)
+	if b, err := json.Marshal(titleTranslations); err == nil {
+		property.TitleTranslations = b
+	}
+	if b, err := json.Marshal(descTranslations); err == nil {
+		property.DescriptionTranslations = b
+	}
+
 	// Set JSON fields using raw SQL to avoid GORM serialization issues
 	// First create the record with owner_id set
 	if err := storage.DB.Create(&property).Error; err != nil {
@@ -219,6 +231,14 @@ func GetUserPropertySales(ctx iris.Context) {
 		return
 	}
 
+	// Localize titles/descriptions based on requested language
+	lang := strings.ToLower(strings.TrimSpace(ctx.URLParamDefault("lang", "en")))
+	for i := range properties {
+		p := &properties[i]
+		p.Title = utils.ResolveLocalizedText(p.Title, p.TitleTranslations, lang)
+		p.Description = utils.ResolveLocalizedText(p.Description, p.DescriptionTranslations, lang)
+	}
+
 	ctx.JSON(iris.Map{"properties": properties})
 }
 
@@ -232,6 +252,10 @@ func GetPropertySale(ctx iris.Context) {
 		ctx.JSON(iris.Map{"error": "Property not found"})
 		return
 	}
+
+	lang := strings.ToLower(strings.TrimSpace(ctx.URLParamDefault("lang", "en")))
+	property.Title = utils.ResolveLocalizedText(property.Title, property.TitleTranslations, lang)
+	property.Description = utils.ResolveLocalizedText(property.Description, property.DescriptionTranslations, lang)
 
 	ctx.JSON(iris.Map{"property": property})
 }
@@ -528,11 +552,15 @@ func UpdatePropertySale(ctx iris.Context) {
 	}
 
 	// Update fields
+	titleChanged := false
+	descChanged := false
 	if input.Title != "" {
 		property.Title = input.Title
+		titleChanged = true
 	}
 	if input.Description != "" {
 		property.Description = input.Description
+		descChanged = true
 	}
 	if input.PropertyType != "" {
 		property.PropertyType = input.PropertyType
@@ -621,6 +649,22 @@ func UpdatePropertySale(ctx iris.Context) {
 	}
 	if input.Status != "" {
 		property.Status = input.Status
+	}
+
+	// Update translations if title or description changed
+	if titleChanged || descChanged {
+		if titleChanged {
+			titleTranslations := services.TranslateAllLanguages(property.Title)
+			if b, err := json.Marshal(titleTranslations); err == nil {
+				property.TitleTranslations = b
+			}
+		}
+		if descChanged {
+			descTranslations := services.TranslateAllLanguages(property.Description)
+			if b, err := json.Marshal(descTranslations); err == nil {
+				property.DescriptionTranslations = b
+			}
+		}
 	}
 
 	if err := storage.DB.Save(&property).Error; err != nil {
@@ -903,6 +947,14 @@ func GetPublishedProperties(ctx iris.Context) {
 		return
 	}
 
+	// Localize titles/descriptions based on requested language
+	lang := strings.ToLower(strings.TrimSpace(ctx.URLParamDefault("lang", "en")))
+	for i := range properties {
+		p := &properties[i]
+		p.Title = utils.ResolveLocalizedText(p.Title, p.TitleTranslations, lang)
+		p.Description = utils.ResolveLocalizedText(p.Description, p.DescriptionTranslations, lang)
+	}
+
 	ctx.JSON(iris.Map{"properties": properties})
 }
 
@@ -921,6 +973,10 @@ func GetPublishedProperty(ctx iris.Context) {
 		ctx.JSON(iris.Map{"error": "Property not found"})
 		return
 	}
+
+	lang := strings.ToLower(strings.TrimSpace(ctx.URLParamDefault("lang", "en")))
+	property.Title = utils.ResolveLocalizedText(property.Title, property.TitleTranslations, lang)
+	property.Description = utils.ResolveLocalizedText(property.Description, property.DescriptionTranslations, lang)
 
 	ctx.JSON(iris.Map{"property": property})
 }

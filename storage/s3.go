@@ -51,6 +51,10 @@ func UploadBase64Image(base64ImageSrc string, publicID string) map[string]string
 	form.Add("file", "data:image/jpeg;base64,"+payload)
 	form.Add("api_key", apiKey)
 
+	// Apply Cloudinary transformation to optimize size: limit dimensions, convert to webp, auto quality
+	transformation := "c_limit,w_1600,h_1600,f_webp,q_auto:good"
+	form.Add("transformation", transformation)
+
 	// Handle folder/public_id correctly
 	// If publicID provided, we can prefix with folder. If not, use Cloudinary 'folder' param instead.
 	finalPublicID := ""
@@ -70,7 +74,7 @@ func UploadBase64Image(base64ImageSrc string, publicID string) map[string]string
 	form.Add("timestamp", timestamp)
 
 	// Create signature string for Cloudinary (must be SHA1) — include only params we sent, ordered by key
-	// Possible keys: folder, public_id, timestamp
+	// Possible keys: folder, public_id, timestamp, transformation
 	var parts []string
 	if form.Has("folder") {
 		parts = append(parts, fmt.Sprintf("folder=%s", form.Get("folder")))
@@ -79,6 +83,7 @@ func UploadBase64Image(base64ImageSrc string, publicID string) map[string]string
 		parts = append(parts, fmt.Sprintf("public_id=%s", form.Get("public_id")))
 	}
 	parts = append(parts, fmt.Sprintf("timestamp=%s", timestamp))
+	parts = append(parts, fmt.Sprintf("transformation=%s", transformation))
 	signatureString := strings.Join(parts, "&") + apiSecret
 	signature := fmt.Sprintf("%x", sha1.Sum([]byte(signatureString)))
 	form.Add("signature", signature)
@@ -175,6 +180,11 @@ func UploadBase64Video(base64VideoSrc string, publicID string, mime string) map[
 	form.Add("file", "data:"+m+";base64,"+payload)
 	form.Add("api_key", apiKey)
 
+	// Apply Cloudinary video optimization: cap resolution, convert to mp4 (H.264), auto quality/bitrate
+	// This keeps visual quality while reducing storage and bandwidth.
+	videoTransformation := "c_limit,w_1920,h_1080,vc_h264,ac_aac,q_auto:good"
+	form.Add("transformation", videoTransformation)
+
 	// Handle folder/public_id like images: if publicID provided -> prefix with folder; else use folder param
 	finalPublicID := ""
 	if strings.TrimSpace(publicID) != "" {
@@ -200,6 +210,7 @@ func UploadBase64Video(base64VideoSrc string, publicID string, mime string) map[
 		parts = append(parts, fmt.Sprintf("public_id=%s", form.Get("public_id")))
 	}
 	parts = append(parts, fmt.Sprintf("timestamp=%s", timestamp))
+	parts = append(parts, fmt.Sprintf("transformation=%s", videoTransformation))
 	signatureString := strings.Join(parts, "&") + apiSecret
 	signature := fmt.Sprintf("%x", sha1.Sum([]byte(signatureString)))
 	form.Add("signature", signature)

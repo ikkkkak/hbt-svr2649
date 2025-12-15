@@ -50,6 +50,11 @@ type Property struct {
 	CheckOutTime            string         `json:"checkOutTime" gorm:"column:check_out_time;type:varchar(10)"`
 	PropertyCategoryID      *uint          `json:"propertyCategoryId" gorm:"column:property_category_id"`
 
+	// Stored translations (title, description, neighborhood) as JSONB maps { "en": "...", "fr": "...", "ar": "..." }
+	TitleTranslations                     datatypes.JSON `json:"title_translations" gorm:"column:title_translations;type:jsonb"`
+	DescriptionTranslations               datatypes.JSON `json:"description_translations" gorm:"column:description_translations;type:jsonb"`
+	NeighborhoodDescriptionTranslations   datatypes.JSON `json:"neighborhood_description_translations" gorm:"column:neighborhood_description_translations;type:jsonb"`
+
 	// New policy fields
 	BookingMode                      string `json:"bookingMode" gorm:"type:varchar(50);default:'instant'"` // instant, request, hybrid
 	SecureCompoundAcknowledged       bool   `json:"secureCompoundAcknowledged" gorm:"default:false"`

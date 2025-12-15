@@ -2,9 +2,10 @@ package routes
 
 import (
 	"apartments-clone-server/models"
+	"apartments-clone-server/services"
+	pushsvc "apartments-clone-server/services/push"
 	"apartments-clone-server/storage"
 	"apartments-clone-server/utils"
-	pushsvc "apartments-clone-server/services/push"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -90,6 +91,21 @@ func CreateProperty(ctx iris.Context) {
 		PropertyPolicyAccepted:           input.PropertyPolicyAccepted != nil && *input.PropertyPolicyAccepted,
 	}
 
+	// One-time translations for core text fields (title, description, neighborhood)
+	titleTranslations := services.TranslateAllLanguages(input.Title)
+	descTranslations := services.TranslateAllLanguages(input.Description)
+	neighTranslations := services.TranslateAllLanguages(input.NeighborhoodDescription)
+
+	if b, err := json.Marshal(titleTranslations); err == nil {
+		property.TitleTranslations = b
+	}
+	if b, err := json.Marshal(descTranslations); err == nil {
+		property.DescriptionTranslations = b
+	}
+	if b, err := json.Marshal(neighTranslations); err == nil {
+		property.NeighborhoodDescriptionTranslations = b
+	}
+
 	// Optional property category id
 	if input.PropertyCategoryId > 0 {
 		pc := input.PropertyCategoryId
@@ -128,9 +144,10 @@ func CreateProperty(ctx iris.Context) {
 		for _, a := range input.Amenities {
 			if id, err := strconv.Atoi(a); err == nil {
 				// insert if not exists
+				// Note: property_amenities only has (property_id, amenity_id), no is_active column
 				storage.DB.Exec(`
-                    INSERT INTO property_amenities (property_id, amenity_id, is_active, created_at, updated_at)
-                    VALUES (?, ?, TRUE, NOW(), NOW())
+                    INSERT INTO property_amenities (property_id, amenity_id)
+                    VALUES (?, ?)
                     ON CONFLICT DO NOTHING
                 `, property.ID, id)
 			}
@@ -201,6 +218,16 @@ func GetProperty(ctx iris.Context) {
 	if property == nil {
 		return
 	}
+
+	// Resolve localized fields based on requested language
+	lang := strings.ToLower(strings.TrimSpace(ctx.URLParamDefault("lang", "en")))
+	property.Title = utils.ResolveLocalizedText(property.Title, property.TitleTranslations, lang)
+	property.Description = utils.ResolveLocalizedText(property.Description, property.DescriptionTranslations, lang)
+	property.NeighborhoodDescription = utils.ResolveLocalizedText(
+		property.NeighborhoodDescription,
+		property.NeighborhoodDescriptionTranslations,
+		lang,
+	)
 
 	ctx.JSON(property)
 }
@@ -502,11 +529,17 @@ func GetPropertiesByBoundingBox(ctx iris.Context) {
 
 	fmt.Printf("GetPropertiesByBoundingBox - Found %d properties\n", len(properties))
 
-	// Debug: Log property details
-	for i, property := range properties {
-		fmt.Printf("Property %d - ID: %d, Title: '%s', City: '%s', Price: %.2f, Host: %s %s\n",
-			i, property.ID, property.Title, property.City, property.NightlyPrice,
-			property.Host.FirstName, property.Host.LastName)
+	// Resolve localized fields based on requested language
+	lang := strings.ToLower(strings.TrimSpace(ctx.URLParamDefault("lang", "en")))
+	for i := range properties {
+		p := &properties[i]
+		p.Title = utils.ResolveLocalizedText(p.Title, p.TitleTranslations, lang)
+		p.Description = utils.ResolveLocalizedText(p.Description, p.DescriptionTranslations, lang)
+		p.NeighborhoodDescription = utils.ResolveLocalizedText(
+			p.NeighborhoodDescription,
+			p.NeighborhoodDescriptionTranslations,
+			lang,
+		)
 	}
 
 	ctx.JSON(properties)

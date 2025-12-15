@@ -95,6 +95,10 @@ type PropertySale struct {
 	PropertyType string `json:"property_type"` // house, apartment, commercial, land, etc.
 	Category     string `json:"category"`      // residential, commercial, industrial, etc.
 
+	// Stored translations for title/description
+	TitleTranslations       datatypes.JSON `json:"title_translations" gorm:"column:title_translations;type:jsonb"`
+	DescriptionTranslations datatypes.JSON `json:"description_translations" gorm:"column:description_translations;type:jsonb"`
+
 	// Location
 	Address    string  `json:"address" gorm:"not null"`
 	City       string  `json:"city" gorm:"not null"`
@@ -261,6 +265,10 @@ type Landmark struct {
 	Title       string         `json:"title" gorm:"not null"`
 	Description string         `json:"description" gorm:"type:text"`
 	Images      datatypes.JSON `json:"images" gorm:"type:json"` // Array of image URLs
+
+	// Stored translations
+	TitleTranslations       datatypes.JSON `json:"title_translations" gorm:"column:title_translations;type:jsonb"`
+	DescriptionTranslations datatypes.JSON `json:"description_translations" gorm:"column:description_translations;type:jsonb"`
 
 	// Land Details
 	Area      float64        `json:"area"` // in square meters

@@ -833,6 +833,50 @@ func getAndHandleUserExistsByPhone(user *models.User, phoneNumber string) (exist
 	return false, nil
 }
 
+// CheckUserExists - Check if email or phone number exists (for unified auth flow)
+func CheckUserExists(ctx iris.Context) {
+	var req struct {
+		Email       string `json:"email"`
+		PhoneNumber string `json:"phoneNumber"`
+	}
+
+	if err := ctx.ReadJSON(&req); err != nil {
+		utils.CreateError(iris.StatusBadRequest, "Validation Error", "Invalid request body", ctx)
+		return
+	}
+
+	// Validate that exactly one field is provided
+	if req.Email == "" && req.PhoneNumber == "" {
+		utils.CreateError(iris.StatusBadRequest, "Validation Error", "Either email or phoneNumber must be provided", ctx)
+		return
+	}
+
+	if req.Email != "" && req.PhoneNumber != "" {
+		utils.CreateError(iris.StatusBadRequest, "Validation Error", "Provide either email or phoneNumber, not both", ctx)
+		return
+	}
+
+	var exists bool
+	var userType string
+
+	if req.Email != "" {
+		// Check email
+		var user models.User
+		exists, _ = getAndHandleUserExists(&user, req.Email)
+		userType = "email"
+	} else {
+		// Check phone
+		var user models.User
+		exists, _ = getAndHandleUserExistsByPhone(&user, req.PhoneNumber)
+		userType = "phone"
+	}
+
+	ctx.JSON(iris.Map{
+		"exists":   exists,
+		"userType": userType,
+	})
+}
+
 func hashAndSaltPassword(password string) (hashedPassword string, err error) {
 	bytes, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	if err != nil {

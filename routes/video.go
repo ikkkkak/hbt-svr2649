@@ -3,8 +3,10 @@ package routes
 import (
 	"apartments-clone-server/models"
 	"apartments-clone-server/services"
+	"apartments-clone-server/services/push"
 	"apartments-clone-server/storage"
 	"apartments-clone-server/utils"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -17,7 +19,18 @@ import (
 
 // CreateVideo stores a new video record after upload is completed (client uploads to CDN)
 func CreateVideo(ctx iris.Context) {
-	claims := jsonWT.Get(ctx).(*utils.AccessToken)
+	tokenValue := jsonWT.Get(ctx)
+	if tokenValue == nil {
+		ctx.StatusCode(iris.StatusUnauthorized)
+		ctx.JSON(iris.Map{"error": "Unauthorized"})
+		return
+	}
+	claims, ok := tokenValue.(*utils.AccessToken)
+	if !ok || claims == nil {
+		ctx.StatusCode(iris.StatusUnauthorized)
+		ctx.JSON(iris.Map{"error": "Invalid token"})
+		return
+	}
 	userID := claims.ID
 
 	var input struct {
@@ -55,6 +68,11 @@ func CreateVideo(ctx iris.Context) {
 		return
 	}
 
+	// Notify previous viewers of this host's videos about the new video
+	go func(videoID uint, hostUserID uint) {
+		notifyPreviousViewersOfNewVideo(videoID, hostUserID)
+	}(video.ID, userID)
+
 	ctx.JSON(iris.Map{"success": true, "video": video})
 }
 
@@ -75,19 +93,33 @@ func GetVideoFeed(ctx iris.Context) {
 		fmt.Printf("❌ No JWT claims found in request\n")
 	}
 
-	// Pagination parameters
-	page := ctx.URLParamIntDefault("page", 1)
+	// Cursor-based pagination (preferred) or fallback to page-based
+	cursor := ctx.URLParam("cursor")
+	page := ctx.URLParamIntDefault("page", 0) // 0 means use cursor
 	limit := ctx.URLParamIntDefault("limit", 10)
-	if page < 1 {
-		page = 1
-	}
 	if limit < 1 {
 		limit = 10
 	}
 	if limit > 50 {
 		limit = 50
 	}
-	offset := (page - 1) * limit
+
+	var offset int
+	var useCursor bool = cursor != ""
+	if !useCursor && page > 0 {
+		// Fallback to page-based pagination
+		offset = (page - 1) * limit
+		useCursor = false
+	} else if useCursor {
+		// Parse cursor (format: "video_id:timestamp")
+		// For now, we'll use video ID as cursor
+		useCursor = true
+		offset = 0
+	} else {
+		// Default: first page
+		offset = 0
+		useCursor = false
+	}
 
 	// Filters from query
 	city := ctx.URLParam("city")
@@ -231,13 +263,50 @@ func GetVideoFeed(ctx iris.Context) {
 
 	// Fetch videos with proper preloading
 	var selectedVideos []models.Video
-	if err := baseQuery.
-		Order(orderClause).
-		Limit(limit).
-		Offset(offset).
-		Find(&selectedVideos).Error; err != nil {
+	query := baseQuery.Order(orderClause)
+
+	var nextCursor string
+	var hasMore bool
+
+	if useCursor && cursor != "" {
+		// Cursor-based: fetch videos after the cursor
+		var cursorID uint
+		if _, err := fmt.Sscanf(cursor, "%d", &cursorID); err == nil {
+			query = query.Where("videos.id > ?", cursorID)
+		}
+		query = query.Limit(limit + 1) // Fetch one extra to determine hasMore
+	} else {
+		// Page-based pagination (fallback)
+		query = query.Limit(limit).Offset(offset)
+	}
+
+	if err := query.Find(&selectedVideos).Error; err != nil {
 		utils.CreateInternalServerError(ctx)
 		return
+	}
+
+	// Determine next cursor and hasMore for cursor-based pagination
+	if useCursor {
+		if len(selectedVideos) > limit {
+			hasMore = true
+			selectedVideos = selectedVideos[:limit]
+			if len(selectedVideos) > 0 {
+				nextCursor = fmt.Sprintf("%d", selectedVideos[len(selectedVideos)-1].ID)
+			}
+		} else {
+			hasMore = false
+			nextCursor = ""
+		}
+	} else {
+		// For page-based, check if there are more videos
+		if len(selectedVideos) == limit {
+			var count int64
+			baseQuery.Count(&count)
+			hasMore = int64(offset+limit) < count
+		} else {
+			hasMore = false
+		}
+		nextCursor = ""
 	}
 
 	// Promotional videos (admin content) - intersperse every 4-5 videos
@@ -359,11 +428,22 @@ func GetVideoFeed(ctx iris.Context) {
 		})
 	}
 
-	ctx.JSON(iris.Map{
+	response := iris.Map{
 		"success": true,
 		"videos":  videosWithState,
-		"page":    page,
-	})
+	}
+
+	// Include cursor information for cursor-based pagination
+	if useCursor {
+		response["nextCursor"] = nextCursor
+		response["hasMore"] = hasMore
+	} else {
+		// Include page for backward compatibility
+		response["page"] = page
+		response["hasMore"] = hasMore
+	}
+
+	ctx.JSON(response)
 }
 
 func LikeVideo(ctx iris.Context) {
@@ -437,7 +517,14 @@ func SaveVideo(ctx iris.Context) {
 		return
 	}
 	storage.DB.Model(&models.Video{}).Where("id = ?", input.VideoID).UpdateColumn("saves_count", gorm.Expr("saves_count + ?", 1))
-	ctx.JSON(iris.Map{"success": true})
+
+	// Get updated saves count
+	var video models.Video
+	if err := storage.DB.First(&video, input.VideoID).Error; err == nil {
+		ctx.JSON(iris.Map{"success": true, "savesCount": video.SavesCount})
+	} else {
+		ctx.JSON(iris.Map{"success": true})
+	}
 }
 
 func UnsaveVideo(ctx iris.Context) {
@@ -453,7 +540,14 @@ func UnsaveVideo(ctx iris.Context) {
 
 	storage.DB.Where("video_id = ? AND user_id = ?", input.VideoID, userID).Delete(&models.VideoSave{})
 	storage.DB.Model(&models.Video{}).Where("id = ?", input.VideoID).UpdateColumn("saves_count", gorm.Expr("GREATEST(saves_count - 1, 0)"))
-	ctx.JSON(iris.Map{"success": true})
+
+	// Get updated saves count
+	var video models.Video
+	if err := storage.DB.First(&video, input.VideoID).Error; err == nil {
+		ctx.JSON(iris.Map{"success": true, "savesCount": video.SavesCount})
+	} else {
+		ctx.JSON(iris.Map{"success": true})
+	}
 }
 
 func CreateVideoComment(ctx iris.Context) {
@@ -657,7 +751,14 @@ func LikeVideoComment(ctx iris.Context) {
 		return
 	}
 	storage.DB.Model(&models.VideoComment{}).Where("id = ?", input.CommentID).UpdateColumn("likes_count", gorm.Expr("likes_count + ?", 1))
-	ctx.JSON(iris.Map{"success": true})
+
+	// Get updated likes count
+	var comment models.VideoComment
+	if err := storage.DB.First(&comment, input.CommentID).Error; err == nil {
+		ctx.JSON(iris.Map{"success": true, "likesCount": comment.LikesCount})
+	} else {
+		ctx.JSON(iris.Map{"success": true})
+	}
 }
 
 func UnlikeVideoComment(ctx iris.Context) {
@@ -673,7 +774,14 @@ func UnlikeVideoComment(ctx iris.Context) {
 
 	storage.DB.Where("comment_id = ? AND user_id = ?", input.CommentID, userID).Delete(&models.VideoCommentLike{})
 	storage.DB.Model(&models.VideoComment{}).Where("id = ?", input.CommentID).UpdateColumn("likes_count", gorm.Expr("GREATEST(likes_count - 1, 0)"))
-	ctx.JSON(iris.Map{"success": true})
+
+	// Get updated likes count
+	var comment models.VideoComment
+	if err := storage.DB.First(&comment, input.CommentID).Error; err == nil {
+		ctx.JSON(iris.Map{"success": true, "likesCount": comment.LikesCount})
+	} else {
+		ctx.JSON(iris.Map{"success": true})
+	}
 }
 
 // DeleteVideo deletes a video owned by the requester
@@ -730,4 +838,396 @@ func GetSavedVideos(ctx iris.Context) {
 		return
 	}
 	ctx.JSON(iris.Map{"success": true, "videos": videos})
+}
+
+// RecordVideoView records a view for a video (supports both authenticated and anonymous users)
+func RecordVideoView(ctx iris.Context) {
+	videoID := ctx.Params().GetUintDefault("videoID", 0)
+	if videoID == 0 {
+		ctx.StatusCode(iris.StatusBadRequest)
+		ctx.JSON(iris.Map{"error": "Invalid video ID"})
+		return
+	}
+
+	// Get user ID if authenticated (optional)
+	var userID *uint
+	var deviceID *string
+
+	// Try to get userID from context values (set by optionalAuthMiddleware)
+	if uidValue := ctx.Values().Get("userID"); uidValue != nil {
+		if uid, ok := uidValue.(uint); ok && uid > 0 {
+			userID = &uid
+			fmt.Printf("🔍 RecordVideoView: Found userID %d from context values\n", uid)
+		}
+	}
+
+	// Fallback: Try to get from JWT claims (for compatibility)
+	if userID == nil {
+		if claims := jsonWT.Get(ctx); claims != nil {
+			if accessToken, ok := claims.(*utils.AccessToken); ok && accessToken.ID > 0 {
+				uid := accessToken.ID
+				userID = &uid
+				fmt.Printf("🔍 RecordVideoView: Found userID %d from JWT claims\n", uid)
+			}
+		}
+	}
+
+	if userID == nil {
+		fmt.Printf("🔍 RecordVideoView: No userID found - recording as anonymous view\n")
+	}
+
+	// Get device ID from request body (for anonymous users)
+	var input struct {
+		DeviceID *string `json:"deviceID"`
+	}
+	ctx.ReadJSON(&input)
+	if input.DeviceID != nil && *input.DeviceID != "" {
+		deviceID = input.DeviceID
+	}
+
+	// Get IP address
+	ipAddress := ctx.RemoteAddr()
+	if forwardedFor := ctx.GetHeader("X-Forwarded-For"); forwardedFor != "" {
+		ips := strings.Split(forwardedFor, ",")
+		if len(ips) > 0 {
+			ipAddress = strings.TrimSpace(ips[0])
+		}
+	}
+
+	// Check if video exists
+	var video models.Video
+	if err := storage.DB.First(&video, videoID).Error; err != nil {
+		ctx.StatusCode(iris.StatusNotFound)
+		ctx.JSON(iris.Map{"error": "Video not found"})
+		return
+	}
+
+	// Check for duplicate view (same user/device within last 5 minutes)
+	cutoff := time.Now().Add(-5 * time.Minute)
+	var existingView models.VideoView
+	query := storage.DB.Where("video_id = ? AND viewed_at >= ?", videoID, cutoff)
+	if userID != nil {
+		query = query.Where("user_id = ?", *userID)
+	} else if deviceID != nil {
+		query = query.Where("device_id = ?", *deviceID)
+	} else {
+		// No identifier, allow view but don't track duplicates
+		ctx.JSON(iris.Map{"success": true, "message": "View recorded (no identifier)"})
+		return
+	}
+
+	if err := query.First(&existingView).Error; err == nil {
+		// View already recorded recently, just update timestamp
+		existingView.ViewedAt = time.Now()
+		storage.DB.Save(&existingView)
+		ctx.JSON(iris.Map{"success": true, "message": "View updated"})
+		return
+	}
+
+	// Create new view record
+	view := models.VideoView{
+		VideoID:   videoID,
+		UserID:    userID,
+		DeviceID:  deviceID,
+		IPAddress: ipAddress,
+		ViewedAt:  time.Now(),
+	}
+
+	if err := storage.DB.Create(&view).Error; err != nil {
+		fmt.Printf("Error recording video view: %v\n", err)
+		utils.CreateInternalServerError(ctx)
+		return
+	}
+
+	// Increment video view count
+	storage.DB.Model(&video).UpdateColumn("view_count", gorm.Expr("view_count + 1"))
+
+	ctx.JSON(iris.Map{"success": true, "message": "View recorded"})
+}
+
+// GetVideoViewers returns view analytics for a video (for host dashboard)
+func GetVideoViewers(ctx iris.Context) {
+	videoID := ctx.Params().GetUintDefault("videoID", 0)
+	fmt.Printf("🔍 GetVideoViewers called for videoID: %d\n", videoID)
+
+	if videoID == 0 {
+		fmt.Printf("❌ Invalid video ID: %d\n", videoID)
+		ctx.StatusCode(iris.StatusBadRequest)
+		ctx.JSON(iris.Map{"error": "Invalid video ID"})
+		return
+	}
+
+	// Verify user owns the video
+	claims := jsonWT.Get(ctx).(*utils.AccessToken)
+	userID := claims.ID
+	fmt.Printf("🔍 Requesting user ID: %d\n", userID)
+
+	var video models.Video
+	if err := storage.DB.First(&video, videoID).Error; err != nil {
+		fmt.Printf("❌ Video not found: %v\n", err)
+		ctx.StatusCode(iris.StatusNotFound)
+		ctx.JSON(iris.Map{"error": "Video not found"})
+		return
+	}
+
+	fmt.Printf("🔍 Video found - Owner ID: %d, Requesting User ID: %d\n", video.UserID, userID)
+
+	if video.UserID != userID {
+		fmt.Printf("❌ Unauthorized: Video owner is %d, but requesting user is %d\n", video.UserID, userID)
+		ctx.StatusCode(iris.StatusForbidden)
+		ctx.JSON(iris.Map{"error": "Not authorized"})
+		return
+	}
+
+	// Get all views for this video
+	var views []models.VideoView
+	if err := storage.DB.Where("video_id = ?", videoID).
+		Order("viewed_at DESC").
+		Find(&views).Error; err != nil {
+		fmt.Printf("❌ Error fetching video views: %v\n", err)
+		utils.CreateInternalServerError(ctx)
+		return
+	}
+
+	fmt.Printf("📊 Found %d total views for video %d\n", len(views), videoID)
+
+	// Aggregate views by user_id and device_id
+	viewerMap := make(map[string]*models.VideoViewer)
+
+	for _, view := range views {
+		// Create a unique key for each viewer (user_id or device_id)
+		var key string
+		if view.UserID != nil {
+			key = fmt.Sprintf("user_%d", *view.UserID)
+		} else if view.DeviceID != nil {
+			key = fmt.Sprintf("device_%s", *view.DeviceID)
+		} else {
+			// Skip views without user_id or device_id
+			continue
+		}
+
+		viewer, exists := viewerMap[key]
+		if !exists {
+			viewer = &models.VideoViewer{
+				UserID:        view.UserID,
+				DeviceID:      view.DeviceID,
+				ViewCount:     0,
+				FirstViewedAt: view.ViewedAt,
+				LastViewedAt:  view.ViewedAt,
+			}
+			viewerMap[key] = viewer
+		}
+
+		viewer.ViewCount++
+		if view.ViewedAt.Before(viewer.FirstViewedAt) {
+			viewer.FirstViewedAt = view.ViewedAt
+		}
+		if view.ViewedAt.After(viewer.LastViewedAt) {
+			viewer.LastViewedAt = view.ViewedAt
+		}
+	}
+
+	// Convert map to slice and load user data
+	viewers := make([]models.VideoViewer, 0, len(viewerMap))
+	for _, viewer := range viewerMap {
+		// Load user data if authenticated
+		if viewer.UserID != nil {
+			var user models.User
+			if err := storage.DB.First(&user, *viewer.UserID).Error; err == nil {
+				viewer.User = &user
+			} else {
+				fmt.Printf("⚠️ Could not load user %d: %v\n", *viewer.UserID, err)
+			}
+		}
+		viewers = append(viewers, *viewer)
+	}
+
+	// Sort by view count (descending), then by last viewed (descending)
+	for i := 0; i < len(viewers)-1; i++ {
+		for j := i + 1; j < len(viewers); j++ {
+			if viewers[i].ViewCount < viewers[j].ViewCount ||
+				(viewers[i].ViewCount == viewers[j].ViewCount && viewers[i].LastViewedAt.Before(viewers[j].LastViewedAt)) {
+				viewers[i], viewers[j] = viewers[j], viewers[i]
+			}
+		}
+	}
+
+	// Limit to 100 viewers
+	if len(viewers) > 100 {
+		viewers = viewers[:100]
+	}
+
+	fmt.Printf("✅ Returning %d aggregated viewers for video %d\n", len(viewers), videoID)
+
+	ctx.JSON(iris.Map{
+		"success":    true,
+		"viewers":    viewers,
+		"totalViews": video.ViewCount,
+	})
+}
+
+// notifyPreviousViewersOfNewVideo notifies users who viewed this host's previous videos
+func notifyPreviousViewersOfNewVideo(newVideoID uint, hostUserID uint) {
+	// Get the new video with property info
+	var newVideo models.Video
+	if err := storage.DB.Preload("Property").Preload("User").First(&newVideo, newVideoID).Error; err != nil {
+		fmt.Printf("❌ Failed to load new video %d: %v\n", newVideoID, err)
+		return
+	}
+
+	// Get all unique viewers of this host's previous videos (excluding the new video)
+	var viewerIDs []uint
+	var deviceIDs []string
+
+	// Get authenticated viewers
+	if err := storage.DB.Model(&models.VideoView{}).
+		Joins("JOIN videos ON video_views.video_id = videos.id").
+		Where("videos.user_id = ? AND video_views.video_id != ? AND video_views.user_id IS NOT NULL", hostUserID, newVideoID).
+		Distinct("video_views.user_id").
+		Pluck("video_views.user_id", &viewerIDs).Error; err != nil {
+		fmt.Printf("⚠️ Error fetching authenticated viewers: %v\n", err)
+	}
+
+	// Get anonymous viewers by device ID
+	if err := storage.DB.Model(&models.VideoView{}).
+		Joins("JOIN videos ON video_views.video_id = videos.id").
+		Where("videos.user_id = ? AND video_views.video_id != ? AND video_views.device_id IS NOT NULL", hostUserID, newVideoID).
+		Distinct("video_views.device_id").
+		Pluck("video_views.device_id", &deviceIDs).Error; err != nil {
+		fmt.Printf("⚠️ Error fetching anonymous viewers: %v\n", err)
+	}
+
+	fmt.Printf("📢 Found %d authenticated viewers and %d anonymous viewers for host %d\n", len(viewerIDs), len(deviceIDs), hostUserID)
+
+	// Get property info for notification
+	propertyName := "a property"
+	propertyZone := ""
+	if newVideo.Property != nil {
+		propertyName = newVideo.Property.Title
+		propertyZone = newVideo.Property.City
+	}
+
+	hostName := "Host"
+	if newVideo.User.ID > 0 {
+		hostName = fmt.Sprintf("%s %s", newVideo.User.FirstName, newVideo.User.LastName)
+	}
+
+	// Send notifications to authenticated viewers
+	for _, viewerID := range viewerIDs {
+		// Skip if viewer is the host
+		if viewerID == hostUserID {
+			continue
+		}
+
+		// Get viewer's push tokens and language preference
+		var viewer models.User
+		if err := storage.DB.First(&viewer, viewerID).Error; err != nil {
+			continue
+		}
+
+		if viewer.AllowsNotifications == nil || !*viewer.AllowsNotifications {
+			continue
+		}
+
+		var tokens []string
+		if viewer.PushTokens != nil {
+			json.Unmarshal(viewer.PushTokens, &tokens)
+		}
+
+		if len(tokens) == 0 {
+			continue
+		}
+
+		// Get viewer's language preference from NotificationPreference table
+		// Default to 'en' if not found
+		viewerLanguage := "en"
+		var notificationPref models.NotificationPreference
+		if err := storage.DB.Where("user_id = ?", viewerID).First(&notificationPref).Error; err == nil {
+			if notificationPref.Language != "" {
+				viewerLanguage = notificationPref.Language
+			}
+		}
+
+		// Format notification message in viewer's language
+		// Format: "{user name} check my new video on {property name} in {property zone}"
+		title, body := getVideoNotificationText(viewerLanguage, hostName, propertyName, propertyZone)
+
+		// Send notification with thumbnail
+		thumbnailURL := newVideo.ThumbnailURL
+		if thumbnailURL == "" && newVideo.Property != nil && newVideo.Property.Images != "" {
+			// Images is stored as JSON string, need to unmarshal
+			var images []string
+			if err := json.Unmarshal([]byte(newVideo.Property.Images), &images); err == nil && len(images) > 0 {
+				thumbnailURL = images[0]
+			}
+		}
+
+		// Use push service directly
+		if err := push.SendPushWithImage(tokens, title, body, thumbnailURL); err != nil {
+			fmt.Printf("⚠️ Failed to send notification to user %d: %v\n", viewerID, err)
+		} else {
+			fmt.Printf("✅ Sent notification to user %d\n", viewerID)
+		}
+	}
+
+	// For anonymous viewers, we'd need to store device tokens separately
+	// This is a simplified version - in production, you'd want to track device tokens
+	fmt.Printf("📱 Note: Anonymous viewers (%d) would need device token tracking for notifications\n", len(deviceIDs))
+}
+
+// getVideoNotificationText returns localized notification text for video uploads
+// Format: "{user name} check my new video on {property name} in {property zone}"
+func getVideoNotificationText(language, hostName, propertyName, propertyZone string) (title, body string) {
+	// Default property name and zone if empty (in appropriate language)
+	defaultPropertyName := map[string]string{
+		"en": "a property",
+		"ar": "عقار",
+		"fr": "une propriété",
+	}
+	defaultZone := map[string]string{
+		"en": "an unknown zone",
+		"ar": "منطقة غير معروفة",
+		"fr": "une zone inconnue",
+	}
+
+	if propertyName == "" {
+		if name, exists := defaultPropertyName[language]; exists {
+			propertyName = name
+		} else {
+			propertyName = defaultPropertyName["en"]
+		}
+	}
+	if propertyZone == "" {
+		if zone, exists := defaultZone[language]; exists {
+			propertyZone = zone
+		} else {
+			propertyZone = defaultZone["en"]
+		}
+	}
+
+	translations := map[string]map[string]string{
+		"en": {
+			"title": fmt.Sprintf("%s check my new video", hostName),
+			"body":  fmt.Sprintf("on %s in %s", propertyName, propertyZone),
+		},
+		"ar": {
+			"title": fmt.Sprintf("%s شاهد فيديو الجديد", hostName),
+			"body":  fmt.Sprintf("على %s في %s", propertyName, propertyZone),
+		},
+		"fr": {
+			"title": fmt.Sprintf("%s regardez ma nouvelle vidéo", hostName),
+			"body":  fmt.Sprintf("sur %s à %s", propertyName, propertyZone),
+		},
+	}
+
+	// Get translation for the language, fallback to English
+	langTranslations, exists := translations[language]
+	if !exists {
+		langTranslations = translations["en"]
+	}
+
+	title = langTranslations["title"]
+	body = langTranslations["body"]
+
+	return title, body
 }

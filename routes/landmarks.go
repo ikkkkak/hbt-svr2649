@@ -2,6 +2,7 @@ package routes
 
 import (
 	"apartments-clone-server/models"
+	"apartments-clone-server/services"
 	"apartments-clone-server/storage"
 	"apartments-clone-server/utils"
 	"encoding/json"
@@ -9,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/kataras/iris/v12"
@@ -133,10 +135,20 @@ func CreateLandmark(ctx iris.Context) {
 		ElevationMeters: input.ElevationMeters,
 		Sides:           sidesJSON,
 		Price:           input.Price,
-		Currency:        input.Currency,
-		Status:          "draft",
-		IsPublished:     false,
-		IsVerified:      false,
+		Currency:    input.Currency,
+		Status:      "draft",
+		IsPublished: false,
+		IsVerified:  false,
+	}
+
+	// One-time translations for landmark title & description
+	titleTranslations := services.TranslateAllLanguages(input.Title)
+	descTranslations := services.TranslateAllLanguages(input.Description)
+	if b, err := json.Marshal(titleTranslations); err == nil {
+		landmark.TitleTranslations = b
+	}
+	if b, err := json.Marshal(descTranslations); err == nil {
+		landmark.DescriptionTranslations = b
 	}
 
 	if err := storage.DB.Create(&landmark).Error; err != nil {
@@ -175,6 +187,14 @@ func GetOrganizationLandmarks(ctx iris.Context) {
 		ctx.StatusCode(http.StatusInternalServerError)
 		ctx.JSON(iris.Map{"error": "Failed to fetch landmarks"})
 		return
+	}
+
+	// Localize landmark fields based on requested language
+	lang := strings.ToLower(strings.TrimSpace(ctx.URLParamDefault("lang", "en")))
+	for i := range landmarks {
+		l := &landmarks[i]
+		l.Title = utils.ResolveLocalizedText(l.Title, l.TitleTranslations, lang)
+		l.Description = utils.ResolveLocalizedText(l.Description, l.DescriptionTranslations, lang)
 	}
 
 	ctx.JSON(iris.Map{"landmarks": landmarks})
@@ -217,6 +237,14 @@ func GetPublicLandmarks(ctx iris.Context) {
 		ctx.StatusCode(http.StatusInternalServerError)
 		ctx.JSON(iris.Map{"error": "Failed to fetch landmarks"})
 		return
+	}
+
+	// Localize landmark fields based on requested language
+	lang := strings.ToLower(strings.TrimSpace(ctx.URLParamDefault("lang", "en")))
+	for i := range landmarks {
+		l := &landmarks[i]
+		l.Title = utils.ResolveLocalizedText(l.Title, l.TitleTranslations, lang)
+		l.Description = utils.ResolveLocalizedText(l.Description, l.DescriptionTranslations, lang)
 	}
 
 	ctx.JSON(iris.Map{"landmarks": landmarks})
@@ -272,11 +300,15 @@ func UpdateLandmark(ctx iris.Context) {
 	}
 
 	// Update fields if provided
+	titleChanged := false
+	descChanged := false
 	if input.Title != "" {
 		landmark.Title = input.Title
+		titleChanged = true
 	}
 	if input.Description != "" {
 		landmark.Description = input.Description
+		descChanged = true
 	}
 	if input.Status != "" {
 		landmark.Status = input.Status
@@ -342,6 +374,22 @@ func UpdateLandmark(ctx iris.Context) {
 	if input.Sides != nil {
 		if b, err := json.Marshal(input.Sides); err == nil {
 			landmark.Sides = b
+		}
+	}
+
+	// Update translations if title or description changed
+	if titleChanged || descChanged {
+		if titleChanged {
+			titleTranslations := services.TranslateAllLanguages(landmark.Title)
+			if b, err := json.Marshal(titleTranslations); err == nil {
+				landmark.TitleTranslations = b
+			}
+		}
+		if descChanged {
+			descTranslations := services.TranslateAllLanguages(landmark.Description)
+			if b, err := json.Marshal(descTranslations); err == nil {
+				landmark.DescriptionTranslations = b
+			}
 		}
 	}
 
