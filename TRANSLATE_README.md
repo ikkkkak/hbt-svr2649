@@ -37,7 +37,7 @@ go build -o translate_properties translate_all_properties.go
 DB_CONNECTION_STRING=postgres://user:password@localhost:5432/dbname
 
 # Optional (defaults to https://librerender.onrender.com/translate)
-LIBRETRANSLATE_URL=http://192.168.100.51:5000/translate
+LIBRETRANSLATE_URL=https://librerender.onrender.com/translate
 ```
 
 ## What It Does
@@ -78,7 +78,7 @@ LIBRETRANSLATE_URL=http://192.168.100.51:5000/translate
 
 ```
 🚀 Starting translation script for all properties...
-✅ Using LibreTranslate URL: http://192.168.100.51:5000/translate
+✅ Using LibreTranslate URL: https://librerender.onrender.com/translate
 
 📦 Processing Properties (Rent)...
 Found 150 properties to process

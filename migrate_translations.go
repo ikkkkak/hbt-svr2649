@@ -36,9 +36,9 @@ func migrateProperties() error {
 		if err := storage.DB.Model(&models.Property{}).
 			Where("id = ?", p.ID).
 			Updates(map[string]interface{}{
-				"title_translations":                       titleJSON,
-				"description_translations":                 descJSON,
-				"neighborhood_description_translations":    neighJSON,
+				"title_translations":                    titleJSON,
+				"description_translations":              descJSON,
+				"neighborhood_description_translations": neighJSON,
 			}).Error; err != nil {
 			log.Printf("property %d migration error: %v\n", p.ID, err)
 		}
@@ -106,7 +106,7 @@ func migrateLandmarks() error {
 	return nil
 }
 
-func main() {
+func fac() {
 	fmt.Println("🚀 Starting translations migration...")
 
 	if err := migrateProperties(); err != nil {
@@ -121,5 +121,3 @@ func main() {
 
 	fmt.Println("✅ Translation migration completed successfully.")
 }
-
-
