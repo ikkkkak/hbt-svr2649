@@ -7,6 +7,8 @@ import (
 	"apartments-clone-server/utils"
 	"encoding/json"
 	"fmt"
+	"log"
+	"math/rand"
 	"net/http"
 	"os"
 	"strconv"
@@ -21,23 +23,26 @@ import (
 func CreateLandmark(ctx iris.Context) {
 	userID := ctx.Values().Get("userID").(uint)
 
-	// Check if user has an organization (optional - can be nil for individual owners)
+	// SECURITY: Check if user is a member of an organization
+	// If they are, ALL lands MUST belong to that organization
 	var organizationID *uint
 	
-	// Try to get user's organization directly
+	// First check if user is owner of an organization
 	var organization models.Organization
 	if err := storage.DB.Where("owner_id = ?", userID).First(&organization).Error; err == nil {
-		// User has an organization, use it
+		// User owns an organization, use it
 		organizationID = &organization.ID
 	} else {
-		// Try to get through agent
-		var agent models.Agent
-		if err := storage.DB.Preload("Organization").Where("user_id = ?", userID).First(&agent).Error; err == nil {
-			// User is an agent, use their organization
-			organizationID = &agent.OrganizationID
+		// Check if user is a member (not owner) of an organization
+		var member models.OrganizationMember
+		if err := storage.DB.Where("user_id = ? AND status = ? AND is_active = ?", userID, "active", true).
+			Preload("Organization").
+			First(&member).Error; err == nil {
+			// User is a member - MUST assign to organization
+			organizationID = &member.OrganizationID
+			log.Printf("🔒 Security: User %d is a member of organization %d - land will be assigned to organization", userID, member.OrganizationID)
 		} else {
-			// User doesn't have an organization - allow creating as individual owner
-			// organizationID will remain nil
+			// User is not a member - allow creating as individual owner
 			organizationID = nil
 		}
 	}
@@ -165,9 +170,21 @@ func CreateLandmark(ctx iris.Context) {
 func GetOrganizationLandmarks(ctx iris.Context) {
 	userID := ctx.Values().Get("userID").(uint)
 
-	// Check if user has an organization
+	// Check if user has an organization (as owner or member)
 	var organization models.Organization
-	hasOrganization := storage.DB.Where("owner_id = ?", userID).First(&organization).Error == nil
+	var hasOrganization bool
+	
+	// First check if user is owner
+	if err := storage.DB.Where("owner_id = ?", userID).First(&organization).Error; err == nil {
+		hasOrganization = true
+	} else {
+		// Check if user is a member using helper function
+		org, _, _ := services.GetUserOrganization(userID)
+		if org != nil {
+			organization = *org
+			hasOrganization = true
+		}
+	}
 
 	var landmarks []models.Landmark
 	query := storage.DB.Preload("Organization").Preload("Owner")
@@ -201,6 +218,9 @@ func GetOrganizationLandmarks(ctx iris.Context) {
 }
 
 // GetPublicLandmarks gets all verified and published landmarks for public display
+// Works for both authenticated and unauthenticated users
+// Landmarks are rotated per-request to show fresh content (TikTok-like cycling)
+// Landmarks with images are always prioritized at the top
 func GetPublicLandmarks(ctx iris.Context) {
 	// Optional auth: extract userID
 	var userID uint = 0
@@ -232,12 +252,99 @@ func GetPublicLandmarks(ctx iris.Context) {
 			Where("NOT EXISTS (SELECT 1 FROM user_flags uf WHERE uf.flagger_id = ? AND uf.status = 'active' AND uf.flagged_user_id = organizations.owner_id)", userID)
 	}
 
-	var landmarks []models.Landmark
-	if err := q.Order("landmarks.created_at DESC").Find(&landmarks).Error; err != nil {
+	var allLandmarks []models.Landmark
+	if err := q.Find(&allLandmarks).Error; err != nil {
 		ctx.StatusCode(http.StatusInternalServerError)
 		ctx.JSON(iris.Map{"error": "Failed to fetch landmarks"})
 		return
 	}
+
+	fmt.Printf("✅ Found %d landmarks before rotation\n", len(allLandmarks))
+
+	// Separate landmarks with images from those without
+	var withImages []models.Landmark
+	var withoutImages []models.Landmark
+	
+	for _, landmark := range allLandmarks {
+		// Check if landmark has images (Images is stored as datatypes.JSON which is []byte)
+		hasImages := false
+		if len(landmark.Images) > 0 {
+			var images []string
+			if err := json.Unmarshal(landmark.Images, &images); err == nil {
+				// Check if images array contains non-empty strings
+				for _, img := range images {
+					if strings.TrimSpace(img) != "" {
+						hasImages = true
+						break
+					}
+				}
+			}
+		}
+		
+		if hasImages {
+			withImages = append(withImages, landmark)
+		} else {
+			withoutImages = append(withoutImages, landmark)
+		}
+	}
+
+	fmt.Printf("📸 Landmarks with images: %d, without images: %d\n", len(withImages), len(withoutImages))
+
+	// Apply time-based rotation for TikTok-like cycling
+	// Rotation changes per-request with high precision + random component for maximum variety
+	// This ensures users see different landmarks on each visit/reload
+	now := time.Now()
+	// High-precision rotation: includes seconds, nanoseconds, Unix timestamp, and random component
+	// Random component ensures different results even if requests happen at exact same time
+	rand.Seed(now.UnixNano()) // Seed random with current nanosecond for true randomness
+	randomComponent := int64(rand.Intn(10000)) // Random 0-9999
+	rotationSeed := int64(now.Second()) + 
+		int64(now.Minute())*60 + 
+		int64(now.Hour())*3600 + 
+		int64(now.Day())*86400 + 
+		int64(now.Month())*2678400 + 
+		(now.UnixNano() % 1000000) + // Use nanoseconds for microsecond-level variation
+		randomComponent // Add random component for guaranteed variation
+	
+	// Rotate both lists with different offsets for maximum variety
+	// Uses multiple rotation passes for better distribution
+	rotateLandmarks := func(landmarks []models.Landmark, seed int64) []models.Landmark {
+		if len(landmarks) == 0 {
+			return landmarks
+		}
+		if len(landmarks) == 1 {
+			return landmarks
+		}
+		
+		// Calculate offset with multiple components for better distribution
+		offset1 := int(seed % int64(len(landmarks)))
+		offset2 := int((seed * 7) % int64(len(landmarks))) // Different multiplier for variety
+		
+		// Use the larger offset, but ensure it's not 0
+		offset := offset1
+		if offset2 > offset1 {
+			offset = offset2
+		}
+		if offset == 0 {
+			offset = int((seed * 13) % int64(len(landmarks)-1)) + 1 // Force non-zero with different multiplier
+		}
+		
+		// Perform rotation
+		rotated := make([]models.Landmark, len(landmarks))
+		copy(rotated, landmarks[offset:])
+		copy(rotated[len(landmarks)-offset:], landmarks[:offset])
+		return rotated
+	}
+
+	withImages = rotateLandmarks(withImages, rotationSeed)
+	withoutImages = rotateLandmarks(withoutImages, rotationSeed+3000) // Different offset for variety
+
+	// Combine: landmarks with images first, then without
+	var landmarks []models.Landmark
+	landmarks = append(landmarks, withImages...)
+	landmarks = append(landmarks, withoutImages...)
+
+	fmt.Printf("✅ Returning %d landmarks (rotated, images prioritized)\n", len(landmarks))
 
 	// Localize landmark fields based on requested language
 	lang := strings.ToLower(strings.TrimSpace(ctx.URLParamDefault("lang", "en")))

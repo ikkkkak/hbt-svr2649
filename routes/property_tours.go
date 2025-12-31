@@ -2,8 +2,10 @@ package routes
 
 import (
 	"apartments-clone-server/models"
+	"apartments-clone-server/services"
 	"apartments-clone-server/storage"
 	"apartments-clone-server/utils"
+	"fmt"
 	"net/http"
 	"strconv"
 	"time"
@@ -18,7 +20,7 @@ func BookPropertyTour(ctx iris.Context) {
 
 	// Check if property exists and is published
 	var property models.PropertySale
-	if err := storage.DB.Where("id = ? AND status = ? AND is_published = ?", propertyID, "published", true).First(&property).Error; err != nil {
+	if err := storage.DB.Preload("Organization").Where("id = ? AND status = ? AND is_published = ?", propertyID, "published", true).First(&property).Error; err != nil {
 		ctx.StatusCode(http.StatusNotFound)
 		ctx.JSON(iris.Map{"error": "Property not found or not available for tours"})
 		return
@@ -76,6 +78,79 @@ func BookPropertyTour(ctx iris.Context) {
 		ctx.StatusCode(http.StatusInternalServerError)
 		ctx.JSON(iris.Map{"error": "Failed to book tour"})
 		return
+	}
+
+	// Get user info for the message
+	var user models.User
+	if err := storage.DB.First(&user, userID).Error; err != nil {
+		fmt.Printf("❌ Failed to get user info: %v\n", err)
+	}
+	userName := user.FirstName + " " + user.LastName
+	if userName == " " {
+		userName = "مستخدم"
+	}
+
+	// Determine property owner ID
+	var ownerID uint
+	if property.OwnerID != nil {
+		ownerID = *property.OwnerID
+	} else if property.OrganizationID != nil && property.Organization.OwnerID != 0 {
+		ownerID = property.Organization.OwnerID
+	}
+
+	if ownerID > 0 && ownerID != userID {
+		// Format date in Arabic-friendly format
+		tourDateFormatted := input.TourDate.Format("2006-01-02")
+
+		// Determine tour type in Arabic
+		tourTypeArabic := "زيارة حضورية 🏠"
+		if input.TourType == "video" {
+			tourTypeArabic = "زيارة فيديو 📹"
+		}
+
+		// Create Arabic message for the tour request
+		arabicMessage := fmt.Sprintf(
+			"🏠 طلب زيارة جديد!\n\n"+
+				"السلام عليكم،\n\n"+
+				"أريد زيارة عقارك '%s'.\n\n"+
+				"📅 **التاريخ:** %s\n"+
+				"⏰ **الوقت:** %s\n"+
+				"📍 **نوع الزيارة:** %s\n\n",
+			property.Title, tourDateFormatted, input.TourTime, tourTypeArabic)
+
+		if input.CustomerNotes != "" {
+			arabicMessage += fmt.Sprintf("📝 **ملاحظاتي:**\n%s\n\n", input.CustomerNotes)
+		}
+
+		arabicMessage += "أرجو تأكيد الموعد في أقرب وقت.\n\nشكراً لك! 🙏"
+
+		// Create direct message between user and owner
+		directMessage := models.DirectMessage{
+			SenderID:   userID,
+			ReceiverID: ownerID,
+			Content:    arabicMessage,
+			IsRead:     false,
+		}
+		if err := storage.DB.Create(&directMessage).Error; err != nil {
+			fmt.Printf("❌ Failed to create direct message for tour: %v\n", err)
+		} else {
+			fmt.Printf("✅ Created direct message for tour from user %d to owner %d\n", userID, ownerID)
+		}
+
+		// Send push notification to owner
+		go func() {
+			services.NotificationServiceInstance.SendPropertyTourNotificationToHost(
+				tour.ID,
+				property.ID,
+				ownerID,
+				userID,
+				userName,
+				property.Title,
+				tourDateFormatted,
+				input.TourTime,
+				input.TourType,
+			)
+		}()
 	}
 
 	ctx.StatusCode(http.StatusCreated)

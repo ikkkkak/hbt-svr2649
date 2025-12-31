@@ -136,11 +136,13 @@ func main() {
 		if err := storage.DB.AutoMigrate(
 			&models.ChatMessage{},
 			&models.HiddenProperty{}, &models.PropertyReport{}, &models.UserFlag{}, &models.HiddenVideo{}, &models.PropertySaleReport{}, &models.LandmarkReport{}, &models.HiddenPropertySale{}, &models.PropertySaleVideo{}, &models.PropertySaleVideoLike{}, &models.PropertySaleVideoSave{}, &models.PropertySaleVideoComment{}, &models.PropertySaleVideoReport{}, &models.HiddenPropertySaleVideo{}, &models.UserBlockedOrganization{},
-			&models.City{}, &models.Zone{},
+			&models.City{}, &models.Zone{}, &models.Quartier{},
+			&models.AIChatSession{}, &models.AIChatMessage{},
+			&models.DeviceRegistration{}, &models.DeviceSession{},
 		); err != nil {
 			fmt.Printf("❌ Failed to migrate moderation tables: %v\n", err)
 		} else {
-			fmt.Println("✅ Tables migrated (chat_messages, hidden_properties, property_reports, user_flags, hidden_videos, property_sale_reports, landmark_reports, property_sale_videos, user_blocked_organizations)")
+			fmt.Println("✅ Tables migrated (chat_messages, hidden_properties, property_reports, user_flags, hidden_videos, property_sale_reports, landmark_reports, property_sale_videos, user_blocked_organizations, ai_chat_sessions, ai_chat_messages, device_registrations, device_sessions)")
 		}
 	}()
 
@@ -188,6 +190,7 @@ func main() {
 	// Start background push workers
 	pushsvc.StartPushWorker()
 	pushsvc.StartMarketingReminderWorker()
+	services.StartHostModeNotificationScheduler()
 
 	fmt.Println("🔧 Initializing WebSocket Hub...")
 	websocketHub.InitHub()
@@ -232,34 +235,37 @@ func main() {
 		return new(utils.ForgotPasswordToken)
 	})
 
-	accessTokenVerifier := irisjwt.NewVerifier(irisjwt.HS256, []byte(os.Getenv("ACCESS_TOKEN_SECRET")))
-	accessTokenVerifier.WithDefaultBlocklist()
-	originalVerifier := accessTokenVerifier.Verify(func() interface{} {
-		return new(utils.AccessToken)
-	})
-	// Fixed JWT middleware - ensure userID is set before handler
-	attachUserMiddleware := func(ctx iris.Context) {
-		if claims := irisjwt.Get(ctx); claims != nil {
-			if accessToken, ok := claims.(*utils.AccessToken); ok {
-				if accessToken.ID == 0 {
-					ctx.StopWithJSON(iris.StatusUnauthorized, iris.Map{"error": "unauthorized"})
-					return
-				}
-				ctx.Values().Set("userID", accessToken.ID)
-				ctx.Values().Set("userRole", accessToken.Role)
-			} else {
-				ctx.StopWithJSON(iris.StatusUnauthorized, iris.Map{"error": "unauthorized"})
-				return
-			}
-		} else {
-			ctx.StopWithJSON(iris.StatusUnauthorized, iris.Map{"error": "unauthorized"})
-			return
-		}
-		ctx.Next()
-	}
+	// Fixed JWT middleware - verify token and set userID in context
 	accessTokenVerifierMiddleware := func(ctx iris.Context) {
-		ctx.AddHandler(attachUserMiddleware)
-		originalVerifier(ctx)
+		authHeader := ctx.GetHeader("Authorization")
+		if token := strings.TrimSpace(authHeader); strings.HasPrefix(token, "Bearer ") {
+			rawToken := strings.TrimPrefix(token, "Bearer ")
+			if rawToken != "" {
+				verifier := irisjwt.NewVerifier(irisjwt.HS256, []byte(os.Getenv("ACCESS_TOKEN_SECRET")))
+				verifier.WithDefaultBlocklist()
+				claims := new(utils.AccessToken)
+				if verifiedToken, err := verifier.VerifyToken([]byte(rawToken)); err == nil && verifiedToken != nil {
+					if err := verifiedToken.Claims(claims); err == nil && claims != nil && claims.ID > 0 {
+						ctx.Values().Set("userID", claims.ID)
+						ctx.Values().Set("userRole", claims.Role)
+						// Also set in JWT context for compatibility with jwt.Get(ctx)
+						ctx.Values().Set("jwt.claims", claims)
+						// Set in the JWT middleware format for backward compatibility
+						ctx.Values().Set("iris.jwt.token", verifiedToken)
+						log.Printf("✅ accessTokenVerifierMiddleware: UserID %d authenticated", claims.ID)
+						ctx.Next()
+						return
+					} else {
+						log.Printf("❌ accessTokenVerifierMiddleware: Failed to decode claims (%v)", err)
+					}
+				} else {
+					log.Printf("❌ accessTokenVerifierMiddleware: Invalid token (%v)", err)
+				}
+			}
+		}
+		// If we get here, authentication failed
+		log.Printf("❌ accessTokenVerifierMiddleware: Authentication failed")
+		ctx.StopWithJSON(iris.StatusUnauthorized, iris.Map{"error": "unauthorized"})
 	}
 
 	refreshTokenVerifier := irisjwt.NewVerifier(irisjwt.HS256, []byte(os.Getenv("REFRESH_TOKEN_SECRET")))
@@ -372,6 +378,10 @@ func main() {
 		user.Post("/wishlist", accessTokenVerifierMiddleware, routes.AddToUserWishlist)
 		user.Delete("/wishlist/{propertyID:uint}", accessTokenVerifierMiddleware, routes.RemoveFromUserWishlist)
 
+		// Host Mode Tracking routes
+		user.Post("/host-mode/switch", accessTokenVerifierMiddleware, routes.RecordHostModeSwitch)
+		user.Post("/host-mode/interaction", accessTokenVerifierMiddleware, routes.RecordHostModeInteraction)
+
 		// User moderation routes
 		user.Get("/blocked", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.GetBlockedUsers)
 		user.Get("/hidden-properties", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.GetHiddenProperties)
@@ -383,10 +393,10 @@ func main() {
 	storiesParty := app.Party("/api/stories")
 	{
 		// Protected routes
-		storiesParty.Post("/upload", originalVerifier, attachUserMiddleware, routes.UploadStory)
-		storiesParty.Post("/{storyId:uint}/view", originalVerifier, attachUserMiddleware, routes.PostStoryView)
-		storiesParty.Post("/{storyId:uint}/like", originalVerifier, attachUserMiddleware, routes.PostStoryLikeToggle)
-		storiesParty.Delete("/{storyId:uint}", originalVerifier, attachUserMiddleware, routes.DeleteStory)
+		storiesParty.Post("/upload", accessTokenVerifierMiddleware, routes.UploadStory)
+		storiesParty.Post("/{storyId:uint}/view", accessTokenVerifierMiddleware, routes.PostStoryView)
+		storiesParty.Post("/{storyId:uint}/like", accessTokenVerifierMiddleware, routes.PostStoryLikeToggle)
+		storiesParty.Delete("/{storyId:uint}", accessTokenVerifierMiddleware, routes.DeleteStory)
 
 		// Public routes (inbox uses optional auth for read status)
 		storiesParty.Get("/inbox", optionalAuthMiddleware, routes.GetStoriesInbox)
@@ -827,13 +837,27 @@ func main() {
 	{
 		propertySaleVideos.Post("/", accessTokenVerifierMiddleware, routes.CreatePropertySaleVideo)
 		propertySaleVideos.Get("/feed", optionalAuthMiddleware, routes.GetPropertySaleVideoFeed)
+		propertySaleVideos.Post("/{id:uint}/view", optionalAuthMiddleware, routes.RecordPropertySaleVideoView)
 		propertySaleVideos.Post("/{id:uint}/like", accessTokenVerifierMiddleware, routes.LikePropertySaleVideo)
 		propertySaleVideos.Post("/{id:uint}/unlike", accessTokenVerifierMiddleware, routes.UnlikePropertySaleVideo)
 		propertySaleVideos.Post("/{id:uint}/save", accessTokenVerifierMiddleware, routes.SavePropertySaleVideo)
 		propertySaleVideos.Post("/{id:uint}/unsave", accessTokenVerifierMiddleware, routes.UnsavePropertySaleVideo)
 		propertySaleVideos.Get("/{id:uint}/comments", optionalAuthMiddleware, routes.GetPropertySaleVideoComments)
 		propertySaleVideos.Post("/{id:uint}/comments", accessTokenVerifierMiddleware, routes.CreatePropertySaleVideoComment)
+		propertySaleVideos.Put("/comments/{id:uint}", accessTokenVerifierMiddleware, routes.UpdatePropertySaleVideoComment)
+		propertySaleVideos.Delete("/comments/{id:uint}", accessTokenVerifierMiddleware, routes.DeletePropertySaleVideoComment)
+		propertySaleVideos.Post("/comments/{id:uint}/like", accessTokenVerifierMiddleware, routes.LikePropertySaleVideoComment)
+		propertySaleVideos.Post("/comments/{id:uint}/unlike", accessTokenVerifierMiddleware, routes.UnlikePropertySaleVideoComment)
+		propertySaleVideos.Get("/admin/stats", accessTokenVerifierMiddleware, routes.GetPropertySaleVideosByOrganizationOrHost)
 	}
+
+	// Device Registration routes (public endpoint for silent registration)
+	app.Post("/api/device/register", routes.RegisterDevice)
+	app.Post("/api/device/session/start", routes.StartDeviceSession)
+	app.Post("/api/device/session/end", routes.EndDeviceSession)
+	app.Get("/api/device/analytics", accessTokenVerifierMiddleware, routes.GetDeviceAnalytics)
+	app.Get("/api/device/daily-usage", accessTokenVerifierMiddleware, routes.GetDeviceDailyUsage)
+	app.Get("/api/device/daily-usage", accessTokenVerifierMiddleware, routes.GetDeviceDailyUsage)
 
 	experience := app.Party("/api/experience")
 	{
@@ -925,12 +949,27 @@ func main() {
 		chat.Post("/start-direct", accessTokenVerifierMiddleware, routes.StartDirectConversation)
 	}
 
+	// AI Chat routes - Meskeny AI
+	aiChat := app.Party("/api/ai")
+	{
+		aiChat.Post("/chat", accessTokenVerifierMiddleware, routes.SendAIChatMessage)
+		aiChat.Get("/sessions", accessTokenVerifierMiddleware, routes.GetAIChatSessions)
+		aiChat.Get("/sessions/{sessionId:uint}", accessTokenVerifierMiddleware, routes.GetAIChatSession)
+		aiChat.Post("/sessions", accessTokenVerifierMiddleware, routes.CreateAIChatSession)
+		aiChat.Delete("/sessions/{sessionId:uint}", accessTokenVerifierMiddleware, routes.DeleteAIChatSession)
+		aiChat.Get("/greeting", accessTokenVerifierMiddleware, routes.GetAIGreeting)
+	}
+
 	// Direct Messages - Clean Implementation
 	directMessages := app.Party("/api/direct-messages")
 	{
 		directMessages.Post("/", accessTokenVerifierMiddleware, routes.SendDirectMessage)
+		directMessages.Get("/", accessTokenVerifierMiddleware, routes.ListDirectMessageConversations)
 		directMessages.Get("/{userID:uint}", accessTokenVerifierMiddleware, routes.GetDirectMessages)
 		directMessages.Post("/{messageID:uint}/read", accessTokenVerifierMiddleware, routes.MarkDirectMessageRead)
+		// Message reactions
+		directMessages.Post("/{messageID:uint}/reactions", accessTokenVerifierMiddleware, routes.AddMessageReaction)
+		directMessages.Delete("/{messageID:uint}/reactions", accessTokenVerifierMiddleware, routes.RemoveMessageReaction)
 	}
 
 	// User Blocking for Direct Messages - Clean Implementation
@@ -988,6 +1027,15 @@ func main() {
 		organization.Post("/{id:uint}/block", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.BlockOrganization)
 		organization.Delete("/{id:uint}/unblock", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.UnblockOrganization)
 		organization.Get("/blocked", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.GetBlockedOrganizations)
+		// Organization Member Management (RBAC)
+		organization.Post("/invite-code", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.GenerateOrganizationInviteCode)
+		organization.Get("/invite-code/{code}", routes.ValidateOrganizationInviteCode) // Public endpoint for preview
+		organization.Post("/join", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.JoinOrganization)
+		organization.Post("/leave", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.LeaveOrganization)
+		organization.Get("/members", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.GetOrganizationMembers)
+		organization.Patch("/members/{memberId:uint}/role", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.UpdateOrganizationMemberRole)
+		organization.Delete("/members/{memberId:uint}", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.RemoveOrganizationMember)
+		organization.Get("/check-personal-content", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.CheckUserCanCreatePersonalContent)
 	}
 
 	propertySales := app.Party("/api/property-sales")
@@ -1006,6 +1054,7 @@ func main() {
 		propertySales.Get("/offers/organization", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.GetOrganizationOffers)
 		propertySales.Patch("/offers/{id:uint}/status", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.UpdateOfferStatus)
 		propertySales.Get("/{id:uint}/offer-insights", routes.PublicOfferInsights)
+		propertySales.Get("/{id:uint}/offers", routes.GetPublicPropertyOffers)
 	}
 
 	landmarks := app.Party("/api/landmarks")
@@ -1052,6 +1101,7 @@ func main() {
 		adminLandmarks.Get("/", routes.AdminGetAllLandmarks)
 		adminLandmarks.Get("/pending", routes.GetPendingLandmarks)
 		adminLandmarks.Patch("/{id:uint}/verify", routes.VerifyLandmark)
+		adminLandmarks.Patch("/{id:uint}/coordinates", routes.AdminUpdateLandmarkCoordinates)
 	}
 
 	// Cities and Zones routes
@@ -1059,6 +1109,7 @@ func main() {
 	{
 		cities.Get("/", routes.GetCities)
 		cities.Get("/{cityId:uint}/zones", routes.GetZonesByCity)
+		cities.Get("/zones/{zoneId:uint}/quartiers", routes.GetQuartiersByZone)
 	}
 
 	// Admin Cities and Zones routes
@@ -1076,6 +1127,14 @@ func main() {
 		adminZones.Post("/", routes.AdminCreateZone)
 		adminZones.Patch("/{id:uint}", routes.AdminUpdateZone)
 		adminZones.Delete("/{id:uint}", routes.AdminDeleteZone)
+	}
+
+	adminQuartiers := app.Party("/api/admin/quartiers", accessTokenVerifierMiddleware, utils.AdminOnlyMiddleware, utils.UserIDFromTokenMiddleware)
+	{
+		adminQuartiers.Get("/", routes.AdminGetAllQuartiers)
+		adminQuartiers.Post("/", routes.AdminCreateQuartier)
+		adminQuartiers.Patch("/{id:uint}", routes.AdminUpdateQuartier)
+		adminQuartiers.Delete("/{id:uint}", routes.AdminDeleteQuartier)
 	}
 
 	app.Post("/api/refresh", refreshTokenVerifierMiddleware, utils.RefreshToken)
@@ -1128,7 +1187,7 @@ func main() {
 		ctx.JSON(iris.Map{"properties": filteredProperties})
 	})
 
-	// Translation service endpoint
+	// Translation service endpoint (uses MarianMT)
 	app.Post("/api/translate", func(ctx iris.Context) {
 		var req struct {
 			Text string `json:"text"`
@@ -1151,56 +1210,16 @@ func main() {
 			source = "auto"
 		}
 
-		// Try multiple translation services for better reliability
-		translationServices := []string{
-			"https://libretranslate.de/translate",           // German instance
-			"https://translate.argosopentech.com/translate", // Argos OpenTech
-			"https://libretranslate.com/translate",          // Original instance
-		}
-
-		var translated string
-		var detected string
-
-		for _, ltURL := range translationServices {
-			payload := map[string]string{
-				"q":      req.Text,
-				"source": source,
-				"target": req.To,
-			}
-			body, _ := json.Marshal(payload)
-			httpReq, err := http.NewRequest("POST", ltURL, bytes.NewBuffer(body))
-			if err != nil {
-				continue
-			}
-			httpReq.Header.Set("Content-Type", "application/json")
-
-			resp, err := http.DefaultClient.Do(httpReq)
-			if err != nil {
-				continue
-			}
-
-			var ltResp struct {
-				TranslatedText   string `json:"translatedText"`
-				DetectedLanguage string `json:"detectedLanguage"`
-			}
-			if err := json.NewDecoder(resp.Body).Decode(&ltResp); err != nil {
-				resp.Body.Close()
-				continue
-			}
-			resp.Body.Close()
-
-			if ltResp.TranslatedText != "" && ltResp.TranslatedText != req.Text {
-				translated = ltResp.TranslatedText
-				detected = ltResp.DetectedLanguage
-				break
-			}
-		}
-
-		// Fallback if all services failed or returned original text
-		if translated == "" {
+		// Use MarianMT service
+		translated, err := services.TranslateOnceDirect(req.Text, req.To)
+		if err != nil {
+			log.Printf("❌ Translation error: %v", err)
+			// Fallback to original text on error
 			translated = req.Text
-			detected = "unknown"
 		}
+
+		// Detect source language (simple heuristic)
+		detected := services.DetectSourceLanguageDirect(req.Text)
 
 		ctx.JSON(iris.Map{
 			"original":   req.Text,

@@ -41,6 +41,13 @@ type Organization struct {
 	UpdatedAt time.Time      `json:"updated_at"`
 	DeletedAt gorm.DeletedAt `json:"deleted_at" gorm:"index"`
 
+	// Edit tracking - 30 day cooldown per field
+	LastNameEdit        *time.Time `json:"last_name_edit"`
+	LastDescriptionEdit *time.Time `json:"last_description_edit"`
+	LastBusinessTypeEdit *time.Time `json:"last_business_type_edit"`
+	LastBannerEdit      *time.Time `json:"last_banner_edit"`
+	LastLogoEdit        *time.Time `json:"last_logo_edit"`
+
 	// Relationships
 	Agents     []Agent        `json:"agents" gorm:"foreignKey:OrganizationID"`
 	Properties []PropertySale `json:"properties" gorm:"foreignKey:OrganizationID"`
@@ -100,15 +107,16 @@ type PropertySale struct {
 	DescriptionTranslations datatypes.JSON `json:"description_translations" gorm:"column:description_translations;type:jsonb"`
 
 	// Location
-	Address    string  `json:"address" gorm:"not null"`
-	City       string  `json:"city" gorm:"not null"`
-	CityID     *uint   `json:"city_id" gorm:"column:city_id"`
-	ZoneID     *uint   `json:"zone_id" gorm:"column:zone_id"`
-	State      string  `json:"state" gorm:"not null"`
-	Country    string  `json:"country" gorm:"not null"`
-	PostalCode string  `json:"postal_code"`
-	Latitude   float64 `json:"latitude"`
-	Longitude  float64 `json:"longitude"`
+	Address      string  `json:"address" gorm:"not null"`
+	City         string  `json:"city" gorm:"not null"`
+	CityID       *uint   `json:"city_id" gorm:"column:city_id"`
+	ZoneID       *uint   `json:"zone_id" gorm:"column:zone_id"`
+	QuartierID   *uint   `json:"quartier_id" gorm:"column:quartier_id"`
+	State        string  `json:"state" gorm:"not null"`
+	Country      string  `json:"country" gorm:"not null"`
+	PostalCode   string  `json:"postal_code"`
+	Latitude     float64 `json:"latitude"`
+	Longitude    float64 `json:"longitude"`
 
 	// Property Details
 	Bedrooms      int     `json:"bedrooms"`
@@ -129,13 +137,18 @@ type PropertySale struct {
 	Images      []string `json:"images" gorm:"type:jsonb;serializer:json"`
 	Videos      []string `json:"videos" gorm:"type:jsonb;serializer:json"`
 	VirtualTour string   `json:"virtual_tour"`
+	// Classified photos by room type (separate from main images)
+	ClassifiedPhotos []ClassifiedPhoto `json:"classified_photos" gorm:"type:jsonb;serializer:json"`
 	// Detailed floor plans (per floor) and neighborhood info
 	FloorPlans   []FloorPlan       `json:"floor_plans" gorm:"type:jsonb;serializer:json"`
 	Neighborhood *NeighborhoodInfo `json:"neighborhood" gorm:"type:jsonb;serializer:json"`
 
 	// Features and Amenities
 	Features  []string `json:"features" gorm:"type:jsonb;serializer:json"`
-	Amenities []string `json:"amenities" gorm:"type:jsonb;serializer:json"`
+	Amenities []string `json:"amenities" gorm:"type:jsonb;serializer:json"` // Legacy - kept for backward compatibility
+	
+	// Amenities with translations (Many2Many relationship)
+	AmenityList []Amenity `json:"amenity_list" gorm:"many2many:property_sale_amenities;"`
 
 	// Status and Verification
 	Status      string `json:"status" gorm:"default:'draft'"` // draft, pending_verification, verified, published, sold, withdrawn
@@ -158,6 +171,13 @@ type PropertySale struct {
 	Inquiries    []PropertyInquiry `json:"inquiries" gorm:"foreignKey:PropertySaleID"`
 	CityRef      *City             `json:"cityRef" gorm:"foreignKey:CityID;references:ID"`
 	ZoneRef      *Zone             `json:"zoneRef" gorm:"foreignKey:ZoneID;references:ID"`
+	QuartierRef  *Quartier         `json:"quartierRef" gorm:"foreignKey:QuartierID;references:ID"`
+}
+
+// ClassifiedPhoto represents a photo classified by room type
+type ClassifiedPhoto struct {
+	RoomType string   `json:"room_type"` // e.g., "kitchen", "hall", "bedroom", "bathroom", etc.
+	Photos   []string `json:"photos"`    // Array of photo URLs for this room type
 }
 
 // FloorPlan describes a single floor layout and details

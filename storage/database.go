@@ -75,13 +75,28 @@ func performMigrations(db *gorm.DB) {
 		&models.IdentityVerification{},
 		&models.AuditLog{},
 		&models.Feedback{},
+		// Categories and Amenities (for property sales)
+		&models.Category{},
+		&models.Amenity{},
 		// Property Selling System Models
 		&models.Organization{},
 		&models.Agent{},
+		&models.OrganizationMember{},     // RBAC member system
+		&models.OrganizationInviteCode{}, // Secure invite codes
+		&models.OrganizationAuditLog{},   // Audit logging
 		&models.PropertySale{},
 		&models.PropertyTour{},
 		&models.PropertyInquiry{},
 		&models.PropertyOffer{},
+		&models.PropertySaleVideo{},
+		&models.PropertySaleVideoLike{},
+		&models.PropertySaleVideoSave{},
+		&models.PropertySaleVideoComment{},
+		&models.PropertySaleVideoCommentLike{},
+		&models.PropertySaleVideoReport{},
+		&models.DeviceRegistration{},
+		&models.DeviceSession{},
+		&models.HiddenPropertySaleVideo{},
 		&models.Landmark{},
 		&models.NotificationPreference{},
 		&models.MarketingDevice{},
@@ -104,6 +119,13 @@ func performMigrations(db *gorm.DB) {
 		&models.GroupQuit{},
 		&models.VideoViewer{},
 		&models.VideoView{},
+		// Direct Messages and User Blocking
+		&models.DirectMessage{},
+		&models.UserBlock{},
+		&models.MessageReaction{},
+		// Host Mode Tracking
+		&models.HostModeSwitch{},
+		&models.HostModeInteraction{},
 	)
 
 	// Allow direct chat groups without an experience by making experience_id nullable
@@ -213,6 +235,165 @@ func performMigrations(db *gorm.DB) {
 		WHERE l.organization_id = o.id
 		AND l.owner_id IS NULL
 		AND o.owner_id IS NOT NULL;
+	`)
+
+	// Update organization_invite_codes table structure
+	// Add code column if it doesn't exist
+	db.Exec(`
+		DO $$ 
+		BEGIN
+			-- Add code column if it doesn't exist
+			IF NOT EXISTS (
+				SELECT 1 FROM information_schema.columns 
+				WHERE table_name = 'organization_invite_codes' AND column_name = 'code'
+			) THEN
+				ALTER TABLE organization_invite_codes ADD COLUMN code VARCHAR(20);
+			END IF;
+
+			-- Add expires_at column if it doesn't exist (make it nullable for "never expires")
+			IF NOT EXISTS (
+				SELECT 1 FROM information_schema.columns 
+				WHERE table_name = 'organization_invite_codes' AND column_name = 'expires_at'
+			) THEN
+				ALTER TABLE organization_invite_codes ADD COLUMN expires_at TIMESTAMP WITH TIME ZONE;
+			END IF;
+
+			-- Add max_uses column if it doesn't exist (nullable for unlimited)
+			IF NOT EXISTS (
+				SELECT 1 FROM information_schema.columns 
+				WHERE table_name = 'organization_invite_codes' AND column_name = 'max_uses'
+			) THEN
+				ALTER TABLE organization_invite_codes ADD COLUMN max_uses INTEGER;
+			END IF;
+
+			-- Add current_uses column if it doesn't exist
+			IF NOT EXISTS (
+				SELECT 1 FROM information_schema.columns 
+				WHERE table_name = 'organization_invite_codes' AND column_name = 'current_uses'
+			) THEN
+				ALTER TABLE organization_invite_codes ADD COLUMN current_uses INTEGER DEFAULT 0;
+			END IF;
+
+			-- Drop old code_hash column and its unique index if they exist
+			IF EXISTS (
+				SELECT 1 FROM information_schema.columns 
+				WHERE table_name = 'organization_invite_codes' AND column_name = 'code_hash'
+			) THEN
+				-- Drop unique index on code_hash if it exists
+				DROP INDEX IF EXISTS idx_organization_invite_codes_code_hash;
+				DROP INDEX IF EXISTS organization_invite_codes_code_hash_key;
+				-- Drop the column
+				ALTER TABLE organization_invite_codes DROP COLUMN code_hash;
+			END IF;
+
+			-- Drop old used_at and used_by columns if they exist (replaced by current_uses)
+			IF EXISTS (
+				SELECT 1 FROM information_schema.columns 
+				WHERE table_name = 'organization_invite_codes' AND column_name = 'used_at'
+			) THEN
+				ALTER TABLE organization_invite_codes DROP COLUMN used_at;
+			END IF;
+
+			IF EXISTS (
+				SELECT 1 FROM information_schema.columns 
+				WHERE table_name = 'organization_invite_codes' AND column_name = 'used_by'
+			) THEN
+				ALTER TABLE organization_invite_codes DROP COLUMN used_by;
+			END IF;
+
+			-- Create unique index on code column if it doesn't exist
+			CREATE UNIQUE INDEX IF NOT EXISTS idx_organization_invite_codes_code ON organization_invite_codes(code) WHERE deleted_at IS NULL;
+
+			-- Create index on expires_at if it doesn't exist
+			CREATE INDEX IF NOT EXISTS idx_organization_invite_codes_expires_at ON organization_invite_codes(expires_at);
+		END $$;
+	`)
+
+	// Make code column NOT NULL after migration (GORM will handle this via AutoMigrate, but ensure it's set)
+	// Only if the column exists and there are no NULL values
+	db.Exec(`
+		DO $$ 
+		BEGIN
+			-- Only add NOT NULL constraint if code column exists and has no NULL values
+			IF EXISTS (
+				SELECT 1 FROM information_schema.columns 
+				WHERE table_name = 'organization_invite_codes' AND column_name = 'code'
+			) AND NOT EXISTS (
+				SELECT 1 FROM organization_invite_codes WHERE code IS NULL
+			) THEN
+				-- Alter column to NOT NULL (this will fail if there are NULLs, but we checked)
+				ALTER TABLE organization_invite_codes ALTER COLUMN code SET NOT NULL;
+			END IF;
+		END $$;
+	`)
+
+	// Remove foreign key constraint from property_sale_video_comments.property_sale_video_id
+	// because property sale videos are synthetic (stored in PropertySale.Videos array, not as separate records)
+	db.Exec(`
+		DO $$ 
+		DECLARE
+			constraint_name_var TEXT;
+		BEGIN
+			-- Find and drop the foreign key constraint by checking pg_constraint
+			SELECT conname INTO constraint_name_var
+			FROM pg_constraint
+			WHERE conrelid = 'property_sale_video_comments'::regclass
+			AND contype = 'f'
+			AND confrelid = 'property_sale_videos'::regclass
+			LIMIT 1;
+			
+			IF constraint_name_var IS NOT NULL THEN
+				EXECUTE 'ALTER TABLE property_sale_video_comments DROP CONSTRAINT ' || constraint_name_var;
+			END IF;
+		EXCEPTION
+			WHEN OTHERS THEN
+				-- If constraint doesn't exist or error occurs, continue
+				NULL;
+		END $$;
+	`)
+
+	// Also try dropping by the common naming patterns (if the above didn't work)
+	db.Exec(`ALTER TABLE property_sale_video_comments DROP CONSTRAINT IF EXISTS fk_property_sale_video_comments_property_sale_video;`)
+	db.Exec(`ALTER TABLE property_sale_video_comments DROP CONSTRAINT IF EXISTS property_sale_video_comments_property_sale_video_id_fkey;`)
+
+	// Ensure property_sale_video_comment_likes table exists
+	// This is a safety check in case AutoMigrate didn't create it
+	db.Exec(`
+		DO $$ 
+		BEGIN
+			-- Create table if it doesn't exist
+			IF NOT EXISTS (
+				SELECT 1 FROM information_schema.tables 
+				WHERE table_name = 'property_sale_video_comment_likes'
+			) THEN
+				CREATE TABLE property_sale_video_comment_likes (
+					id SERIAL PRIMARY KEY,
+					created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+					updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+					deleted_at TIMESTAMP WITH TIME ZONE,
+					comment_id INTEGER NOT NULL,
+					user_id INTEGER NOT NULL,
+					CONSTRAINT fk_property_sale_video_comment_likes_comment 
+						FOREIGN KEY (comment_id) 
+						REFERENCES property_sale_video_comments(id) 
+						ON DELETE CASCADE,
+					CONSTRAINT fk_property_sale_video_comment_likes_user 
+						FOREIGN KEY (user_id) 
+						REFERENCES users(id) 
+						ON DELETE CASCADE
+				);
+				
+				-- Create indexes
+				CREATE INDEX idx_property_sale_video_comment_likes_comment_id ON property_sale_video_comment_likes(comment_id);
+				CREATE INDEX idx_property_sale_video_comment_likes_user_id ON property_sale_video_comment_likes(user_id);
+				CREATE INDEX idx_property_sale_video_comment_likes_deleted_at ON property_sale_video_comment_likes(deleted_at);
+				
+				-- Create unique index to prevent duplicate likes
+				CREATE UNIQUE INDEX idx_property_sale_video_comment_likes_unique 
+					ON property_sale_video_comment_likes(comment_id, user_id) 
+					WHERE deleted_at IS NULL;
+			END IF;
+		END $$;
 	`)
 }
 

@@ -391,6 +391,69 @@ func (ns *NotificationService) SendReminderNotificationToGuest(reservationID, pr
 	return ns.SendNotificationToUser(guestID, title, body, data)
 }
 
+// SendPropertyOfferNotificationToHost sends notification when an offer is made on a property for sale
+func (ns *NotificationService) SendPropertyOfferNotificationToHost(offerID, propertyID, hostID, userID uint, userName, propertyTitle string, offerAmount float64) error {
+	log.Printf("📱 NOTIFICATION DEBUG: Sending property offer notification to host %d", hostID)
+
+	title := "💰 عرض شراء جديد!"
+	body := fmt.Sprintf("🏠 %s قدم عرض شراء بقيمة %.0f MRU لعقارك '%s'. تواصل معه الآن!", userName, offerAmount, propertyTitle)
+
+	params := fmt.Sprintf(`{"offerId": %d, "propertyId": %d, "userId": %d}`, offerID, propertyID, userID)
+
+	data := NotificationData{
+		Type:       "property_offer",
+		ID:         fmt.Sprintf("%d", offerID),
+		PropertyID: fmt.Sprintf("%d", propertyID),
+		UserID:     fmt.Sprintf("%d", userID),
+		HostID:     fmt.Sprintf("%d", hostID),
+		Screen:     "Messages",
+		Params:     params,
+		Action:     "view_conversation",
+	}
+
+	err := ns.SendNotificationToUser(hostID, title, body, data)
+	if err != nil {
+		log.Printf("❌ NOTIFICATION ERROR: Failed to send property offer notification: %v", err)
+	} else {
+		log.Printf("✅ NOTIFICATION SUCCESS: Property offer notification sent to host %d", hostID)
+	}
+	return err
+}
+
+// SendPropertyTourNotificationToHost sends notification when a tour is requested for a property for sale
+func (ns *NotificationService) SendPropertyTourNotificationToHost(tourID, propertyID, hostID, userID uint, userName, propertyTitle, tourDate, tourTime, tourType string) error {
+	log.Printf("📱 NOTIFICATION DEBUG: Sending property tour notification to host %d", hostID)
+
+	tourTypeArabic := "حضوري"
+	if tourType == "video" {
+		tourTypeArabic = "فيديو"
+	}
+
+	title := "🏠 طلب زيارة جديد!"
+	body := fmt.Sprintf("📅 %s يريد زيارة عقارك '%s' يوم %s الساعة %s (زيارة %s). تواصل معه الآن!", userName, propertyTitle, tourDate, tourTime, tourTypeArabic)
+
+	params := fmt.Sprintf(`{"tourId": %d, "propertyId": %d, "userId": %d}`, tourID, propertyID, userID)
+
+	data := NotificationData{
+		Type:       "property_tour",
+		ID:         fmt.Sprintf("%d", tourID),
+		PropertyID: fmt.Sprintf("%d", propertyID),
+		UserID:     fmt.Sprintf("%d", userID),
+		HostID:     fmt.Sprintf("%d", hostID),
+		Screen:     "Messages",
+		Params:     params,
+		Action:     "view_conversation",
+	}
+
+	err := ns.SendNotificationToUser(hostID, title, body, data)
+	if err != nil {
+		log.Printf("❌ NOTIFICATION ERROR: Failed to send property tour notification: %v", err)
+	} else {
+		log.Printf("✅ NOTIFICATION SUCCESS: Property tour notification sent to host %d", hostID)
+	}
+	return err
+}
+
 // Global notification service instance
 var NotificationServiceInstance = NewNotificationService()
 

@@ -4,15 +4,21 @@ import (
 	"apartments-clone-server/models"
 	"apartments-clone-server/storage"
 	"apartments-clone-server/utils"
+	"encoding/json"
 	"fmt"
+	"math/rand"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/kataras/iris/v12"
 	"github.com/kataras/iris/v12/middleware/jwt"
 )
 
 // SearchProperties handles property search with multiple filters
+// Works for both authenticated and unauthenticated users
+// Properties are rotated per-request to show fresh content (TikTok-like cycling)
+// Properties with images are always prioritized at the top
 func SearchProperties(ctx iris.Context) {
 	// Debug: Log all received parameters
 	fmt.Printf("🔍 SearchProperties called with parameters:\n")
@@ -149,28 +155,145 @@ func SearchProperties(ctx iris.Context) {
 	// Debug: Log the final query conditions
 	fmt.Printf("🔍 Final query conditions applied\n")
 
-	// Sorting
-	sort := strings.ToLower(strings.TrimSpace(ctx.URLParam("sort")))
-	switch sort {
-	case "price_low":
-		q = q.Order("nightly_price ASC").Order("id DESC")
-	case "price_high":
-		q = q.Order("nightly_price DESC").Order("id DESC")
-	case "rating":
-		q = q.Order("rating DESC").Order("id DESC")
-	default:
-		q = q.Order("created_at DESC")
-	}
-
-	var properties []models.Property
-	if err := q.Find(&properties).Error; err != nil {
+	// Get all properties first for rotation and image prioritization
+	var allProperties []models.Property
+	if err := q.Find(&allProperties).Error; err != nil {
 		fmt.Printf("❌ Database query error: %v\n", err)
 		ctx.StatusCode(iris.StatusInternalServerError)
 		ctx.JSON(iris.Map{"message": "Failed to search properties"})
 		return
 	}
 
-	fmt.Printf("✅ Found %d properties\n", len(properties))
+	fmt.Printf("✅ Found %d properties before rotation\n", len(allProperties))
+
+	// Separate properties with images from those without
+	var withImages []models.Property
+	var withoutImages []models.Property
+	
+	for _, prop := range allProperties {
+		// Check if property has images (Images is stored as JSON string)
+		hasImages := false
+		if prop.Images != "" {
+			var images []string
+			if err := json.Unmarshal([]byte(prop.Images), &images); err == nil {
+				// Check if images array contains non-empty strings
+				for _, img := range images {
+					if strings.TrimSpace(img) != "" {
+						hasImages = true
+						break
+					}
+				}
+			}
+		}
+		
+		if hasImages {
+			withImages = append(withImages, prop)
+		} else {
+			withoutImages = append(withoutImages, prop)
+		}
+	}
+
+	fmt.Printf("📸 Properties with images: %d, without images: %d\n", len(withImages), len(withoutImages))
+
+	// Apply time-based rotation for TikTok-like cycling
+	// Rotation changes per-request with high precision + random component for maximum variety
+	// This ensures users see different properties on each visit/reload
+	now := time.Now()
+	// High-precision rotation: includes seconds, nanoseconds, Unix timestamp, and random component
+	// Random component ensures different results even if requests happen at exact same time
+	rand.Seed(now.UnixNano()) // Seed random with current nanosecond for true randomness
+	randomComponent := int64(rand.Intn(10000)) // Random 0-9999
+	rotationSeed := int64(now.Second()) + 
+		int64(now.Minute())*60 + 
+		int64(now.Hour())*3600 + 
+		int64(now.Day())*86400 + 
+		int64(now.Month())*2678400 + 
+		(now.UnixNano() % 1000000) + // Use nanoseconds for microsecond-level variation
+		randomComponent // Add random component for guaranteed variation
+	
+	// Rotate both lists with different offsets for maximum variety
+	// Uses multiple rotation passes for better distribution
+	rotateProperties := func(props []models.Property, seed int64) []models.Property {
+		if len(props) == 0 {
+			return props
+		}
+		if len(props) == 1 {
+			return props
+		}
+		
+		// Calculate offset with multiple components for better distribution
+		offset1 := int(seed % int64(len(props)))
+		offset2 := int((seed * 7) % int64(len(props))) // Different multiplier for variety
+		
+		// Use the larger offset, but ensure it's not 0
+		offset := offset1
+		if offset2 > offset1 {
+			offset = offset2
+		}
+		if offset == 0 {
+			offset = int((seed * 13) % int64(len(props)-1)) + 1 // Force non-zero with different multiplier
+		}
+		
+		// Perform rotation
+		rotated := make([]models.Property, len(props))
+		copy(rotated, props[offset:])
+		copy(rotated[len(props)-offset:], props[:offset])
+		return rotated
+	}
+
+	withImages = rotateProperties(withImages, rotationSeed)
+	withoutImages = rotateProperties(withoutImages, rotationSeed+5000) // Different offset for variety
+
+	// Apply custom sorting if requested (but still prioritize images)
+	sort := strings.ToLower(strings.TrimSpace(ctx.URLParam("sort")))
+	if sort != "" {
+		switch sort {
+		case "price_low":
+			// Sort within each group (with/without images)
+			sortByPriceLow := func(props []models.Property) {
+				for i := 0; i < len(props)-1; i++ {
+					for j := i + 1; j < len(props); j++ {
+						if props[i].NightlyPrice > props[j].NightlyPrice {
+							props[i], props[j] = props[j], props[i]
+						}
+					}
+				}
+			}
+			sortByPriceLow(withImages)
+			sortByPriceLow(withoutImages)
+		case "price_high":
+			sortByPriceHigh := func(props []models.Property) {
+				for i := 0; i < len(props)-1; i++ {
+					for j := i + 1; j < len(props); j++ {
+						if props[i].NightlyPrice < props[j].NightlyPrice {
+							props[i], props[j] = props[j], props[i]
+						}
+					}
+				}
+			}
+			sortByPriceHigh(withImages)
+			sortByPriceHigh(withoutImages)
+		case "rating":
+			sortByRating := func(props []models.Property) {
+				for i := 0; i < len(props)-1; i++ {
+					for j := i + 1; j < len(props); j++ {
+						if props[i].Rating < props[j].Rating {
+							props[i], props[j] = props[j], props[i]
+						}
+					}
+				}
+			}
+			sortByRating(withImages)
+			sortByRating(withoutImages)
+		}
+	}
+
+	// Combine: properties with images first, then without
+	var properties []models.Property
+	properties = append(properties, withImages...)
+	properties = append(properties, withoutImages...)
+
+	fmt.Printf("✅ Returning %d properties (rotated, images prioritized)\n", len(properties))
 
 	// Debug: Show sample property data to understand the structure
 	if len(properties) > 0 {

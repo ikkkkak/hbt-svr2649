@@ -4,11 +4,14 @@ import (
 	"apartments-clone-server/models"
 	"apartments-clone-server/storage"
 	"apartments-clone-server/utils"
+	"encoding/json"
 	"fmt"
 	"math"
+	"math/rand"
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/kataras/iris/v12"
 	"github.com/kataras/iris/v12/middleware/jwt"
@@ -67,6 +70,9 @@ func GetLocationCriteria(ctx iris.Context) {
 }
 
 // GetLocationProperties returns properties for a specific location criteria
+// Works for both authenticated and unauthenticated users
+// Properties are rotated per-request to show fresh content (TikTok-like cycling)
+// Properties with images are always prioritized at the top
 func GetLocationProperties(ctx iris.Context) {
 	criteriaIDStr := ctx.Params().Get("criteriaId")
 	criteriaID, err := strconv.ParseUint(criteriaIDStr, 10, 32)
@@ -127,28 +133,119 @@ func GetLocationProperties(ctx iris.Context) {
 		query = query.Where("property_id NOT IN (SELECT p.id FROM properties p JOIN user_flags uf ON p.host_id = uf.flagged_user_id WHERE uf.flagger_id = ? AND uf.status='active')", userID)
 	}
 
-	// Get properties assigned to this criteria (only active + approved/live)
-	var criteriaProperties []models.LocationCriteriaProperty
+	// Get all properties assigned to this criteria (only active + approved/live)
+	var allCriteriaProperties []models.LocationCriteriaProperty
+
 	if err := query.
 		Preload("Property", func(db *gorm.DB) *gorm.DB {
 			return db.Where("is_active = ? AND status IN (?)", true, []string{"approved", "live"})
 		}).
 		Preload("Property.Host").
-		Order("distance ASC").
-		Limit(limit).
-		Find(&criteriaProperties).Error; err != nil {
+		Find(&allCriteriaProperties).Error; err != nil {
 		ctx.StatusCode(iris.StatusInternalServerError)
 		ctx.JSON(iris.Map{"message": "Failed to fetch properties"})
 		return
 	}
 
-	// Extract properties
-	var properties []models.Property
-	for _, cp := range criteriaProperties {
+	// Extract all properties first
+	var allProperties []models.Property
+	for _, cp := range allCriteriaProperties {
 		if cp.Property.ID != 0 { // Ensure property exists
-			properties = append(properties, cp.Property)
+			allProperties = append(allProperties, cp.Property)
 		}
 	}
+
+	fmt.Printf("✅ Found %d properties for criteria '%s' before rotation\n", len(allProperties), criteria.Name)
+
+	// Separate properties with images from those without
+	var withImages []models.Property
+	var withoutImages []models.Property
+	
+	for _, prop := range allProperties {
+		// Check if property has images (Images is stored as JSON string)
+		hasImages := false
+		if prop.Images != "" {
+			var images []string
+			if err := json.Unmarshal([]byte(prop.Images), &images); err == nil {
+				// Check if images array contains non-empty strings
+				for _, img := range images {
+					if strings.TrimSpace(img) != "" {
+						hasImages = true
+						break
+					}
+				}
+			}
+		}
+		
+		if hasImages {
+			withImages = append(withImages, prop)
+		} else {
+			withoutImages = append(withoutImages, prop)
+		}
+	}
+
+	fmt.Printf("📸 Properties with images: %d, without images: %d\n", len(withImages), len(withoutImages))
+
+	// Apply time-based rotation for TikTok-like cycling
+	// Rotation changes per-request with high precision + random component for maximum variety
+	// This ensures users see different properties on each visit/reload
+	now := time.Now()
+	// High-precision rotation: includes seconds, nanoseconds, Unix timestamp, and random component
+	// Random component ensures different results even if requests happen at exact same time
+	rand.Seed(now.UnixNano()) // Seed random with current nanosecond for true randomness
+	randomComponent := int64(rand.Intn(10000)) // Random 0-9999
+	rotationSeed := int64(now.Second()) + 
+		int64(now.Minute())*60 + 
+		int64(now.Hour())*3600 + 
+		int64(now.Day())*86400 + 
+		int64(now.Month())*2678400 + 
+		(now.UnixNano() % 1000000) + // Use nanoseconds for microsecond-level variation
+		randomComponent // Add random component for guaranteed variation
+	
+	// Rotate both lists with different offsets for maximum variety
+	// Uses multiple rotation passes for better distribution
+	rotateProperties := func(props []models.Property, seed int64) []models.Property {
+		if len(props) == 0 {
+			return props
+		}
+		if len(props) == 1 {
+			return props
+		}
+		
+		// Calculate offset with multiple components for better distribution
+		offset1 := int(seed % int64(len(props)))
+		offset2 := int((seed * 7) % int64(len(props))) // Different multiplier for variety
+		
+		// Use the larger offset, but ensure it's not 0
+		offset := offset1
+		if offset2 > offset1 {
+			offset = offset2
+		}
+		if offset == 0 {
+			offset = int((seed * 13) % int64(len(props)-1)) + 1 // Force non-zero with different multiplier
+		}
+		
+		// Perform rotation
+		rotated := make([]models.Property, len(props))
+		copy(rotated, props[offset:])
+		copy(rotated[len(props)-offset:], props[:offset])
+		return rotated
+	}
+
+	withImages = rotateProperties(withImages, rotationSeed)
+	withoutImages = rotateProperties(withoutImages, rotationSeed+5000) // Different offset for variety
+
+	// Combine: properties with images first, then without
+	var properties []models.Property
+	properties = append(properties, withImages...)
+	properties = append(properties, withoutImages...)
+
+	// Apply limit after rotation
+	if limit > 0 && limit < len(properties) {
+		properties = properties[:limit]
+	}
+
+	fmt.Printf("✅ Returning %d properties (rotated, images prioritized, limit: %d)\n", len(properties), limit)
 
 	// Localize property fields based on requested language
 	lang := strings.ToLower(strings.TrimSpace(ctx.URLParamDefault("lang", "en")))

@@ -348,3 +348,216 @@ func AdminGetAllZones(ctx iris.Context) {
 		"data":    zones,
 	})
 }
+
+// GetQuartiersByZone returns all quartiers for a specific zone
+func GetQuartiersByZone(ctx iris.Context) {
+	zoneIDStr := ctx.Params().Get("zoneId")
+	zoneID, err := strconv.ParseUint(zoneIDStr, 10, 32)
+	if err != nil {
+		ctx.StatusCode(400)
+		ctx.JSON(iris.Map{"error": "Invalid zone ID"})
+		return
+	}
+
+	var quartiers []models.Quartier
+	if err := storage.DB.Where("zone_id = ? AND is_active = ? AND parent_quartier_id IS NULL", uint(zoneID), true).Preload("SubQuartiers", "is_active = ?", true).Find(&quartiers).Error; err != nil {
+		ctx.StatusCode(500)
+		ctx.JSON(iris.Map{"error": "Failed to fetch quartiers"})
+		return
+	}
+
+	ctx.JSON(iris.Map{
+		"success": true,
+		"data":    quartiers,
+	})
+}
+
+// Admin: Create Quartier
+func AdminCreateQuartier(ctx iris.Context) {
+	var input struct {
+		ZoneID          uint   `json:"zone_id"`
+		ParentQuartierID *uint  `json:"parent_quartier_id"`
+		Name            string `json:"name"`
+		NameAr          string `json:"name_ar"`
+	}
+
+	if err := ctx.ReadJSON(&input); err != nil {
+		ctx.StatusCode(400)
+		ctx.JSON(iris.Map{"error": "Invalid JSON"})
+		return
+	}
+
+	if input.ZoneID == 0 || input.Name == "" || input.NameAr == "" {
+		ctx.StatusCode(400)
+		ctx.JSON(iris.Map{"error": "ZoneID, Name and NameAr are required"})
+		return
+	}
+
+	// Verify zone exists
+	var zone models.Zone
+	if err := storage.DB.First(&zone, input.ZoneID).Error; err != nil {
+		ctx.StatusCode(400)
+		ctx.JSON(iris.Map{"error": "Zone not found"})
+		return
+	}
+
+	// If parent_quartier_id is provided, verify it exists and belongs to the same zone
+	if input.ParentQuartierID != nil && *input.ParentQuartierID > 0 {
+		var parentQuartier models.Quartier
+		if err := storage.DB.First(&parentQuartier, *input.ParentQuartierID).Error; err != nil {
+			ctx.StatusCode(400)
+			ctx.JSON(iris.Map{"error": "Parent quartier not found"})
+			return
+		}
+		if parentQuartier.ZoneID != input.ZoneID {
+			ctx.StatusCode(400)
+			ctx.JSON(iris.Map{"error": "Parent quartier must belong to the same zone"})
+			return
+		}
+	}
+
+	quartier := models.Quartier{
+		ZoneID:           input.ZoneID,
+		ParentQuartierID: input.ParentQuartierID,
+		Name:             input.Name,
+		NameAr:           input.NameAr,
+		IsActive:         true,
+	}
+
+	if err := storage.DB.Create(&quartier).Error; err != nil {
+		ctx.StatusCode(500)
+		ctx.JSON(iris.Map{"error": "Failed to create quartier"})
+		return
+	}
+
+	// Load relationships
+	storage.DB.Preload("Zone").Preload("ParentQuartier").First(&quartier, quartier.ID)
+
+	ctx.JSON(iris.Map{
+		"success": true,
+		"data":    quartier,
+	})
+}
+
+// Admin: Update Quartier
+func AdminUpdateQuartier(ctx iris.Context) {
+	quartierIDStr := ctx.Params().Get("id")
+	quartierID, err := strconv.ParseUint(quartierIDStr, 10, 32)
+	if err != nil {
+		ctx.StatusCode(400)
+		ctx.JSON(iris.Map{"error": "Invalid quartier ID"})
+		return
+	}
+
+	var input struct {
+		ZoneID          *uint  `json:"zone_id"`
+		ParentQuartierID *uint  `json:"parent_quartier_id"`
+		Name            string `json:"name"`
+		NameAr          string `json:"name_ar"`
+		IsActive        *bool  `json:"is_active"`
+	}
+
+	if err := ctx.ReadJSON(&input); err != nil {
+		ctx.StatusCode(400)
+		ctx.JSON(iris.Map{"error": "Invalid JSON"})
+		return
+	}
+
+	var quartier models.Quartier
+	if err := storage.DB.First(&quartier, uint(quartierID)).Error; err != nil {
+		ctx.StatusCode(404)
+		ctx.JSON(iris.Map{"error": "Quartier not found"})
+		return
+	}
+
+	// Update fields
+	if input.ZoneID != nil {
+		// Verify new zone exists
+		var zone models.Zone
+		if err := storage.DB.First(&zone, *input.ZoneID).Error; err != nil {
+			ctx.StatusCode(400)
+			ctx.JSON(iris.Map{"error": "Zone not found"})
+			return
+		}
+		quartier.ZoneID = *input.ZoneID
+	}
+	if input.ParentQuartierID != nil {
+		if *input.ParentQuartierID == 0 {
+			quartier.ParentQuartierID = nil
+		} else {
+			// Verify parent quartier exists
+			var parentQuartier models.Quartier
+			if err := storage.DB.First(&parentQuartier, *input.ParentQuartierID).Error; err != nil {
+				ctx.StatusCode(400)
+				ctx.JSON(iris.Map{"error": "Parent quartier not found"})
+				return
+			}
+			if parentQuartier.ZoneID != quartier.ZoneID {
+				ctx.StatusCode(400)
+				ctx.JSON(iris.Map{"error": "Parent quartier must belong to the same zone"})
+				return
+			}
+			quartier.ParentQuartierID = input.ParentQuartierID
+		}
+	}
+	if input.Name != "" {
+		quartier.Name = input.Name
+	}
+	if input.NameAr != "" {
+		quartier.NameAr = input.NameAr
+	}
+	if input.IsActive != nil {
+		quartier.IsActive = *input.IsActive
+	}
+
+	if err := storage.DB.Save(&quartier).Error; err != nil {
+		ctx.StatusCode(500)
+		ctx.JSON(iris.Map{"error": "Failed to update quartier"})
+		return
+	}
+
+	// Load relationships
+	storage.DB.Preload("Zone").Preload("ParentQuartier").First(&quartier, quartier.ID)
+
+	ctx.JSON(iris.Map{
+		"success": true,
+		"data":    quartier,
+	})
+}
+
+// Admin: Delete Quartier
+func AdminDeleteQuartier(ctx iris.Context) {
+	quartierIDStr := ctx.Params().Get("id")
+	quartierID, err := strconv.ParseUint(quartierIDStr, 10, 32)
+	if err != nil {
+		ctx.StatusCode(400)
+		ctx.JSON(iris.Map{"error": "Invalid quartier ID"})
+		return
+	}
+
+	if err := storage.DB.Delete(&models.Quartier{}, uint(quartierID)).Error; err != nil {
+		ctx.StatusCode(500)
+		ctx.JSON(iris.Map{"error": "Failed to delete quartier"})
+		return
+	}
+
+	ctx.JSON(iris.Map{
+		"success": true,
+		"message": "Quartier deleted successfully",
+	})
+}
+
+// Admin: Get All Quartiers (including inactive)
+func AdminGetAllQuartiers(ctx iris.Context) {
+	var quartiers []models.Quartier
+	if err := storage.DB.Preload("Zone").Preload("Zone.City").Preload("ParentQuartier").Preload("SubQuartiers").Find(&quartiers).Error; err != nil {
+		ctx.StatusCode(500)
+		ctx.JSON(iris.Map{"error": "Failed to fetch quartiers"})
+		return
+	}
+
+	ctx.JSON(iris.Map{
+		"success": true,
+		"data":    quartiers,
+	})
+}

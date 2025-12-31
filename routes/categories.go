@@ -39,6 +39,8 @@ func GetCategories(ctx iris.Context) {
 }
 
 // GetAmenities returns all amenities, optionally filtered by category
+// Note: Language parameter is available but translations are handled client-side
+// The API returns all language versions in the name object (en, fr, ar)
 func GetAmenities(ctx iris.Context) {
 	category := ctx.URLParam("category")
 

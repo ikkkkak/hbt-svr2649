@@ -8,7 +8,6 @@ import (
 	"sort"
 
 	"github.com/kataras/iris/v12"
-	"github.com/kataras/iris/v12/middleware/jwt"
 	"gorm.io/gorm"
 )
 
@@ -21,9 +20,15 @@ func CreateConversation(ctx iris.Context) {
 		return
 	}
 
-	claims := jwt.Get(ctx).(*utils.AccessToken)
+	// Get userID from context (set by accessTokenVerifierMiddleware)
+	uid, ok := ctx.Values().Get("userID").(uint)
+	if !ok || uid == 0 {
+		ctx.StatusCode(iris.StatusUnauthorized)
+		ctx.JSON(iris.Map{"error": "unauthorized"})
+		return
+	}
 
-	if req.SenderID != claims.ID {
+	if req.SenderID != uid {
 		ctx.StatusCode(iris.StatusForbidden)
 		return
 	}
@@ -88,9 +93,15 @@ func GetConversationByID(ctx iris.Context) {
 		return
 	}
 
-	claims := jwt.Get(ctx).(*utils.AccessToken)
+	// Get userID from context (set by accessTokenVerifierMiddleware)
+	uid, ok := ctx.Values().Get("userID").(uint)
+	if !ok || uid == 0 {
+		ctx.StatusCode(iris.StatusUnauthorized)
+		ctx.JSON(iris.Map{"error": "unauthorized"})
+		return
+	}
 
-	if result.OwnerID != claims.ID && result.TenantID != claims.ID {
+	if result.OwnerID != uid && result.TenantID != uid {
 		ctx.StatusCode(iris.StatusForbidden)
 		return
 	}
@@ -118,6 +129,12 @@ func GetConversationsByUserID(ctx iris.Context) {
 		return
 	}
 
+	// If no conversations found, return empty array
+	if len(results) == 0 {
+		ctx.JSON([]ConversationResult{})
+		return
+	}
+
 	var conversationIDs []uint
 	for _, conversation := range results {
 		conversationIDs = append(conversationIDs, conversation.ID)
@@ -125,17 +142,25 @@ func GetConversationsByUserID(ctx iris.Context) {
 
 	var messages []models.Message
 
-	messagesQuery := storage.DB.Raw(`
-		SELECT messages.* 
-		FROM messages
-		INNER JOIN (
-			SELECT conversation_id, MAX(created_at) AS created_at
+	// Only query messages if there are conversations
+	if len(conversationIDs) > 0 {
+		messagesQuery := storage.DB.Raw(`
+			SELECT messages.* 
 			FROM messages
-			WHERE conversation_id IN ? 
-			GROUP BY conversation_id
-		) AS recentMessages
-		ON messages.conversation_id = recentMessages.conversation_id 
-		AND messages.created_at = recentMessages.created_at`, conversationIDs).Scan(&messages)
+			INNER JOIN (
+				SELECT conversation_id, MAX(created_at) AS created_at
+				FROM messages
+				WHERE conversation_id IN ? 
+				GROUP BY conversation_id
+			) AS recentMessages
+			ON messages.conversation_id = recentMessages.conversation_id 
+			AND messages.created_at = recentMessages.created_at`, conversationIDs).Scan(&messages)
+
+		if messagesQuery.Error != nil {
+			utils.CreateInternalServerError(ctx)
+			return
+		}
+	}
 
 	messageMap := make(map[uint][]models.Message)
 	for _, message := range messages {
@@ -144,15 +169,26 @@ func GetConversationsByUserID(ctx iris.Context) {
 	}
 
 	for index, conversation := range results {
-		results[index].Messages = messageMap[conversation.ID]
+		if msgs, ok := messageMap[conversation.ID]; ok {
+			results[index].Messages = msgs
+		} else {
+			// If no messages for this conversation, set empty array
+			results[index].Messages = []models.Message{}
+		}
 	}
 
-	if messagesQuery.Error != nil {
-		utils.CreateInternalServerError(ctx)
-		return
-	}
-
+	// Sort by last message time, but handle conversations without messages
 	sort.Slice(results, func(i int, j int) bool {
+		// If either conversation has no messages, put it at the end
+		if len(results[i].Messages) == 0 && len(results[j].Messages) == 0 {
+			return results[i].CreatedAt.After(results[j].CreatedAt)
+		}
+		if len(results[i].Messages) == 0 {
+			return false
+		}
+		if len(results[j].Messages) == 0 {
+			return true
+		}
 		return results[i].Messages[0].CreatedAt.After(results[j].Messages[0].CreatedAt)
 	})
 
@@ -203,9 +239,10 @@ func getConversationResultsByUserID(id string, ctx iris.Context) ([]Conversation
 		return result, resultQuery.Error
 	}
 
+	// Return empty array instead of 404 when no conversations found
+	// This allows the frontend to handle empty state gracefully
 	if resultQuery.RowsAffected == 0 {
-		utils.CreateNotFound(ctx)
-		return result, errors.New("Result not found")
+		return []ConversationResult{}, nil
 	}
 
 	return result, nil

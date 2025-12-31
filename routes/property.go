@@ -139,6 +139,36 @@ func CreateProperty(ctx iris.Context) {
 		return
 	}
 
+	// Track property creation for host mode engagement
+	// Get user ID from middleware context
+	if userID, ok := ctx.Values().Get("userID").(uint); ok && userID > 0 {
+		// Update HostModeSwitch if exists
+		var hostSwitch models.HostModeSwitch
+		if err := storage.DB.Where("user_id = ? AND property_added = ?", userID, false).First(&hostSwitch).Error; err == nil {
+			now := time.Now()
+			hostSwitch.PropertyAdded = true
+			hostSwitch.PropertyAddedAt = &now
+
+			// Calculate time to add property
+			if !hostSwitch.SwitchedAt.IsZero() {
+				duration := now.Sub(hostSwitch.SwitchedAt)
+				hostSwitch.TimeToAddProperty = &duration
+			}
+
+			storage.DB.Save(&hostSwitch)
+			log.Printf("✅ User %d added property after %v", userID, hostSwitch.TimeToAddProperty)
+		}
+
+		// Record interaction for learning
+		interaction := models.HostModeInteraction{
+			UserID:          userID,
+			InteractionType: "property_added",
+			InteractionData: fmt.Sprintf(`{"property_id": %d, "property_type": "%s"}`, property.ID, property.PropertyType),
+			CreatedAt:       time.Now(),
+		}
+		storage.DB.Create(&interaction)
+	}
+
 	// Sync amenity links into junction table (property_amenities)
 	if len(input.Amenities) > 0 {
 		for _, a := range input.Amenities {
@@ -518,8 +548,8 @@ func GetPropertiesByBoundingBox(ctx iris.Context) {
 		query = query.Where("host_id NOT IN (SELECT flagged_user_id FROM user_flags WHERE flagger_id = ? AND status='active')", userID)
 	}
 
-	var properties []models.Property
-	result := query.Order("created_at DESC").Find(&properties)
+	var allProperties []models.Property
+	result := query.Find(&allProperties)
 
 	if result.Error != nil {
 		fmt.Printf("GetPropertiesByBoundingBox - Database error: %v\n", result.Error)
@@ -527,7 +557,66 @@ func GetPropertiesByBoundingBox(ctx iris.Context) {
 		return
 	}
 
-	fmt.Printf("GetPropertiesByBoundingBox - Found %d properties\n", len(properties))
+	fmt.Printf("GetPropertiesByBoundingBox - Found %d properties before rotation\n", len(allProperties))
+
+	// Separate properties with images from those without
+	var withImages []models.Property
+	var withoutImages []models.Property
+	
+	for _, prop := range allProperties {
+		// Check if property has images (Images is stored as JSON string)
+		hasImages := false
+		if prop.Images != "" {
+			var images []string
+			if err := json.Unmarshal([]byte(prop.Images), &images); err == nil {
+				// Check if images array contains non-empty strings
+				for _, img := range images {
+					if strings.TrimSpace(img) != "" {
+						hasImages = true
+						break
+					}
+				}
+			}
+		}
+		
+		if hasImages {
+			withImages = append(withImages, prop)
+		} else {
+			withoutImages = append(withoutImages, prop)
+		}
+	}
+
+	fmt.Printf("📸 Properties with images: %d, without images: %d\n", len(withImages), len(withoutImages))
+
+	// Apply time-based rotation for TikTok-like cycling
+	// Rotation changes every hour, creating variety for users
+	now := time.Now()
+	rotationSeed := int64(now.Hour() + now.Day()*24 + int(now.Month())*24*31)
+	
+	// Rotate both lists
+	rotateProperties := func(props []models.Property, seed int64) []models.Property {
+		if len(props) == 0 {
+			return props
+		}
+		offset := int(seed % int64(len(props)))
+		if offset == 0 {
+			return props
+		}
+		rotated := make([]models.Property, len(props))
+		copy(rotated, props[offset:])
+		copy(rotated[len(props)-offset:], props[:offset])
+		return rotated
+	}
+
+	withImages = rotateProperties(withImages, rotationSeed)
+	withoutImages = rotateProperties(withoutImages, rotationSeed+1500) // Different offset for variety
+
+	// Combine: properties with images first, then without
+	var properties []models.Property
+	properties = append(properties, withImages...)
+	properties = append(properties, withoutImages...)
+
+	fmt.Printf("✅ Returning %d properties (rotated, images prioritized)\n", len(properties))
 
 	// Resolve localized fields based on requested language
 	lang := strings.ToLower(strings.TrimSpace(ctx.URLParamDefault("lang", "en")))

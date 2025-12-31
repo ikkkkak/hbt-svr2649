@@ -8,6 +8,7 @@ import (
 	"apartments-clone-server/utils"
 	"encoding/json"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -19,19 +20,14 @@ import (
 
 // CreateVideo stores a new video record after upload is completed (client uploads to CDN)
 func CreateVideo(ctx iris.Context) {
-	tokenValue := jsonWT.Get(ctx)
-	if tokenValue == nil {
+	// Get user ID from middleware context
+	userID, ok := ctx.Values().Get("userID").(uint)
+	if !ok || userID == 0 {
+		log.Println("❌ CreateVideo: Unauthorized - no userID in context")
 		ctx.StatusCode(iris.StatusUnauthorized)
-		ctx.JSON(iris.Map{"error": "Unauthorized"})
+		ctx.JSON(iris.Map{"error": "unauthorized"})
 		return
 	}
-	claims, ok := tokenValue.(*utils.AccessToken)
-	if !ok || claims == nil {
-		ctx.StatusCode(iris.StatusUnauthorized)
-		ctx.JSON(iris.Map{"error": "Invalid token"})
-		return
-	}
-	userID := claims.ID
 
 	var input struct {
 		PropertyID   uint    `json:"propertyID" validate:"required"`
@@ -447,8 +443,15 @@ func GetVideoFeed(ctx iris.Context) {
 }
 
 func LikeVideo(ctx iris.Context) {
-	claims := jsonWT.Get(ctx).(*utils.AccessToken)
-	userID := claims.ID
+	// Get user ID from middleware context
+	userID, ok := ctx.Values().Get("userID").(uint)
+	if !ok || userID == 0 {
+		log.Println("❌ LikeVideo: Unauthorized - no userID in context")
+		ctx.StatusCode(iris.StatusUnauthorized)
+		ctx.JSON(iris.Map{"error": "unauthorized"})
+		return
+	}
+
 	var input struct {
 		VideoID uint `json:"videoID" validate:"required"`
 	}
@@ -481,12 +484,25 @@ func LikeVideo(ctx iris.Context) {
 		}
 	}
 
-	ctx.JSON(iris.Map{"success": true})
+	// Get updated likes count
+	var updatedVideo models.Video
+	if err := storage.DB.First(&updatedVideo, input.VideoID).Error; err == nil {
+		ctx.JSON(iris.Map{"success": true, "likesCount": updatedVideo.LikesCount})
+	} else {
+		ctx.JSON(iris.Map{"success": true})
+	}
 }
 
 func UnlikeVideo(ctx iris.Context) {
-	claims := jsonWT.Get(ctx).(*utils.AccessToken)
-	userID := claims.ID
+	// Get user ID from middleware context
+	userID, ok := ctx.Values().Get("userID").(uint)
+	if !ok || userID == 0 {
+		log.Println("❌ UnlikeVideo: Unauthorized - no userID in context")
+		ctx.StatusCode(iris.StatusUnauthorized)
+		ctx.JSON(iris.Map{"error": "unauthorized"})
+		return
+	}
+
 	var input struct {
 		VideoID uint `json:"videoID" validate:"required"`
 	}
@@ -497,12 +513,27 @@ func UnlikeVideo(ctx iris.Context) {
 
 	storage.DB.Where("video_id = ? AND user_id = ?", input.VideoID, userID).Delete(&models.VideoLike{})
 	storage.DB.Model(&models.Video{}).Where("id = ?", input.VideoID).UpdateColumn("likes_count", gorm.Expr("GREATEST(likes_count - 1, 0)"))
-	ctx.JSON(iris.Map{"success": true})
+
+	// Get updated likes count
+	var video models.Video
+	if err := storage.DB.First(&video, input.VideoID).Error; err == nil {
+		log.Printf("✅ UnlikeVideo: User %d unliked video %d, new count: %d", userID, input.VideoID, video.LikesCount)
+		ctx.JSON(iris.Map{"success": true, "likesCount": video.LikesCount})
+	} else {
+		ctx.JSON(iris.Map{"success": true})
+	}
 }
 
 func SaveVideo(ctx iris.Context) {
-	claims := jsonWT.Get(ctx).(*utils.AccessToken)
-	userID := claims.ID
+	// Get user ID from middleware context
+	userID, ok := ctx.Values().Get("userID").(uint)
+	if !ok || userID == 0 {
+		log.Println("❌ SaveVideo: Unauthorized - no userID in context")
+		ctx.StatusCode(iris.StatusUnauthorized)
+		ctx.JSON(iris.Map{"error": "unauthorized"})
+		return
+	}
+
 	var input struct {
 		VideoID uint `json:"videoID" validate:"required"`
 	}
@@ -528,8 +559,15 @@ func SaveVideo(ctx iris.Context) {
 }
 
 func UnsaveVideo(ctx iris.Context) {
-	claims := jsonWT.Get(ctx).(*utils.AccessToken)
-	userID := claims.ID
+	// Get user ID from middleware context
+	userID, ok := ctx.Values().Get("userID").(uint)
+	if !ok || userID == 0 {
+		log.Println("❌ UnsaveVideo: Unauthorized - no userID in context")
+		ctx.StatusCode(iris.StatusUnauthorized)
+		ctx.JSON(iris.Map{"error": "unauthorized"})
+		return
+	}
+
 	var input struct {
 		VideoID uint `json:"videoID" validate:"required"`
 	}
@@ -551,8 +589,15 @@ func UnsaveVideo(ctx iris.Context) {
 }
 
 func CreateVideoComment(ctx iris.Context) {
-	claims := jsonWT.Get(ctx).(*utils.AccessToken)
-	userID := claims.ID
+	// Get user ID from middleware context
+	userID, ok := ctx.Values().Get("userID").(uint)
+	if !ok || userID == 0 {
+		log.Println("❌ CreateVideoComment: Unauthorized - no userID in context")
+		ctx.StatusCode(iris.StatusUnauthorized)
+		ctx.JSON(iris.Map{"error": "unauthorized"})
+		return
+	}
+
 	var input struct {
 		VideoID  uint   `json:"videoID" validate:"required"`
 		Content  string `json:"content" validate:"required"`
@@ -675,8 +720,15 @@ func GetVideoComments(ctx iris.Context) {
 }
 
 func UpdateVideoComment(ctx iris.Context) {
-	claims := jsonWT.Get(ctx).(*utils.AccessToken)
-	userID := claims.ID
+	// Get user ID from middleware context
+	userID, ok := ctx.Values().Get("userID").(uint)
+	if !ok || userID == 0 {
+		log.Println("❌ UpdateVideoComment: Unauthorized - no userID in context")
+		ctx.StatusCode(iris.StatusUnauthorized)
+		ctx.JSON(iris.Map{"error": "unauthorized"})
+		return
+	}
+
 	id := ctx.Params().Get("id")
 
 	var input struct {
@@ -706,8 +758,15 @@ func UpdateVideoComment(ctx iris.Context) {
 }
 
 func DeleteVideoComment(ctx iris.Context) {
-	claims := jsonWT.Get(ctx).(*utils.AccessToken)
-	userID := claims.ID
+	// Get user ID from middleware context
+	userID, ok := ctx.Values().Get("userID").(uint)
+	if !ok || userID == 0 {
+		log.Println("❌ DeleteVideoComment: Unauthorized - no userID in context")
+		ctx.StatusCode(iris.StatusUnauthorized)
+		ctx.JSON(iris.Map{"error": "unauthorized"})
+		return
+	}
+
 	id := ctx.Params().Get("id")
 
 	var comment models.VideoComment
@@ -735,8 +794,15 @@ func DeleteVideoComment(ctx iris.Context) {
 }
 
 func LikeVideoComment(ctx iris.Context) {
-	claims := jsonWT.Get(ctx).(*utils.AccessToken)
-	userID := claims.ID
+	// Get user ID from middleware context
+	userID, ok := ctx.Values().Get("userID").(uint)
+	if !ok || userID == 0 {
+		log.Println("❌ LikeVideoComment: Unauthorized - no userID in context")
+		ctx.StatusCode(iris.StatusUnauthorized)
+		ctx.JSON(iris.Map{"error": "unauthorized"})
+		return
+	}
+
 	var input struct {
 		CommentID uint `json:"commentID" validate:"required"`
 	}
@@ -755,6 +821,7 @@ func LikeVideoComment(ctx iris.Context) {
 	// Get updated likes count
 	var comment models.VideoComment
 	if err := storage.DB.First(&comment, input.CommentID).Error; err == nil {
+		log.Printf("✅ LikeVideoComment: User %d liked comment %d, new count: %d", userID, input.CommentID, comment.LikesCount)
 		ctx.JSON(iris.Map{"success": true, "likesCount": comment.LikesCount})
 	} else {
 		ctx.JSON(iris.Map{"success": true})
@@ -762,8 +829,15 @@ func LikeVideoComment(ctx iris.Context) {
 }
 
 func UnlikeVideoComment(ctx iris.Context) {
-	claims := jsonWT.Get(ctx).(*utils.AccessToken)
-	userID := claims.ID
+	// Get user ID from middleware context
+	userID, ok := ctx.Values().Get("userID").(uint)
+	if !ok || userID == 0 {
+		log.Println("❌ UnlikeVideoComment: Unauthorized - no userID in context")
+		ctx.StatusCode(iris.StatusUnauthorized)
+		ctx.JSON(iris.Map{"error": "unauthorized"})
+		return
+	}
+
 	var input struct {
 		CommentID uint `json:"commentID" validate:"required"`
 	}
@@ -778,6 +852,7 @@ func UnlikeVideoComment(ctx iris.Context) {
 	// Get updated likes count
 	var comment models.VideoComment
 	if err := storage.DB.First(&comment, input.CommentID).Error; err == nil {
+		log.Printf("✅ UnlikeVideoComment: User %d unliked comment %d, new count: %d", userID, input.CommentID, comment.LikesCount)
 		ctx.JSON(iris.Map{"success": true, "likesCount": comment.LikesCount})
 	} else {
 		ctx.JSON(iris.Map{"success": true})
@@ -786,8 +861,15 @@ func UnlikeVideoComment(ctx iris.Context) {
 
 // DeleteVideo deletes a video owned by the requester
 func DeleteVideo(ctx iris.Context) {
-	claims := jsonWT.Get(ctx).(*utils.AccessToken)
-	userID := claims.ID
+	// Get user ID from middleware context
+	userID, ok := ctx.Values().Get("userID").(uint)
+	if !ok || userID == 0 {
+		log.Println("❌ DeleteVideo: Unauthorized - no userID in context")
+		ctx.StatusCode(iris.StatusUnauthorized)
+		ctx.JSON(iris.Map{"error": "unauthorized"})
+		return
+	}
+
 	id := ctx.Params().Get("id")
 
 	// Ensure ownership
@@ -806,8 +888,14 @@ func DeleteVideo(ctx iris.Context) {
 
 // GetLikedVideos returns videos liked by the authenticated user
 func GetLikedVideos(ctx iris.Context) {
-	claims := jsonWT.Get(ctx).(*utils.AccessToken)
-	userID := claims.ID
+	// Get user ID from middleware context
+	userID, ok := ctx.Values().Get("userID").(uint)
+	if !ok || userID == 0 {
+		log.Println("❌ GetLikedVideos: Unauthorized - no userID in context")
+		ctx.StatusCode(iris.StatusUnauthorized)
+		ctx.JSON(iris.Map{"error": "unauthorized"})
+		return
+	}
 
 	var videos []models.Video
 	err := storage.DB.
@@ -824,8 +912,14 @@ func GetLikedVideos(ctx iris.Context) {
 
 // GetSavedVideos returns videos saved by the authenticated user
 func GetSavedVideos(ctx iris.Context) {
-	claims := jsonWT.Get(ctx).(*utils.AccessToken)
-	userID := claims.ID
+	// Get user ID from middleware context
+	userID, ok := ctx.Values().Get("userID").(uint)
+	if !ok || userID == 0 {
+		log.Println("❌ GetSavedVideos: Unauthorized - no userID in context")
+		ctx.StatusCode(iris.StatusUnauthorized)
+		ctx.JSON(iris.Map{"error": "unauthorized"})
+		return
+	}
 
 	var videos []models.Video
 	err := storage.DB.
@@ -957,9 +1051,14 @@ func GetVideoViewers(ctx iris.Context) {
 		return
 	}
 
-	// Verify user owns the video
-	claims := jsonWT.Get(ctx).(*utils.AccessToken)
-	userID := claims.ID
+	// Verify user owns the video - Get user ID from middleware context
+	userID, ok := ctx.Values().Get("userID").(uint)
+	if !ok || userID == 0 {
+		log.Println("❌ GetVideoViewers: Unauthorized - no userID in context")
+		ctx.StatusCode(iris.StatusUnauthorized)
+		ctx.JSON(iris.Map{"error": "unauthorized"})
+		return
+	}
 	fmt.Printf("🔍 Requesting user ID: %d\n", userID)
 
 	var video models.Video

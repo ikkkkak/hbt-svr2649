@@ -47,16 +47,31 @@ type PropertySaleVideoSave struct {
 }
 
 // PropertySaleVideoComment represents a comment on a property sale video
+// Note: PropertySaleVideoID stores the property sale ID (not a PropertySaleVideo record ID)
+// because property sale videos are synthetic (stored in PropertySale.Videos array, not as separate records)
 type PropertySaleVideoComment struct {
 	gorm.Model
-	PropertySaleVideoID uint                      `json:"propertySaleVideoID" gorm:"index;not null"`
-	PropertySaleVideo   PropertySaleVideo         `json:"propertySaleVideo" gorm:"foreignKey:PropertySaleVideoID"`
-	UserID              uint                      `json:"userID" gorm:"index;not null"`
-	User                User                      `json:"user" gorm:"foreignKey:UserID"`
-	Content             string                    `json:"content" gorm:"type:text;not null"`
-	ParentID            *uint                     `json:"parentID" gorm:"index"` // For replies
-	Parent              *PropertySaleVideoComment `json:"parent" gorm:"foreignKey:ParentID"`
-	LikesCount          int64                     `json:"likesCount" gorm:"default:0"`
+	PropertySaleVideoID uint                       `json:"propertySaleVideoID" gorm:"index;not null"` // Stores property sale ID
+	UserID              uint                       `json:"userID" gorm:"index;not null"`
+	User                User                       `json:"user" gorm:"foreignKey:UserID"`
+	Content             string                     `json:"content" gorm:"type:text;not null"`
+	Edited              bool                       `json:"edited" gorm:"default:false"`
+	ParentID            *uint                      `json:"parentID" gorm:"index"` // For replies
+	Parent              *PropertySaleVideoComment  `json:"parent" gorm:"foreignKey:ParentID"`
+	Replies             []PropertySaleVideoComment `json:"replies" gorm:"foreignKey:ParentID"`
+	LikesCount          int64                      `json:"likesCount" gorm:"default:0"`
+}
+
+// PropertySaleVideoCommentLike represents a like on a property sale video comment
+type PropertySaleVideoCommentLike struct {
+	gorm.Model
+	CommentID uint `json:"commentID" gorm:"index;not null"`
+	UserID    uint `json:"userID" gorm:"index;not null"`
+}
+
+// TableName specifies the table name for PropertySaleVideoCommentLike
+func (PropertySaleVideoCommentLike) TableName() string {
+	return "property_sale_video_comment_likes"
 }
 
 // PropertySaleVideoReport represents a report made against a property sale video

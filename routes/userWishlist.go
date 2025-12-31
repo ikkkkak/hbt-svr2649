@@ -3,12 +3,11 @@ package routes
 import (
 	"apartments-clone-server/models"
 	"apartments-clone-server/storage"
-	"apartments-clone-server/utils"
 	"encoding/json"
+	"log"
 	"net/http"
 
 	"github.com/kataras/iris/v12"
-	jsonWT "github.com/kataras/iris/v12/middleware/jwt"
 )
 
 type AddToWishlistInput struct {
@@ -17,16 +16,17 @@ type AddToWishlistInput struct {
 
 // GetUserWishlist - Get user's personal wishlist
 func GetUserWishlist(ctx iris.Context) {
-	tok := jsonWT.Get(ctx)
-	if tok == nil {
+	// Get user ID from middleware context
+	userID, ok := ctx.Values().Get("userID").(uint)
+	if !ok || userID == 0 {
+		log.Println("❌ GetUserWishlist: Unauthorized - no userID in context")
 		ctx.StopWithStatus(http.StatusUnauthorized)
 		return
 	}
-	user := tok.(*utils.AccessToken)
 
 	// Get user's saved properties
 	var userModel models.User
-	if err := storage.DB.First(&userModel, user.ID).Error; err != nil {
+	if err := storage.DB.First(&userModel, userID).Error; err != nil {
 		ctx.StopWithStatus(http.StatusNotFound)
 		return
 	}
@@ -58,12 +58,13 @@ func GetUserWishlist(ctx iris.Context) {
 
 // AddToUserWishlist - Add property to user's personal wishlist
 func AddToUserWishlist(ctx iris.Context) {
-	tok := jsonWT.Get(ctx)
-	if tok == nil {
+	// Get user ID from middleware context
+	userID, ok := ctx.Values().Get("userID").(uint)
+	if !ok || userID == 0 {
+		log.Println("❌ AddToUserWishlist: Unauthorized - no userID in context")
 		ctx.StopWithStatus(http.StatusUnauthorized)
 		return
 	}
-	user := tok.(*utils.AccessToken)
 
 	var input AddToWishlistInput
 	if err := ctx.ReadJSON(&input); err != nil {
@@ -80,7 +81,7 @@ func AddToUserWishlist(ctx iris.Context) {
 
 	// Get user's current saved properties
 	var userModel models.User
-	if err := storage.DB.First(&userModel, user.ID).Error; err != nil {
+	if err := storage.DB.First(&userModel, userID).Error; err != nil {
 		ctx.StopWithStatus(http.StatusNotFound)
 		return
 	}
@@ -123,12 +124,13 @@ func AddToUserWishlist(ctx iris.Context) {
 
 // RemoveFromUserWishlist - Remove property from user's personal wishlist
 func RemoveFromUserWishlist(ctx iris.Context) {
-	tok := jsonWT.Get(ctx)
-	if tok == nil {
+	// Get user ID from middleware context
+	userID, ok := ctx.Values().Get("userID").(uint)
+	if !ok || userID == 0 {
+		log.Println("❌ RemoveFromUserWishlist: Unauthorized - no userID in context")
 		ctx.StopWithStatus(http.StatusUnauthorized)
 		return
 	}
-	user := tok.(*utils.AccessToken)
 
 	propertyID, err := ctx.Params().GetUint("propertyID")
 	if err != nil {
@@ -138,7 +140,7 @@ func RemoveFromUserWishlist(ctx iris.Context) {
 
 	// Get user's current saved properties
 	var userModel models.User
-	if err := storage.DB.First(&userModel, user.ID).Error; err != nil {
+	if err := storage.DB.First(&userModel, userID).Error; err != nil {
 		ctx.StopWithStatus(http.StatusNotFound)
 		return
 	}

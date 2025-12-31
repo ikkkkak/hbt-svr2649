@@ -7,9 +7,10 @@ This script translates all property titles, descriptions, and neighborhood descr
 
 ## Prerequisites
 
-1. **LibreTranslate Server**: Make sure LibreTranslate is running
-   - Default URL: `https://librerender.onrender.com/translate`
-   - Or set `LIBRETRANSLATE_URL` environment variable
+1. **MarianMT API Server**: Make sure MarianMT API is running
+   - Default URL: `https://librerender-1.onrender.com/translate`
+   - Or set `MARIANMT_URL` environment variable
+   - Note: Render cold starts may take up to 60 seconds
 
 2. **Database Connection**: The script uses the same database connection as the main server
    - Requires `DB_CONNECTION_STRING` environment variable
@@ -36,8 +37,8 @@ go build -o translate_properties translate_all_properties.go
 # Required
 DB_CONNECTION_STRING=postgres://user:password@localhost:5432/dbname
 
-# Optional (defaults to https://librerender.onrender.com/translate)
-LIBRETRANSLATE_URL=https://librerender.onrender.com/translate
+# Optional (defaults to https://librerender-1.onrender.com/translate)
+MARIANMT_URL=https://librerender-1.onrender.com/translate
 ```
 
 ## What It Does
@@ -78,7 +79,7 @@ LIBRETRANSLATE_URL=https://librerender.onrender.com/translate
 
 ```
 🚀 Starting translation script for all properties...
-✅ Using LibreTranslate URL: https://librerender.onrender.com/translate
+✅ Using MarianMT URL: https://librerender-1.onrender.com/translate
 
 📦 Processing Properties (Rent)...
 Found 150 properties to process
