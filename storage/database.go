@@ -126,6 +126,12 @@ func performMigrations(db *gorm.DB) {
 		// Host Mode Tracking
 		&models.HostModeSwitch{},
 		&models.HostModeInteraction{},
+<<<<<<< HEAD
+=======
+		// User Behavior Tracking
+		&models.UserBehavior{},
+		&models.AnonymousUserPreference{}, // Anonymous user preferences for intelligent notifications
+>>>>>>> 4698d88 (AFTER ADDING NOTIFICATION PROEPRTIES TO USERS)
 	)
 
 	// Allow direct chat groups without an experience by making experience_id nullable
@@ -395,6 +401,64 @@ func performMigrations(db *gorm.DB) {
 			END IF;
 		END $$;
 	`)
+<<<<<<< HEAD
+=======
+
+	// Add favorite city columns to users table for intelligent notifications
+	db.Exec(`
+		DO $$ 
+		BEGIN
+			-- Add favorite_city_id column if it doesn't exist
+			IF NOT EXISTS (
+				SELECT 1 FROM information_schema.columns 
+				WHERE table_name = 'users' AND column_name = 'favorite_city_id'
+			) THEN
+				ALTER TABLE users ADD COLUMN favorite_city_id INTEGER;
+				CREATE INDEX IF NOT EXISTS idx_users_favorite_city_id ON users(favorite_city_id);
+			END IF;
+
+			-- Add favorite_city_name column if it doesn't exist
+			IF NOT EXISTS (
+				SELECT 1 FROM information_schema.columns 
+				WHERE table_name = 'users' AND column_name = 'favorite_city_name'
+			) THEN
+				ALTER TABLE users ADD COLUMN favorite_city_name VARCHAR(255);
+			END IF;
+
+			-- Add favorite_zone_id column if it doesn't exist
+			IF NOT EXISTS (
+				SELECT 1 FROM information_schema.columns 
+				WHERE table_name = 'users' AND column_name = 'favorite_zone_id'
+			) THEN
+				ALTER TABLE users ADD COLUMN favorite_zone_id INTEGER;
+				CREATE INDEX IF NOT EXISTS idx_users_favorite_zone_id ON users(favorite_zone_id);
+			END IF;
+
+			-- Add favorite_zone_name column if it doesn't exist
+			IF NOT EXISTS (
+				SELECT 1 FROM information_schema.columns 
+				WHERE table_name = 'users' AND column_name = 'favorite_zone_name'
+			) THEN
+				ALTER TABLE users ADD COLUMN favorite_zone_name VARCHAR(255);
+			END IF;
+		END $$;
+	`)
+
+	// Add device_id column to notification_preferences table for anonymous user tracking
+	db.Exec(`
+		DO $$ 
+		BEGIN
+			-- Add device_id column if it doesn't exist
+			IF NOT EXISTS (
+				SELECT 1 FROM information_schema.columns 
+				WHERE table_name = 'notification_preferences' AND column_name = 'device_id'
+			) THEN
+				ALTER TABLE notification_preferences ADD COLUMN device_id VARCHAR(255);
+				CREATE INDEX IF NOT EXISTS idx_notification_preferences_device_id ON notification_preferences(device_id);
+			END IF;
+		END $$;
+	`)
+>>>>>>> 4698d88 (AFTER ADDING NOTIFICATION PROEPRTIES TO USERS)
 }
 
 func InitializeDB() *gorm.DB {

@@ -139,13 +139,22 @@ func main() {
 			&models.City{}, &models.Zone{}, &models.Quartier{},
 			&models.AIChatSession{}, &models.AIChatMessage{},
 			&models.DeviceRegistration{}, &models.DeviceSession{},
+<<<<<<< HEAD
+=======
+			&models.UserBehavior{}, // User behavior tracking for intelligent notifications
+			&models.AnonymousUserPreference{}, // Anonymous user preferences for intelligent notifications
+>>>>>>> 4698d88 (AFTER ADDING NOTIFICATION PROEPRTIES TO USERS)
 		); err != nil {
 			fmt.Printf("❌ Failed to migrate moderation tables: %v\n", err)
 		} else {
 			fmt.Println("✅ Tables migrated (chat_messages, hidden_properties, property_reports, user_flags, hidden_videos, property_sale_reports, landmark_reports, property_sale_videos, user_blocked_organizations, ai_chat_sessions, ai_chat_messages, device_registrations, device_sessions)")
 		}
 	}()
+<<<<<<< HEAD
 
+=======
+               
+>>>>>>> 4698d88 (AFTER ADDING NOTIFICATION PROEPRTIES TO USERS)
 	fmt.Println("🔧 Initializing S3...")
 	func() {
 		defer func() {
@@ -343,6 +352,17 @@ func main() {
 	// Routes
 	user := app.Party("/api/user")
 	{
+<<<<<<< HEAD
+=======
+		// User behavior tracking routes
+		user.Post("/behavior/track", optionalAuthMiddleware, routes.TrackUserBehavior)
+		user.Post("/favorite-city", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.SetFavoriteCity)
+		user.Get("/favorite-city", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.GetFavoriteCity)
+	}
+	// Debug endpoint to view behavior stats (public for debugging)
+	app.Get("/api/user/behavior/stats", routes.GetBehaviorStats)
+	{
+>>>>>>> 4698d88 (AFTER ADDING NOTIFICATION PROEPRTIES TO USERS)
 		user.Post("/check-exists", routes.CheckUserExists)
 		user.Post("/register", routes.Register)
 		user.Post("/login", routes.Login)
@@ -592,6 +612,10 @@ func main() {
 		notifications.Post("/register", func(ctx iris.Context) {
 			var req struct {
 				UserID      *uint  `json:"user_id"` // Nullable for anonymous users
+<<<<<<< HEAD
+=======
+				DeviceID    string `json:"device_id"` // Device identifier for anonymous users
+>>>>>>> 4698d88 (AFTER ADDING NOTIFICATION PROEPRTIES TO USERS)
 				PushToken   string `json:"push_token"`
 				Language    string `json:"language"`
 				Location    string `json:"location"`
@@ -607,13 +631,27 @@ func main() {
 				return
 			}
 
+<<<<<<< HEAD
 			fmt.Printf("📝 Received registration request: user_id=%v, language=%s, location=%s, push_token=%s\n",
 				req.UserID, req.Language, req.Location, req.PushToken[:20]+"...")
+=======
+			fmt.Printf("📝 Received registration request: user_id=%v, device_id=%s, language=%s, location=%s, push_token=%s\n",
+				req.UserID, func() string {
+					if req.DeviceID != "" && len(req.DeviceID) > 10 {
+						return req.DeviceID[:10] + "..."
+					}
+					return req.DeviceID
+				}(), req.Language, req.Location, req.PushToken[:20]+"...")
+>>>>>>> 4698d88 (AFTER ADDING NOTIFICATION PROEPRTIES TO USERS)
 
 			// Create or update notification preference in database
 			now := time.Now()
 			pref := models.NotificationPreference{
 				UserID:     req.UserID,
+<<<<<<< HEAD
+=======
+				DeviceID:   req.DeviceID,
+>>>>>>> 4698d88 (AFTER ADDING NOTIFICATION PROEPRTIES TO USERS)
 				PushToken:  req.PushToken,
 				Language:   req.Language,
 				Location:   req.Location,
@@ -646,6 +684,12 @@ func main() {
 				existingPref.Enabled = true
 				existingPref.LastActive = &now
 				existingPref.UserID = req.UserID // Update user ID in case user logged in
+<<<<<<< HEAD
+=======
+				if req.DeviceID != "" {
+					existingPref.DeviceID = req.DeviceID // Update device ID
+				}
+>>>>>>> 4698d88 (AFTER ADDING NOTIFICATION PROEPRTIES TO USERS)
 
 				if err := storage.DB.Save(&existingPref).Error; err != nil {
 					fmt.Printf("❌ Error updating notification preference: %v\n", err)

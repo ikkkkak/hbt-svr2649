@@ -454,6 +454,221 @@ func (ns *NotificationService) SendPropertyTourNotificationToHost(tourID, proper
 	return err
 }
 
+<<<<<<< HEAD
+=======
+// SendNewPropertyNotification sends notification to users when a new property matches their favorite city
+func (ns *NotificationService) SendNewPropertyNotification(propertyID uint, propertyTitle string, cityID *uint, cityName string, zoneID *uint, zoneName string, bedrooms int, bathrooms int, squareFootage int, imageURL string) error {
+	log.Printf("🔔 Sending new property notification for property %d in %s", propertyID, cityName)
+
+	// Find all logged-in users with favorite city matching this property
+	var users []models.User
+	query := storage.DB.Where("allows_notifications = ?", true)
+	
+	// Match by city or zone
+	if cityID != nil {
+		query = query.Where("(favorite_city_id = ? OR favorite_zone_id = ?)", *cityID, zoneID)
+	} else if cityName != "" {
+		query = query.Where("(favorite_city_name = ? OR favorite_zone_name = ?)", cityName, zoneName)
+	}
+
+	if err := query.Find(&users).Error; err != nil {
+		log.Printf("❌ Error finding users for notification: %v", err)
+		return err
+	}
+
+	log.Printf("📱 Found %d logged-in users to notify", len(users))
+
+	// Build notification content (needed for both logged-in and anonymous users)
+	details := fmt.Sprintf("%d bedrooms • %d bathrooms • %d m²", bedrooms, bathrooms, squareFootage)
+	if cityName != "" {
+		details += fmt.Sprintf(" • %s", cityName)
+	}
+	if zoneName != "" {
+		details += fmt.Sprintf(", %s", zoneName)
+	}
+
+	title := "🏠 New Property Available!"
+	body := fmt.Sprintf("%s\n%s", propertyTitle, details)
+
+	// Notification data for deep linking
+	data := NotificationData{
+		Type:       "new_property",
+		ID:         fmt.Sprintf("%d", propertyID),
+		PropertyID: fmt.Sprintf("%d", propertyID),
+		Screen:     "PropertySaleDetails",
+		Params:     fmt.Sprintf(`{"propertyId": %d}`, propertyID),
+		Action:     "view_property",
+	}
+
+	dataMap := map[string]string{
+		"type":       data.Type,
+		"id":         data.ID,
+		"propertyId": data.PropertyID,
+		"screen":     data.Screen,
+		"params":     data.Params,
+		"action":     data.Action,
+	}
+
+	// Initialize counters
+	var lastError error
+	successCount := 0
+
+	// Also find anonymous users with matching favorite city
+	var anonymousUsers []models.AnonymousUserPreference
+	anonQuery := storage.DB.Where("last_active >= ?", time.Now().AddDate(0, 0, -30))
+	if cityID != nil {
+		anonQuery = anonQuery.Where("(favorite_city_id = ? OR favorite_zone_id = ?)", *cityID, zoneID)
+	} else if cityName != "" {
+		anonQuery = anonQuery.Where("(favorite_city_name = ? OR favorite_zone_name = ?)", cityName, zoneName)
+	}
+	if err := anonQuery.Find(&anonymousUsers).Error; err == nil {
+		log.Printf("📱 Found %d anonymous users with matching preferences", len(anonymousUsers))
+		
+		// Get push tokens for anonymous users from NotificationPreference table
+		for _, anonUser := range anonymousUsers {
+			var prefs []models.NotificationPreference
+			prefQuery := storage.DB.Where("enabled = ?", true)
+			
+			// Match by device ID (direct match)
+			if anonUser.DeviceID != "" {
+				prefQuery = prefQuery.Where("device_id = ?", anonUser.DeviceID)
+			}
+			
+			// Also try to match by phone number if available
+			if anonUser.PhoneNumber != nil && *anonUser.PhoneNumber != "" {
+				prefQuery = prefQuery.Or("user_id IN (SELECT id FROM users WHERE phone_number = ?)", *anonUser.PhoneNumber)
+			}
+			
+			if err := prefQuery.Find(&prefs).Error; err == nil && len(prefs) > 0 {
+				log.Printf("📱 Found %d push tokens for anonymous device %s", len(prefs), func() string {
+					if len(anonUser.DeviceID) > 10 {
+						return anonUser.DeviceID[:10] + "..."
+					}
+					return anonUser.DeviceID
+				}())
+				
+				for _, pref := range prefs {
+					expoToken := pref.PushToken
+					if strings.Contains(expoToken, "|") {
+						expoToken = strings.Split(expoToken, "|")[0]
+					}
+					if err := utils.SendRichNotification(expoToken, title, body, imageURL, dataMap); err != nil {
+						deviceIDPreview := anonUser.DeviceID
+						if len(deviceIDPreview) > 10 {
+							deviceIDPreview = deviceIDPreview[:10]
+						}
+						log.Printf("⚠️ Failed to send notification to anonymous user (device: %s): %v", deviceIDPreview, err)
+					} else {
+						successCount++
+						log.Printf("✅ Sent notification to anonymous user (device: %s)", func() string {
+							if len(anonUser.DeviceID) > 10 {
+								return anonUser.DeviceID[:10] + "..."
+							}
+							return anonUser.DeviceID
+						}())
+					}
+				}
+			} else {
+				log.Printf("⚠️ No push tokens found for anonymous device %s", func() string {
+					if len(anonUser.DeviceID) > 10 {
+						return anonUser.DeviceID[:10] + "..."
+					}
+					return anonUser.DeviceID
+				}())
+			}
+		}
+	}
+
+	// Send to all matching logged-in users
+	for _, user := range users {
+		if user.AllowsNotifications == nil || !*user.AllowsNotifications {
+			continue
+		}
+
+		tokens, err := ns.getUserPushTokens(user.ID)
+		if err != nil {
+			log.Printf("⚠️ Failed to get tokens for user %d: %v", user.ID, err)
+			continue
+		}
+
+		for _, token := range tokens {
+			expoToken := token
+			if strings.Contains(token, "|") {
+				expoToken = strings.Split(token, "|")[0]
+			}
+
+			// Use rich notification with image
+			if err := utils.SendRichNotification(expoToken, title, body, imageURL, dataMap); err != nil {
+				log.Printf("⚠️ Failed to send notification to user %d: %v", user.ID, err)
+				lastError = err
+			} else {
+				successCount++
+			}
+		}
+	}
+
+	log.Printf("✅ Sent %d notifications successfully", successCount)
+	return lastError
+}
+
+// SendGenericPropertyNotification sends a generic property notification when personalization fails
+func (ns *NotificationService) SendGenericPropertyNotification(propertyID uint, propertyTitle string, cityName string, bedrooms int, bathrooms int, squareFootage int, imageURL string, userIDs []uint) error {
+	log.Printf("🔔 Sending generic property notification for property %d", propertyID)
+
+	details := fmt.Sprintf("%d bedrooms • %d bathrooms • %d m²", bedrooms, bathrooms, squareFootage)
+	if cityName != "" {
+		details += fmt.Sprintf(" • %s", cityName)
+	}
+
+	title := "🏠 New Property Available!"
+	body := fmt.Sprintf("%s\n%s", propertyTitle, details)
+
+	data := NotificationData{
+		Type:       "new_property",
+		ID:         fmt.Sprintf("%d", propertyID),
+		PropertyID: fmt.Sprintf("%d", propertyID),
+		Screen:     "PropertySaleDetails",
+		Params:     fmt.Sprintf(`{"propertyId": %d}`, propertyID),
+		Action:     "view_property",
+	}
+
+	dataMap := map[string]string{
+		"type":       data.Type,
+		"id":         data.ID,
+		"propertyId": data.PropertyID,
+		"screen":     data.Screen,
+		"params":     data.Params,
+		"action":     data.Action,
+	}
+
+	var lastError error
+	successCount := 0
+
+	for _, userID := range userIDs {
+		tokens, err := ns.getUserPushTokens(userID)
+		if err != nil {
+			continue
+		}
+
+		for _, token := range tokens {
+			expoToken := token
+			if strings.Contains(token, "|") {
+				expoToken = strings.Split(token, "|")[0]
+			}
+
+			if err := utils.SendRichNotification(expoToken, title, body, imageURL, dataMap); err != nil {
+				lastError = err
+			} else {
+				successCount++
+			}
+		}
+	}
+
+	log.Printf("✅ Sent %d generic notifications successfully", successCount)
+	return lastError
+}
+
+>>>>>>> 4698d88 (AFTER ADDING NOTIFICATION PROEPRTIES TO USERS)
 // Global notification service instance
 var NotificationServiceInstance = NewNotificationService()
 

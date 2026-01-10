@@ -20,6 +20,72 @@ import (
 	jwt "github.com/kataras/iris/v12/middleware/jwt"
 )
 
+<<<<<<< HEAD
+=======
+// triggerNewPropertyNotification sends notifications when a property is published
+func triggerNewPropertyNotification(property models.PropertySale) {
+	// Get first image URL for rich notification
+	var imageURL string
+	if len(property.Images) > 0 && property.Images[0] != "" {
+		imageURL = property.Images[0]
+	}
+
+	// Get city/zone names
+	cityName := property.City
+	zoneName := ""
+	if property.ZoneRef != nil {
+		zoneName = property.ZoneRef.Name
+	} else if property.ZoneID != nil {
+		var zone models.Zone
+		if err := storage.DB.First(&zone, *property.ZoneID).Error; err == nil {
+			zoneName = zone.Name
+		}
+	}
+
+	// Try to send targeted notifications first
+	err := services.NotificationServiceInstance.SendNewPropertyNotification(
+		property.ID,
+		property.Title,
+		property.CityID,
+		cityName,
+		property.ZoneID,
+		zoneName,
+		property.Bedrooms,
+		property.Bathrooms,
+		property.SquareFootage,
+		imageURL,
+	)
+
+	// If targeted notifications fail or no users match, send generic notifications
+	// This ensures we always notify some users even if personalization fails
+	if err != nil {
+		log.Printf("⚠️ Targeted notifications failed, sending generic notifications: %v", err)
+		
+		// Get all users with notifications enabled (fallback)
+		var users []models.User
+		if err := storage.DB.Where("allows_notifications = ?", true).
+			Limit(100). // Limit to avoid spamming too many users
+			Find(&users).Error; err == nil {
+			var userIDs []uint
+			for _, user := range users {
+				userIDs = append(userIDs, user.ID)
+			}
+			
+			services.NotificationServiceInstance.SendGenericPropertyNotification(
+				property.ID,
+				property.Title,
+				cityName,
+				property.Bedrooms,
+				property.Bathrooms,
+				property.SquareFootage,
+				imageURL,
+				userIDs,
+			)
+		}
+	}
+}
+
+>>>>>>> 4698d88 (AFTER ADDING NOTIFICATION PROEPRTIES TO USERS)
 // CreatePropertySale creates a new property for sale
 func CreatePropertySale(ctx iris.Context) {
 	userID := ctx.Values().Get("userID").(uint)
@@ -1063,6 +1129,12 @@ func PublishProperty(ctx iris.Context) {
 		return
 	}
 
+<<<<<<< HEAD
+=======
+	// Trigger notification to users with matching favorite city
+	go triggerNewPropertyNotification(property)
+
+>>>>>>> 4698d88 (AFTER ADDING NOTIFICATION PROEPRTIES TO USERS)
 	ctx.JSON(iris.Map{
 		"message":  "Property published successfully",
 		"property": property,
@@ -1099,6 +1171,12 @@ func AdminPublishProperty(ctx iris.Context) {
 		return
 	}
 
+<<<<<<< HEAD
+=======
+	// Trigger notification to users with matching favorite city
+	go triggerNewPropertyNotification(property)
+
+>>>>>>> 4698d88 (AFTER ADDING NOTIFICATION PROEPRTIES TO USERS)
 	ctx.JSON(iris.Map{"message": "Property published successfully", "property": property})
 }
 
