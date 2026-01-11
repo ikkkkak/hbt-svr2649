@@ -141,6 +141,7 @@ func main() {
 			&models.DeviceRegistration{}, &models.DeviceSession{},
 			&models.UserBehavior{}, // User behavior tracking for intelligent notifications
 			&models.AnonymousUserPreference{}, // Anonymous user preferences for intelligent notifications
+			&models.CrashLog{}, // Crash logs for error tracking
 		); err != nil {
 			fmt.Printf("❌ Failed to migrate moderation tables: %v\n", err)
 		} else {

@@ -5,9 +5,12 @@ import (
 	"apartments-clone-server/storage"
 	"apartments-clone-server/utils"
 	"encoding/json"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/kataras/iris/v12"
+	"github.com/kataras/iris/v12/middleware/jwt"
 	"gorm.io/gorm"
 )
 
@@ -32,22 +35,33 @@ func CreateCrashLog(ctx iris.Context) {
 	}
 
 	if err := ctx.ReadJSON(&payload); err != nil {
-		utils.SendError(ctx, iris.StatusBadRequest, "Invalid request body", err)
+		utils.JSONError(ctx, iris.StatusBadRequest, "invalid_payload", "Invalid request body")
 		return
 	}
 
 	// Validate required fields
 	if payload.Error == "" {
-		utils.SendError(ctx, iris.StatusBadRequest, "Error message is required", nil)
+		utils.JSONError(ctx, iris.StatusBadRequest, "invalid_payload", "Error message is required")
 		return
 	}
 
 	// Get user ID from token if available (optional)
+	// Try to extract from JWT token in Authorization header
 	var userID *uint
-	if token := ctx.GetHeader("Authorization"); token != "" {
-		userIDFromToken := utils.GetUserIDFromToken(token)
-		if userIDFromToken > 0 {
-			userID = &userIDFromToken
+	authHeader := ctx.GetHeader("Authorization")
+	if authHeader != "" && strings.HasPrefix(authHeader, "Bearer ") {
+		tokenStr := strings.TrimPrefix(authHeader, "Bearer ")
+		if tokenStr != "" {
+			// Use jwt middleware to verify and extract user ID
+			// Since this is a public endpoint, we'll try to verify but don't fail if invalid
+			verifier := jwt.NewVerifier(jwt.HS256, []byte(os.Getenv("ACCESS_TOKEN_SECRET")))
+			verifier.WithDefaultBlocklist()
+			if verifiedToken, err := verifier.VerifyToken([]byte(tokenStr)); err == nil && verifiedToken != nil {
+				var claims utils.AccessToken
+				if err := verifiedToken.Claims(&claims); err == nil && claims.ID > 0 {
+					userID = &claims.ID
+				}
+			}
 		}
 	}
 
@@ -71,7 +85,7 @@ func CreateCrashLog(ctx iris.Context) {
 	}
 
 	if err := storage.DB.Create(&crashLog).Error; err != nil {
-		utils.SendError(ctx, iris.StatusInternalServerError, "Failed to save crash log", err)
+		utils.JSONError(ctx, iris.StatusInternalServerError, "database_error", "Failed to save crash log")
 		return
 	}
 
@@ -128,7 +142,7 @@ func GetCrashLogs(ctx iris.Context) {
 		Limit(limit).
 		Offset(offset).
 		Find(&crashLogs).Error; err != nil {
-		utils.SendError(ctx, iris.StatusInternalServerError, "Failed to fetch crash logs", err)
+		utils.JSONError(ctx, iris.StatusInternalServerError, "database_error", "Failed to fetch crash logs")
 		return
 	}
 
@@ -165,16 +179,16 @@ func GetCrashLogs(ctx iris.Context) {
 func GetCrashLog(ctx iris.Context) {
 	id, err := ctx.Params().GetUint("id")
 	if err != nil {
-		utils.SendError(ctx, iris.StatusBadRequest, "Invalid crash log ID", err)
+		utils.JSONError(ctx, iris.StatusBadRequest, "invalid_id", "Invalid crash log ID")
 		return
 	}
 
 	var crashLog models.CrashLog
 	if err := storage.DB.Preload("User").First(&crashLog, id).Error; err != nil {
 		if err == gorm.ErrRecordNotFound {
-			utils.SendError(ctx, iris.StatusNotFound, "Crash log not found", err)
+			utils.JSONError(ctx, iris.StatusNotFound, "not_found", "Crash log not found")
 		} else {
-			utils.SendError(ctx, iris.StatusInternalServerError, "Failed to fetch crash log", err)
+			utils.JSONError(ctx, iris.StatusInternalServerError, "database_error", "Failed to fetch crash log")
 		}
 		return
 	}
@@ -199,7 +213,7 @@ func GetCrashLog(ctx iris.Context) {
 func UpdateCrashLog(ctx iris.Context) {
 	id, err := ctx.Params().GetUint("id")
 	if err != nil {
-		utils.SendError(ctx, iris.StatusBadRequest, "Invalid crash log ID", err)
+		utils.JSONError(ctx, iris.StatusBadRequest, "invalid_id", "Invalid crash log ID")
 		return
 	}
 
@@ -209,24 +223,29 @@ func UpdateCrashLog(ctx iris.Context) {
 	}
 
 	if err := ctx.ReadJSON(&payload); err != nil {
-		utils.SendError(ctx, iris.StatusBadRequest, "Invalid request body", err)
+		utils.JSONError(ctx, iris.StatusBadRequest, "invalid_payload", "Invalid request body")
 		return
 	}
 
 	var crashLog models.CrashLog
 	if err := storage.DB.First(&crashLog, id).Error; err != nil {
 		if err == gorm.ErrRecordNotFound {
-			utils.SendError(ctx, iris.StatusNotFound, "Crash log not found", err)
+			utils.JSONError(ctx, iris.StatusNotFound, "not_found", "Crash log not found")
 		} else {
-			utils.SendError(ctx, iris.StatusInternalServerError, "Failed to fetch crash log", err)
+			utils.JSONError(ctx, iris.StatusInternalServerError, "database_error", "Failed to fetch crash log")
 		}
 		return
 	}
 
-	// Get admin user ID
-	userID := utils.GetUserIDFromContext(ctx)
-	if userID == 0 {
-		utils.SendError(ctx, iris.StatusUnauthorized, "Unauthorized", nil)
+	// Get admin user ID from context (set by UserIDFromTokenMiddleware)
+	userIDInterface := ctx.Values().Get("userID")
+	if userIDInterface == nil {
+		utils.JSONError(ctx, iris.StatusUnauthorized, "unauthorized", "Unauthorized")
+		return
+	}
+	userID, ok := userIDInterface.(uint)
+	if !ok || userID == 0 {
+		utils.JSONError(ctx, iris.StatusUnauthorized, "unauthorized", "Unauthorized")
 		return
 	}
 
@@ -247,7 +266,7 @@ func UpdateCrashLog(ctx iris.Context) {
 	}
 
 	if err := storage.DB.Model(&crashLog).Updates(updates).Error; err != nil {
-		utils.SendError(ctx, iris.StatusInternalServerError, "Failed to update crash log", err)
+		utils.JSONError(ctx, iris.StatusInternalServerError, "database_error", "Failed to update crash log")
 		return
 	}
 
