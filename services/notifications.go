@@ -454,8 +454,6 @@ func (ns *NotificationService) SendPropertyTourNotificationToHost(tourID, proper
 	return err
 }
 
-<<<<<<< HEAD
-=======
 // SendNewPropertyNotification sends notification to users when a new property matches their favorite city
 func (ns *NotificationService) SendNewPropertyNotification(propertyID uint, propertyTitle string, cityID *uint, cityName string, zoneID *uint, zoneName string, bedrooms int, bathrooms int, squareFootage int, imageURL string) error {
 	log.Printf("🔔 Sending new property notification for property %d in %s", propertyID, cityName)
@@ -668,7 +666,6 @@ func (ns *NotificationService) SendGenericPropertyNotification(propertyID uint, 
 	return lastError
 }
 
->>>>>>> 4698d88 (AFTER ADDING NOTIFICATION PROEPRTIES TO USERS)
 // Global notification service instance
 var NotificationServiceInstance = NewNotificationService()
 

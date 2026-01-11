@@ -37,8 +37,6 @@ func SendNotification(pushToken string, title string, body string, data map[stri
 
 	return nil
 }
-<<<<<<< HEAD
-=======
 
 // SendRichNotification sends a notification with an image attachment
 // Image URL should be publicly accessible
@@ -80,4 +78,3 @@ func SendRichNotification(pushToken string, title string, body string, imageURL 
 
 	return nil
 }
->>>>>>> 4698d88 (AFTER ADDING NOTIFICATION PROEPRTIES TO USERS)

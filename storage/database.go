@@ -100,6 +100,7 @@ func performMigrations(db *gorm.DB) {
 		&models.Landmark{},
 		&models.NotificationPreference{},
 		&models.MarketingDevice{},
+		&models.CrashLog{},
 		// Video Reporting System Models
 		&models.VideoReport{},
 		&models.UserFlag{},
@@ -126,12 +127,9 @@ func performMigrations(db *gorm.DB) {
 		// Host Mode Tracking
 		&models.HostModeSwitch{},
 		&models.HostModeInteraction{},
-<<<<<<< HEAD
-=======
 		// User Behavior Tracking
 		&models.UserBehavior{},
 		&models.AnonymousUserPreference{}, // Anonymous user preferences for intelligent notifications
->>>>>>> 4698d88 (AFTER ADDING NOTIFICATION PROEPRTIES TO USERS)
 	)
 
 	// Allow direct chat groups without an experience by making experience_id nullable
@@ -401,8 +399,6 @@ func performMigrations(db *gorm.DB) {
 			END IF;
 		END $$;
 	`)
-<<<<<<< HEAD
-=======
 
 	// Add favorite city columns to users table for intelligent notifications
 	db.Exec(`
@@ -458,7 +454,6 @@ func performMigrations(db *gorm.DB) {
 			END IF;
 		END $$;
 	`)
->>>>>>> 4698d88 (AFTER ADDING NOTIFICATION PROEPRTIES TO USERS)
 }
 
 func InitializeDB() *gorm.DB {

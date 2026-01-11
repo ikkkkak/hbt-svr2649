@@ -9,10 +9,7 @@ import (
 type NotificationPreference struct {
 	ID                   uint           `json:"id" gorm:"primaryKey"`
 	UserID               *uint          `json:"user_id" gorm:"index"` // Nullable for anonymous users
-<<<<<<< HEAD
-=======
 	DeviceID             string         `json:"device_id" gorm:"type:varchar(255);index"` // Device identifier for anonymous users
->>>>>>> 4698d88 (AFTER ADDING NOTIFICATION PROEPRTIES TO USERS)
 	PushToken            string         `json:"push_token" gorm:"not null;index"`
 	Language             string         `json:"language" gorm:"not null;default:'en'"`
 	Location             string         `json:"location" gorm:"not null"`

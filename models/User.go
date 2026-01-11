@@ -34,13 +34,10 @@ type User struct {
 	IDBackImage         string         `json:"idBackImage"`
 	SelfieImage         string         `json:"selfieImage"`
 	Role                string         `json:"role" gorm:"type:varchar(20);default:user;index"` // user, host, admin, super_admin
-<<<<<<< HEAD
-=======
 	FavoriteCityID      *uint        `json:"favoriteCityId" gorm:"index"`
 	FavoriteCityName    string         `json:"favoriteCityName" gorm:"type:varchar(255)"`
 	FavoriteZoneID      *uint          `json:"favoriteZoneId" gorm:"index"`
 	FavoriteZoneName    string         `json:"favoriteZoneName" gorm:"type:varchar(255)"`
->>>>>>> 4698d88 (AFTER ADDING NOTIFICATION PROEPRTIES TO USERS)
 }
 
 // Custom JSON marshaling to handle JSON fields properly

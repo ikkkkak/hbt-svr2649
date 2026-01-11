@@ -20,8 +20,6 @@ import (
 	jwt "github.com/kataras/iris/v12/middleware/jwt"
 )
 
-<<<<<<< HEAD
-=======
 // triggerNewPropertyNotification sends notifications when a property is published
 func triggerNewPropertyNotification(property models.PropertySale) {
 	// Get first image URL for rich notification
@@ -85,7 +83,6 @@ func triggerNewPropertyNotification(property models.PropertySale) {
 	}
 }
 
->>>>>>> 4698d88 (AFTER ADDING NOTIFICATION PROEPRTIES TO USERS)
 // CreatePropertySale creates a new property for sale
 func CreatePropertySale(ctx iris.Context) {
 	userID := ctx.Values().Get("userID").(uint)
@@ -1129,12 +1126,9 @@ func PublishProperty(ctx iris.Context) {
 		return
 	}
 
-<<<<<<< HEAD
-=======
 	// Trigger notification to users with matching favorite city
 	go triggerNewPropertyNotification(property)
 
->>>>>>> 4698d88 (AFTER ADDING NOTIFICATION PROEPRTIES TO USERS)
 	ctx.JSON(iris.Map{
 		"message":  "Property published successfully",
 		"property": property,
@@ -1171,12 +1165,9 @@ func AdminPublishProperty(ctx iris.Context) {
 		return
 	}
 
-<<<<<<< HEAD
-=======
 	// Trigger notification to users with matching favorite city
 	go triggerNewPropertyNotification(property)
 
->>>>>>> 4698d88 (AFTER ADDING NOTIFICATION PROEPRTIES TO USERS)
 	ctx.JSON(iris.Map{"message": "Property published successfully", "property": property})
 }
 
