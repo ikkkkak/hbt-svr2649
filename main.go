@@ -387,6 +387,11 @@ func main() {
 		user.Get("/wishlist", accessTokenVerifierMiddleware, routes.GetUserWishlist)
 		user.Post("/wishlist", accessTokenVerifierMiddleware, routes.AddToUserWishlist)
 		user.Delete("/wishlist/{propertyID:uint}", accessTokenVerifierMiddleware, routes.RemoveFromUserWishlist)
+		// Property Sale Wishlist
+		user.Get("/wishlist/property-sales", accessTokenVerifierMiddleware, routes.GetUserPropertySaleWishlist)
+		user.Post("/wishlist/property-sales", accessTokenVerifierMiddleware, routes.AddPropertySaleToWishlist)
+		user.Delete("/wishlist/property-sales/{propertySaleID:uint}", accessTokenVerifierMiddleware, routes.RemovePropertySaleFromWishlist)
+		user.Delete("/wishlist/{propertyID:uint}", accessTokenVerifierMiddleware, routes.RemoveFromUserWishlist)
 
 		// Host Mode Tracking routes
 		user.Post("/host-mode/switch", accessTokenVerifierMiddleware, routes.RecordHostModeSwitch)
@@ -852,6 +857,9 @@ func main() {
 		video.Get("/saved", accessTokenVerifierMiddleware, routes.GetSavedVideos)
 		video.Post("/{videoID:uint}/view", optionalAuthMiddleware, routes.RecordVideoView)
 		video.Get("/{videoID:uint}/viewers", accessTokenVerifierMiddleware, routes.GetVideoViewers)
+		video.Get("/unseen", optionalAuthMiddleware, routes.GetUnseenVideos)
+		video.Post("/mark-all-viewed", optionalAuthMiddleware, routes.MarkAllVideosAsViewed)
+		video.Get("/count", routes.GetTotalVideoCount)
 	}
 
 	// Property Sale Videos routes

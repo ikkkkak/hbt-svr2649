@@ -440,6 +440,20 @@ func performMigrations(db *gorm.DB) {
 		END $$;
 	`)
 
+	// Add saved_property_sales column to users table for property sale favorites
+	db.Exec(`
+		DO $$ 
+		BEGIN
+			-- Add saved_property_sales column if it doesn't exist
+			IF NOT EXISTS (
+				SELECT 1 FROM information_schema.columns 
+				WHERE table_name = 'users' AND column_name = 'saved_property_sales'
+			) THEN
+				ALTER TABLE users ADD COLUMN saved_property_sales JSONB DEFAULT '[]'::jsonb;
+			END IF;
+		END $$;
+	`)
+
 	// Add device_id column to notification_preferences table for anonymous user tracking
 	db.Exec(`
 		DO $$ 
@@ -451,6 +465,21 @@ func performMigrations(db *gorm.DB) {
 			) THEN
 				ALTER TABLE notification_preferences ADD COLUMN device_id VARCHAR(255);
 				CREATE INDEX IF NOT EXISTS idx_notification_preferences_device_id ON notification_preferences(device_id);
+			END IF;
+		END $$;
+	`)
+
+	// Add view_count column to property_sales table for tracking property views
+	db.Exec(`
+		DO $$ 
+		BEGIN
+			-- Add view_count column if it doesn't exist
+			IF NOT EXISTS (
+				SELECT 1 FROM information_schema.columns 
+				WHERE table_name = 'property_sales' AND column_name = 'view_count'
+			) THEN
+				ALTER TABLE property_sales ADD COLUMN view_count BIGINT DEFAULT 0;
+				CREATE INDEX IF NOT EXISTS idx_property_sales_view_count ON property_sales(view_count);
 			END IF;
 		END $$;
 	`)

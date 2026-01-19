@@ -18,6 +18,7 @@ type ExpoMessage struct {
 	Body     string                 `json:"body,omitempty"`
 	Priority string                 `json:"priority,omitempty"`
 	Data     map[string]interface{} `json:"data,omitempty"` // Custom data including image/avatar URL
+	Image    string                 `json:"image,omitempty"` // Native image support for iOS/Android (Expo Push API v2)
 	// iOS-specific fields
 	Badge *int `json:"badge,omitempty"`
 	// Android-specific fields
@@ -25,12 +26,13 @@ type ExpoMessage struct {
 }
 
 func SendExpoPush(tokens []string, title, body string) error {
-	return SendExpoPushWithImage(tokens, title, body, "")
+	return SendExpoPushWithImage(tokens, title, body, "", nil)
 }
 
 // SendExpoPushWithImage sends Expo push notifications with optional image/avatar URL
 // imageURL: URL to sender's avatar (shown instead of app icon)
-func SendExpoPushWithImage(tokens []string, title, body, imageURL string) error {
+// data: Optional custom data map for deep linking (can be nil)
+func SendExpoPushWithImage(tokens []string, title, body, imageURL string, data map[string]string) error {
 	if len(tokens) == 0 {
 		return nil
 	}
@@ -49,20 +51,34 @@ func SendExpoPushWithImage(tokens []string, title, body, imageURL string) error 
 	var payload []ExpoMessage
 	for _, t := range tokens {
 		msg := ExpoMessage{
-			To:       t,
-			Sound:    "default",
-			Title:    title,
-			Body:     body,
-			Priority: "high",
+			To:        t,
+			Sound:     "default",
+			Title:     title,
+			Body:      body,
+			Priority:  "high",
 			ChannelID: "default",
 		}
-		// Add image URL to data payload for Expo to handle
-		if imageURL != "" {
-			msg.Data = map[string]interface{}{
-				"imageURL":  imageURL,
-				"avatarURL": imageURL, // Both keys for compatibility
-				"type":      "message", // Notification type
+		// Add image URL - Native Expo Push API v2 image support for iOS/Android
+		// The image field displays the image directly in the notification
+		msg.Data = make(map[string]interface{})
+		
+		// Merge custom data if provided
+		if data != nil {
+			for k, v := range data {
+				msg.Data[k] = v
 			}
+		}
+		
+		if imageURL != "" {
+			msg.Image = imageURL // Native image support - displays in notification on iOS/Android
+			// Also include image URL in data for client-side handling
+			msg.Data["imageURL"] = imageURL
+			msg.Data["avatarURL"] = imageURL // Both keys for compatibility
+		}
+		
+		// Set default type if not provided
+		if _, exists := msg.Data["type"]; !exists {
+			msg.Data["type"] = "property"
 		}
 		payload = append(payload, msg)
 	}

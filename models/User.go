@@ -24,6 +24,7 @@ type User struct {
 	Properties          []Property     `json:"properties" gorm:"foreignKey:HostID;references:ID"`
 	SavedProperties     datatypes.JSON `json:"savedProperties"`
 	SavedExperiences    datatypes.JSON `json:"savedExperiences"`
+	SavedPropertySales  datatypes.JSON `json:"savedPropertySales"`
 	PushTokens          datatypes.JSON `json:"pushTokens"`
 	AllowsNotifications *bool          `json:"allowsNotifications"`
 	IsVerified          *bool          `json:"isVerified"`
@@ -44,18 +45,20 @@ type User struct {
 func (u *User) MarshalJSON() ([]byte, error) {
 	type Alias User
 	aux := &struct {
-		Languages        []string `json:"languages,omitempty"`
-		Skills           []string `json:"skills,omitempty"`
-		SavedProperties  []int    `json:"savedProperties,omitempty"`
-		SavedExperiences []int    `json:"savedExperiences,omitempty"`
-		PushTokens       []string `json:"pushTokens,omitempty"`
+		Languages         []string `json:"languages,omitempty"`
+		Skills            []string `json:"skills,omitempty"`
+		SavedProperties   []int    `json:"savedProperties,omitempty"`
+		SavedExperiences  []int    `json:"savedExperiences,omitempty"`
+		SavedPropertySales []int    `json:"savedPropertySales,omitempty"`
+		PushTokens        []string `json:"pushTokens,omitempty"`
 		*Alias
 	}{
-		Languages:        []string{},
-		Skills:           []string{},
-		SavedProperties:  []int{},
-		SavedExperiences: []int{},
-		PushTokens:       []string{},
+		Languages:          []string{},
+		Skills:             []string{},
+		SavedProperties:    []int{},
+		SavedExperiences:   []int{},
+		SavedPropertySales: []int{},
+		PushTokens:         []string{},
 		Alias:            (*Alias)(u),
 	}
 
@@ -88,6 +91,14 @@ func (u *User) MarshalJSON() ([]byte, error) {
 		var savedExperiences []int
 		if err := json.Unmarshal(u.SavedExperiences, &savedExperiences); err == nil {
 			aux.SavedExperiences = savedExperiences
+		}
+	}
+
+	// Parse SavedPropertySales JSON
+	if u.SavedPropertySales != nil {
+		var savedPropertySales []int
+		if err := json.Unmarshal(u.SavedPropertySales, &savedPropertySales); err == nil {
+			aux.SavedPropertySales = savedPropertySales
 		}
 	}
 

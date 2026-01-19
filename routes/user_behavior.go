@@ -2,6 +2,7 @@ package routes
 
 import (
 	"apartments-clone-server/models"
+	"apartments-clone-server/services"
 	"apartments-clone-server/storage"
 	"fmt"
 	"log"
@@ -139,6 +140,14 @@ func SetFavoriteCity(ctx iris.Context) {
 		ctx.JSON(iris.Map{"error": "Failed to update favorite city"})
 		return
 	}
+
+	// Notify user about existing properties in their favorite city (background task)
+	go func() {
+		log.Printf("🔔 Notifying user %d about existing properties in favorite city: %s", userID, input.CityName)
+		if err := services.NotificationServiceInstance.NotifyUserAboutExistingProperties(userID, input.CityID, input.CityName, input.ZoneID, input.ZoneName); err != nil {
+			log.Printf("⚠️ Failed to notify user about existing properties: %v", err)
+		}
+	}()
 
 	ctx.StatusCode(http.StatusOK)
 	ctx.JSON(iris.Map{

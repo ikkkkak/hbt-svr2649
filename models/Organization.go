@@ -155,6 +155,9 @@ type PropertySale struct {
 	IsVerified  bool   `json:"is_verified" gorm:"default:false"`
 	IsPublished bool   `json:"is_published" gorm:"default:false"`
 	IsFeatured  bool   `json:"is_featured" gorm:"default:false"`
+	
+	// View Count - Tracks total views (excluding owner views)
+	ViewCount int64 `json:"view_count" gorm:"default:0;index"`
 
 	// Verification Information
 	VerifiedBy        *uint      `json:"verified_by"`

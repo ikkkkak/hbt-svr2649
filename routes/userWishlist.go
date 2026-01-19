@@ -177,3 +177,182 @@ func RemoveFromUserWishlist(ctx iris.Context) {
 
 	ctx.JSON(iris.Map{"success": true, "message": "Property removed from wishlist"})
 }
+
+// ============================================
+// PROPERTY SALE WISHLIST ENDPOINTS
+// ============================================
+
+type AddPropertySaleToWishlistInput struct {
+	PropertySaleID uint `json:"propertySaleID"`
+}
+
+// GetUserPropertySaleWishlist - Get user's saved property sales
+func GetUserPropertySaleWishlist(ctx iris.Context) {
+	// Get user ID from middleware context
+	userID, ok := ctx.Values().Get("userID").(uint)
+	if !ok || userID == 0 {
+		log.Println("❌ GetUserPropertySaleWishlist: Unauthorized - no userID in context")
+		ctx.StopWithStatus(http.StatusUnauthorized)
+		return
+	}
+
+	// Get user's saved property sales
+	var userModel models.User
+	if err := storage.DB.First(&userModel, userID).Error; err != nil {
+		ctx.StopWithStatus(http.StatusNotFound)
+		return
+	}
+
+	// Parse saved property sale IDs
+	var savedPropertySaleIDs []uint
+	if userModel.SavedPropertySales != nil {
+		if err := json.Unmarshal(userModel.SavedPropertySales, &savedPropertySaleIDs); err != nil {
+			log.Printf("⚠️ Failed to parse SavedPropertySales: %v", err)
+		}
+	}
+
+	// If no saved property sales, return empty array
+	if len(savedPropertySaleIDs) == 0 {
+		ctx.JSON(iris.Map{"success": true, "properties": []models.PropertySale{}})
+		return
+	}
+
+	// Fetch property sales with their details
+	var propertySales []models.PropertySale
+	if err := storage.DB.Where("id IN ?", savedPropertySaleIDs).
+		Preload("ZoneRef").
+		Preload("Organization").
+		Find(&propertySales).Error; err != nil {
+		ctx.StopWithStatus(http.StatusInternalServerError)
+		return
+	}
+
+	ctx.JSON(iris.Map{"success": true, "properties": propertySales})
+}
+
+// AddPropertySaleToWishlist - Add property sale to user's wishlist
+func AddPropertySaleToWishlist(ctx iris.Context) {
+	// Get user ID from middleware context
+	userID, ok := ctx.Values().Get("userID").(uint)
+	if !ok || userID == 0 {
+		log.Println("❌ AddPropertySaleToWishlist: Unauthorized - no userID in context")
+		ctx.StopWithStatus(http.StatusUnauthorized)
+		return
+	}
+
+	var input AddPropertySaleToWishlistInput
+	if err := ctx.ReadJSON(&input); err != nil {
+		ctx.StopWithStatus(http.StatusBadRequest)
+		return
+	}
+
+	// Verify property sale exists
+	var propertySale models.PropertySale
+	if err := storage.DB.First(&propertySale, input.PropertySaleID).Error; err != nil {
+		log.Printf("❌ AddPropertySaleToWishlist: Property sale %d not found", input.PropertySaleID)
+		ctx.StopWithStatus(http.StatusNotFound)
+		return
+	}
+
+	// Get user's current saved property sales
+	var userModel models.User
+	if err := storage.DB.First(&userModel, userID).Error; err != nil {
+		ctx.StopWithStatus(http.StatusNotFound)
+		return
+	}
+
+	// Parse existing saved property sales
+	var savedPropertySaleIDs []uint
+	if userModel.SavedPropertySales != nil {
+		if err := json.Unmarshal(userModel.SavedPropertySales, &savedPropertySaleIDs); err != nil {
+			// Initialize empty array if unmarshal fails
+			savedPropertySaleIDs = []uint{}
+		}
+	}
+
+	// Check if property sale is already saved
+	for _, id := range savedPropertySaleIDs {
+		if id == input.PropertySaleID {
+			ctx.JSON(iris.Map{"success": true, "message": "Property sale already in wishlist"})
+			return
+		}
+	}
+
+	// Add property sale to saved list
+	savedPropertySaleIDs = append(savedPropertySaleIDs, input.PropertySaleID)
+
+	// Marshal the updated property sale IDs to JSON
+	marshaledPropertySales, err := json.Marshal(savedPropertySaleIDs)
+	if err != nil {
+		log.Printf("❌ AddPropertySaleToWishlist: Failed to marshal - %v", err)
+		ctx.StopWithStatus(http.StatusInternalServerError)
+		return
+	}
+
+	// Update user's saved property sales
+	if err := storage.DB.Model(&userModel).Update("saved_property_sales", marshaledPropertySales).Error; err != nil {
+		log.Printf("❌ AddPropertySaleToWishlist: Failed to update - %v", err)
+		ctx.StopWithStatus(http.StatusInternalServerError)
+		return
+	}
+
+	log.Printf("✅ AddPropertySaleToWishlist: User %d saved property sale %d", userID, input.PropertySaleID)
+	ctx.JSON(iris.Map{"success": true, "message": "Property sale added to wishlist"})
+}
+
+// RemovePropertySaleFromWishlist - Remove property sale from user's wishlist
+func RemovePropertySaleFromWishlist(ctx iris.Context) {
+	// Get user ID from middleware context
+	userID, ok := ctx.Values().Get("userID").(uint)
+	if !ok || userID == 0 {
+		log.Println("❌ RemovePropertySaleFromWishlist: Unauthorized - no userID in context")
+		ctx.StopWithStatus(http.StatusUnauthorized)
+		return
+	}
+
+	propertySaleID, err := ctx.Params().GetUint("propertySaleID")
+	if err != nil {
+		ctx.StopWithStatus(http.StatusBadRequest)
+		return
+	}
+
+	// Get user's current saved property sales
+	var userModel models.User
+	if err := storage.DB.First(&userModel, userID).Error; err != nil {
+		ctx.StopWithStatus(http.StatusNotFound)
+		return
+	}
+
+	// Parse existing saved property sales
+	var savedPropertySaleIDs []uint
+	if userModel.SavedPropertySales != nil {
+		if err := json.Unmarshal(userModel.SavedPropertySales, &savedPropertySaleIDs); err != nil {
+			ctx.StopWithStatus(http.StatusInternalServerError)
+			return
+		}
+	}
+
+	// Remove property sale from saved list
+	var updatedPropertySaleIDs []uint
+	for _, id := range savedPropertySaleIDs {
+		if id != propertySaleID {
+			updatedPropertySaleIDs = append(updatedPropertySaleIDs, id)
+		}
+	}
+
+	// Marshal the updated property sale IDs to JSON
+	marshaledPropertySales, err := json.Marshal(updatedPropertySaleIDs)
+	if err != nil {
+		ctx.StopWithStatus(http.StatusInternalServerError)
+		return
+	}
+
+	// Update user's saved property sales
+	if err := storage.DB.Model(&userModel).Update("saved_property_sales", marshaledPropertySales).Error; err != nil {
+		ctx.StopWithStatus(http.StatusInternalServerError)
+		return
+	}
+
+	log.Printf("✅ RemovePropertySaleFromWishlist: User %d removed property sale %d", userID, propertySaleID)
+	ctx.JSON(iris.Map{"success": true, "message": "Property sale removed from wishlist"})
+}

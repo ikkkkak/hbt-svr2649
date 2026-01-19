@@ -1261,8 +1261,8 @@ func notifyPreviousViewersOfNewVideo(newVideoID uint, hostUserID uint) {
 			}
 		}
 
-		// Use push service directly
-		if err := push.SendPushWithImage(tokens, title, body, thumbnailURL); err != nil {
+		// Use push service directly with image support
+		if err := push.SendPushWithImage(tokens, title, body, thumbnailURL, nil); err != nil {
 			fmt.Printf("⚠️ Failed to send notification to user %d: %v\n", viewerID, err)
 		} else {
 			fmt.Printf("✅ Sent notification to user %d\n", viewerID)
@@ -1329,4 +1329,358 @@ func getVideoNotificationText(language, hostName, propertyName, propertyZone str
 	body = langTranslations["body"]
 
 	return title, body
+}
+
+// GetUnseenVideos returns the count and IDs of videos the user hasn't seen
+// This endpoint is used to show a badge on the Videos tab for new content
+func GetUnseenVideos(ctx iris.Context) {
+	// Get user ID or device ID
+	var userID *uint
+	var deviceID string
+
+	// Try to get userID from context values (set by optionalAuthMiddleware)
+	if uidValue := ctx.Values().Get("userID"); uidValue != nil {
+		if uid, ok := uidValue.(uint); ok && uid > 0 {
+			userID = &uid
+		}
+	}
+
+	// Fallback: Try to get from JWT claims
+	if userID == nil {
+		if claims := jsonWT.Get(ctx); claims != nil {
+			if accessToken, ok := claims.(*utils.AccessToken); ok && accessToken.ID > 0 {
+				uid := accessToken.ID
+				userID = &uid
+			}
+		}
+	}
+
+	// Get device ID from query params (for anonymous users)
+	deviceID = ctx.URLParam("device_id")
+
+	// Get the last time the user viewed the videos tab
+	var lastViewedAt time.Time
+
+	if userID != nil {
+		// For authenticated users, check video_feed_history for most recent delivery
+		var lastHistory models.VideoFeedHistory
+		if err := storage.DB.Where("user_id = ?", *userID).
+			Order("last_delivered_at DESC").
+			First(&lastHistory).Error; err == nil {
+			lastViewedAt = lastHistory.LastDeliveredAt
+		}
+	} else if deviceID != "" {
+		// For anonymous users, check video_views for most recent view
+		var lastView models.VideoView
+		if err := storage.DB.Where("device_id = ?", deviceID).
+			Order("viewed_at DESC").
+			First(&lastView).Error; err == nil {
+			lastViewedAt = lastView.ViewedAt
+		}
+	}
+
+	// If user never viewed videos, consider all videos as unseen (capped at recent ones)
+	if lastViewedAt.IsZero() {
+		// For first-time users, show that there are new videos (badge should show)
+		// Get count of active videos in last 30 days (rent + sale)
+		thirtyDaysAgo := time.Now().AddDate(0, 0, -30)
+		
+		var totalActiveRentVideos int64
+		storage.DB.Model(&models.Video{}).
+			Joins("LEFT JOIN properties ON videos.property_id = properties.id").
+			Where("videos.created_at >= ?", thirtyDaysAgo).
+			Where("properties.id IS NOT NULL AND COALESCE(properties.is_active, ?) = ?", true, true).
+			Where("(videos.status IS NULL OR LOWER(videos.status) <> ?)", "rejected").
+			Where("COALESCE(videos.is_flagged, ?) = ?", false, false).
+			Count(&totalActiveRentVideos)
+
+		// Count property sale videos in last 30 days
+		var totalActiveSaleVideos int64
+		storage.DB.Model(&models.PropertySale{}).
+			Where("(status = ? OR is_published = ? OR status IS NULL) AND videos IS NOT NULL AND videos::text != '[]' AND videos::text != 'null'", "published", true).
+			Where("created_at >= ?", thirtyDaysAgo).
+			Count(&totalActiveSaleVideos)
+
+		// Total videos (rent + sale)
+		totalActiveVideos := totalActiveRentVideos + totalActiveSaleVideos
+
+		// Get newest video for preview
+		var newestVideo models.Video
+		storage.DB.Model(&models.Video{}).
+			Joins("LEFT JOIN properties ON videos.property_id = properties.id").
+			Where("videos.created_at >= ?", thirtyDaysAgo).
+			Where("properties.id IS NOT NULL AND COALESCE(properties.is_active, ?) = ?", true, true).
+			Where("(videos.status IS NULL OR LOWER(videos.status) <> ?)", "rejected").
+			Where("COALESCE(videos.is_flagged, ?) = ?", false, false).
+			Order("videos.created_at DESC").
+			First(&newestVideo)
+
+		var newestPropertySale models.PropertySale
+		storage.DB.Model(&models.PropertySale{}).
+			Where("(status = ? OR is_published = ? OR status IS NULL) AND videos IS NOT NULL AND videos::text != '[]' AND videos::text != 'null'", "published", true).
+			Where("created_at >= ?", thirtyDaysAgo).
+			Order("created_at DESC").
+			First(&newestPropertySale)
+
+		response := iris.Map{
+			"success":      true,
+			"has_unseen":   totalActiveVideos > 0,
+			"unseen_count": totalActiveVideos,
+			"is_new_user":  true,
+			"message":      "New user - all videos are unseen",
+		}
+
+		// Add preview video info if available
+		if totalActiveVideos > 0 {
+			var previewURL, thumbnailURL string
+			var previewID interface{}
+
+			if newestVideo.ID > 0 && (newestPropertySale.ID == 0 || newestVideo.CreatedAt.After(newestPropertySale.CreatedAt)) {
+				previewURL = newestVideo.VideoURL
+				thumbnailURL = newestVideo.ThumbnailURL
+				previewID = newestVideo.ID
+			} else if newestPropertySale.ID > 0 && len(newestPropertySale.Videos) > 0 {
+				previewURL = newestPropertySale.Videos[0]
+				thumbnailURL = ""
+				previewID = fmt.Sprintf("%d_0", newestPropertySale.ID)
+			}
+
+			if previewURL != "" {
+				response["newest_video_preview"] = iris.Map{
+					"video_url":     previewURL,
+					"thumbnail_url": thumbnailURL,
+					"video_id":      previewID,
+				}
+			}
+		}
+
+		ctx.JSON(response)
+		return
+	}
+
+	// Get rent videos created after the user's last view
+	var unseenVideoIDs []uint
+	var unseenCount int64
+
+	rentQuery := storage.DB.Model(&models.Video{}).
+		Joins("LEFT JOIN properties ON videos.property_id = properties.id").
+		Where("videos.created_at > ?", lastViewedAt).
+		Where("properties.id IS NOT NULL AND COALESCE(properties.is_active, ?) = ?", true, true).
+		Where("(videos.status IS NULL OR LOWER(videos.status) <> ?)", "rejected").
+		Where("COALESCE(videos.is_flagged, ?) = ?", false, false)
+
+	// Exclude videos the user has already viewed
+	if userID != nil {
+		rentQuery = rentQuery.Where("videos.id NOT IN (SELECT video_id FROM video_views WHERE user_id = ?)", *userID)
+	} else if deviceID != "" {
+		rentQuery = rentQuery.Where("videos.id NOT IN (SELECT video_id FROM video_views WHERE device_id = ?)", deviceID)
+	}
+
+	// Get rent video count
+	rentQuery.Count(&unseenCount)
+
+	// Get rent video IDs (limit to 100 for performance)
+	rentQuery.Limit(100).Pluck("videos.id", &unseenVideoIDs)
+
+	// Get property sale videos created after the user's last view
+	var unseenPropertySaleVideos []struct {
+		ID         uint
+		VideoURL   string
+		VideoIndex int
+		CreatedAt  time.Time
+	}
+	var propertySaleCount int64
+
+	// Property sale videos are stored in PropertySale.Videos array
+	// We need to find property sales that have videos and were created/updated after lastViewedAt
+	propertySaleQuery := storage.DB.Model(&models.PropertySale{}).
+		Where("(status = ? OR is_published = ? OR status IS NULL) AND videos IS NOT NULL AND videos::text != '[]' AND videos::text != 'null'", "published", true).
+		Where("created_at > ?", lastViewedAt)
+
+	if userID != nil {
+		propertySaleQuery = propertySaleQuery.Where("NOT EXISTS (SELECT 1 FROM hidden_property_sales hps WHERE hps.property_sale_id = property_sales.id AND hps.user_id = ? AND hps.deleted_at IS NULL)", *userID)
+	}
+
+	// Get count of property sales with new videos
+	propertySaleQuery.Count(&propertySaleCount)
+
+	// Get property sales with videos (limit to 50 for performance)
+	var propertySales []models.PropertySale
+	propertySaleQuery.Limit(50).Find(&propertySales)
+
+	// Extract video URLs from property sales
+	for _, ps := range propertySales {
+		if len(ps.Videos) > 0 {
+			for i, videoURL := range ps.Videos {
+				unseenPropertySaleVideos = append(unseenPropertySaleVideos, struct {
+					ID         uint
+					VideoURL   string
+					VideoIndex int
+					CreatedAt  time.Time
+				}{
+					ID:         ps.ID,
+					VideoURL:   videoURL,
+					VideoIndex: i,
+					CreatedAt:  ps.CreatedAt,
+				})
+			}
+		}
+	}
+
+	// Total unseen count (rent + sale)
+	totalUnseenCount := unseenCount + int64(len(unseenPropertySaleVideos))
+
+	// Get newest unseen video for preview (for animated icon)
+	var newestVideoPreviewURL string
+	var newestVideoThumbnailURL string
+	var newestVideoID interface{}
+
+	// Find the newest video from either rent or sale videos
+	var newestRentVideo models.Video
+	if len(unseenVideoIDs) > 0 {
+		storage.DB.Where("id IN ?", unseenVideoIDs).
+			Order("created_at DESC").
+			First(&newestRentVideo)
+	}
+
+	newestPropertySaleVideo := struct {
+		ID         uint
+		VideoURL   string
+		VideoIndex int
+		CreatedAt  time.Time
+	}{}
+	if len(unseenPropertySaleVideos) > 0 {
+		// Sort by CreatedAt descending and get first
+		for _, psVideo := range unseenPropertySaleVideos {
+			if newestPropertySaleVideo.ID == 0 || psVideo.CreatedAt.After(newestPropertySaleVideo.CreatedAt) {
+				newestPropertySaleVideo = psVideo
+			}
+		}
+	}
+
+	// Compare and pick the newest
+	if newestRentVideo.ID > 0 && (newestPropertySaleVideo.ID == 0 || newestRentVideo.CreatedAt.After(newestPropertySaleVideo.CreatedAt)) {
+		newestVideoPreviewURL = newestRentVideo.VideoURL
+		newestVideoThumbnailURL = newestRentVideo.ThumbnailURL
+		newestVideoID = newestRentVideo.ID
+	} else if newestPropertySaleVideo.ID > 0 {
+		newestVideoPreviewURL = newestPropertySaleVideo.VideoURL
+		newestVideoThumbnailURL = "" // Property sale videos don't have thumbnails stored separately
+		newestVideoID = fmt.Sprintf("%d_%d", newestPropertySaleVideo.ID, newestPropertySaleVideo.VideoIndex)
+	}
+
+	// Build response with preview info
+	response := iris.Map{
+		"success":          true,
+		"has_unseen":       totalUnseenCount > 0,
+		"unseen_count":     totalUnseenCount,
+		"unseen_video_ids": unseenVideoIDs,
+		"last_viewed_at":   lastViewedAt,
+	}
+
+	// Add preview video info if there are unseen videos (for animated tab icon)
+	if totalUnseenCount > 0 && newestVideoPreviewURL != "" {
+		response["newest_video_preview"] = iris.Map{
+			"video_url":     newestVideoPreviewURL,
+			"thumbnail_url": newestVideoThumbnailURL,
+			"video_id":      newestVideoID,
+		}
+	}
+
+	ctx.JSON(response)
+}
+
+// MarkAllVideosAsViewed marks that the user has visited the videos tab
+// This clears the unseen badge for the user
+func MarkAllVideosAsViewed(ctx iris.Context) {
+	// Get user ID or device ID
+	var userID *uint
+	var deviceID *string
+
+	// Try to get userID from context values
+	if uidValue := ctx.Values().Get("userID"); uidValue != nil {
+		if uid, ok := uidValue.(uint); ok && uid > 0 {
+			userID = &uid
+		}
+	}
+
+	// Fallback: Try to get from JWT claims
+	if userID == nil {
+		if claims := jsonWT.Get(ctx); claims != nil {
+			if accessToken, ok := claims.(*utils.AccessToken); ok && accessToken.ID > 0 {
+				uid := accessToken.ID
+				userID = &uid
+			}
+		}
+	}
+
+	// Get device ID from request body
+	var input struct {
+		DeviceID  string `json:"device_id"`
+		ViewedAt  string `json:"viewed_at"`
+	}
+	ctx.ReadJSON(&input)
+	
+	if input.DeviceID != "" {
+		deviceID = &input.DeviceID
+	}
+
+	// Validate we have at least one identifier
+	if userID == nil && (deviceID == nil || *deviceID == "") {
+		ctx.StatusCode(iris.StatusBadRequest)
+		ctx.JSON(iris.Map{"error": "User ID or Device ID required"})
+		return
+	}
+
+	viewedAt := time.Now()
+	if input.ViewedAt != "" {
+		if parsed, err := time.Parse(time.RFC3339, input.ViewedAt); err == nil {
+			viewedAt = parsed
+		}
+	}
+
+	// Update or create a VideoFeedHistory record to mark tab visit
+	if userID != nil {
+		// For authenticated users, update the most recent video's feed history
+		// or create a dummy entry to mark tab visit
+		var latestVideo models.Video
+		if err := storage.DB.Order("created_at DESC").First(&latestVideo).Error; err == nil {
+			history := models.VideoFeedHistory{
+				UserID:          *userID,
+				VideoID:         latestVideo.ID,
+				LastDeliveredAt: viewedAt,
+			}
+			storage.DB.Clauses(clause.OnConflict{
+				Columns:   []clause.Column{{Name: "user_id"}, {Name: "video_id"}},
+				DoUpdates: clause.AssignmentColumns([]string{"last_delivered_at"}),
+			}).Create(&history)
+		}
+	}
+
+	// For device-based tracking, we use video_views table
+	// The last view timestamp will be used to determine unseen videos
+
+	ctx.JSON(iris.Map{
+		"success":   true,
+		"message":   "Videos marked as viewed",
+		"viewed_at": viewedAt,
+	})
+}
+
+// GetTotalVideoCount returns the total number of active videos
+// Used by the frontend to determine if there are any videos at all
+func GetTotalVideoCount(ctx iris.Context) {
+	var totalCount int64
+
+	storage.DB.Model(&models.Video{}).
+		Joins("LEFT JOIN properties ON videos.property_id = properties.id").
+		Where("properties.id IS NOT NULL AND COALESCE(properties.is_active, ?) = ?", true, true).
+		Where("(videos.status IS NULL OR LOWER(videos.status) <> ?)", "rejected").
+		Where("COALESCE(videos.is_flagged, ?) = ?", false, false).
+		Count(&totalCount)
+
+	ctx.JSON(iris.Map{
+		"success":     true,
+		"total_count": totalCount,
+	})
 }

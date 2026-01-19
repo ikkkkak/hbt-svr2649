@@ -228,8 +228,8 @@ func CreateProperty(ctx iris.Context) {
 			}
 		}
 
-		// Send push notification to all users
-		err := pushsvc.SendPushWithImage(allTokens, arabicTitle, arabicBody, notificationImageURL)
+		// Send push notification to all users with image
+		err := pushsvc.SendPushWithImage(allTokens, arabicTitle, arabicBody, notificationImageURL, nil)
 		if err != nil {
 			log.Printf("⚠️ Failed to send property notification to users: %v", err)
 		} else {

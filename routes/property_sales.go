@@ -18,6 +18,7 @@ import (
 
 	"github.com/kataras/iris/v12"
 	jwt "github.com/kataras/iris/v12/middleware/jwt"
+	"gorm.io/gorm"
 )
 
 // triggerNewPropertyNotification sends notifications when a property is published
@@ -1445,6 +1446,61 @@ func GetPublishedProperty(ctx iris.Context) {
 		ctx.JSON(iris.Map{"error": "Property not found"})
 		return
 	}
+
+	// SECURITY: Track view count (exclude owner views)
+	// Manipulate device/user identification to prevent owner view counting
+	go func() {
+		// Get user ID from context (if authenticated)
+		userIDVal := ctx.Values().Get("userID")
+		var viewerUserID uint
+		if userIDVal != nil {
+			if id, ok := userIDVal.(uint); ok {
+				viewerUserID = id
+			}
+		}
+		
+		// Get device ID from header (for anonymous tracking)
+		deviceID := ctx.GetHeader("X-Device-ID")
+		phoneNumber := ctx.GetHeader("X-Phone-Number")
+		
+		// SECURITY: Check if viewer is the owner - if so, don't count view
+		isOwner := false
+		if property.OwnerID != nil && viewerUserID > 0 {
+			if *property.OwnerID == viewerUserID {
+				isOwner = true
+			}
+		}
+		
+		// Also check organization owner
+		if !isOwner && property.Organization != nil && property.Organization.OwnerID > 0 && viewerUserID > 0 {
+			if property.Organization.OwnerID == viewerUserID {
+				isOwner = true
+			}
+		}
+		
+		// SECURITY: Manipulate device/phone identification for owner detection
+		// If owner's phone number or device ID matches, don't count view
+		if !isOwner && property.Owner != nil {
+			if property.Owner.PhoneNumber != nil && phoneNumber != "" {
+				if *property.Owner.PhoneNumber == phoneNumber {
+					isOwner = true
+				}
+			}
+		}
+		
+		// Only increment view count if not owner
+		if !isOwner {
+			storage.DB.Model(&property).UpdateColumn("view_count", gorm.Expr("view_count + ?", 1))
+			log.Printf("👁️ View count incremented for property %d (viewer: userID=%d, deviceID=%s)", property.ID, viewerUserID, func() string {
+				if len(deviceID) > 10 {
+					return deviceID[:10] + "..."
+				}
+				return deviceID
+			}())
+		} else {
+			log.Printf("🔒 Owner view detected for property %d - view not counted", property.ID)
+		}
+	}()
 
 	lang := strings.ToLower(strings.TrimSpace(ctx.URLParamDefault("lang", "en")))
 	property.Title = utils.ResolveLocalizedText(property.Title, property.TitleTranslations, lang)

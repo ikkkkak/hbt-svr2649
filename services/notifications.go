@@ -455,26 +455,44 @@ func (ns *NotificationService) SendPropertyTourNotificationToHost(tourID, proper
 }
 
 // SendNewPropertyNotification sends notification to users when a new property matches their favorite city
+// Uses professional matching algorithm: Prioritizes exact city ID match, then zone ID, then name-based matching
 func (ns *NotificationService) SendNewPropertyNotification(propertyID uint, propertyTitle string, cityID *uint, cityName string, zoneID *uint, zoneName string, bedrooms int, bathrooms int, squareFootage int, imageURL string) error {
-	log.Printf("🔔 Sending new property notification for property %d in %s", propertyID, cityName)
+	log.Printf("🔔 Sending new property notification for property %d in %s (CityID: %v, ZoneID: %v)", propertyID, cityName, cityID, zoneID)
 
-	// Find all logged-in users with favorite city matching this property
+	// SECURITY: Find all logged-in users with favorite city matching this property
+	// Professional matching algorithm: Prioritize ID-based matching (most accurate), then fallback to name-based
 	var users []models.User
 	query := storage.DB.Where("allows_notifications = ?", true)
 	
-	// Match by city or zone
+	// Professional matching: Match by city ID first (most accurate), then zone ID, then name-based
 	if cityID != nil {
-		query = query.Where("(favorite_city_id = ? OR favorite_zone_id = ?)", *cityID, zoneID)
+		// Exact city ID match (highest priority)
+		if zoneID != nil {
+			// Match by both city ID and zone ID (most specific)
+			query = query.Where("(favorite_city_id = ? OR favorite_zone_id = ?)", *cityID, *zoneID)
+		} else {
+			// Match by city ID only
+			query = query.Where("favorite_city_id = ?", *cityID)
+		}
+	} else if zoneID != nil {
+		// Fallback: Match by zone ID if city ID not available
+		query = query.Where("favorite_zone_id = ?", *zoneID)
 	} else if cityName != "" {
-		query = query.Where("(favorite_city_name = ? OR favorite_zone_name = ?)", cityName, zoneName)
+		// Fallback: Name-based matching (case-insensitive for better matching)
+		query = query.Where("(LOWER(favorite_city_name) = LOWER(?) OR LOWER(favorite_zone_name) = LOWER(?))", cityName, zoneName)
+	} else {
+		log.Printf("⚠️ No city or zone information provided for property %d", propertyID)
+		return fmt.Errorf("insufficient location data for matching")
 	}
 
+	// SECURITY: Only notify users who have explicitly enabled notifications
+	// This prevents spam and respects user preferences
 	if err := query.Find(&users).Error; err != nil {
 		log.Printf("❌ Error finding users for notification: %v", err)
 		return err
 	}
 
-	log.Printf("📱 Found %d logged-in users to notify", len(users))
+	log.Printf("📱 Found %d logged-in users to notify (matching algorithm: cityID=%v, zoneID=%v, cityName=%s)", len(users), cityID, zoneID, cityName)
 
 	// Build notification content (needed for both logged-in and anonymous users)
 	details := fmt.Sprintf("%d bedrooms • %d bathrooms • %d m²", bedrooms, bathrooms, squareFootage)
@@ -511,13 +529,21 @@ func (ns *NotificationService) SendNewPropertyNotification(propertyID uint, prop
 	var lastError error
 	successCount := 0
 
-	// Also find anonymous users with matching favorite city
+	// Also find anonymous users with matching favorite city (same professional algorithm)
 	var anonymousUsers []models.AnonymousUserPreference
 	anonQuery := storage.DB.Where("last_active >= ?", time.Now().AddDate(0, 0, -30))
+	
+	// Same professional matching algorithm for anonymous users
 	if cityID != nil {
-		anonQuery = anonQuery.Where("(favorite_city_id = ? OR favorite_zone_id = ?)", *cityID, zoneID)
+		if zoneID != nil {
+			anonQuery = anonQuery.Where("(favorite_city_id = ? OR favorite_zone_id = ?)", *cityID, *zoneID)
+		} else {
+			anonQuery = anonQuery.Where("favorite_city_id = ?", *cityID)
+		}
+	} else if zoneID != nil {
+		anonQuery = anonQuery.Where("favorite_zone_id = ?", *zoneID)
 	} else if cityName != "" {
-		anonQuery = anonQuery.Where("(favorite_city_name = ? OR favorite_zone_name = ?)", cityName, zoneName)
+		anonQuery = anonQuery.Where("(LOWER(favorite_city_name) = LOWER(?) OR LOWER(favorite_zone_name) = LOWER(?))", cityName, zoneName)
 	}
 	if err := anonQuery.Find(&anonymousUsers).Error; err == nil {
 		log.Printf("📱 Found %d anonymous users with matching preferences", len(anonymousUsers))
@@ -664,6 +690,126 @@ func (ns *NotificationService) SendGenericPropertyNotification(propertyID uint, 
 
 	log.Printf("✅ Sent %d generic notifications successfully", successCount)
 	return lastError
+}
+
+// NotifyUserAboutExistingProperties sends notifications to a user about existing published properties
+// matching their favorite city when they set it for the first time
+func (ns *NotificationService) NotifyUserAboutExistingProperties(userID uint, cityID *uint, cityName string, zoneID *uint, zoneName string) error {
+	log.Printf("🔔 Notifying user %d about existing properties in favorite city: %s", userID, cityName)
+
+	// Get user to check notification preferences
+	var user models.User
+	if err := storage.DB.First(&user, userID).Error; err != nil {
+		log.Printf("❌ User %d not found: %v", userID, err)
+		return err
+	}
+
+	// Check if user has notifications enabled
+	if user.AllowsNotifications == nil || !*user.AllowsNotifications {
+		log.Printf("⚠️ User %d has notifications disabled, skipping", userID)
+		return nil
+	}
+
+	// Find published properties matching the favorite city
+	var properties []models.PropertySale
+	query := storage.DB.Where("status = ? AND is_published = ?", "published", true)
+
+	// Professional matching algorithm: Match by city ID first (most accurate), then by name
+	if cityID != nil {
+		query = query.Where("city_id = ?", *cityID)
+	} else if cityName != "" {
+		query = query.Where("LOWER(city) = LOWER(?)", cityName)
+	}
+
+	// Also match by zone if provided
+	if zoneID != nil {
+		query = query.Or("zone_id = ?", *zoneID)
+	} else if zoneName != "" {
+		query = query.Or("LOWER(zone_name) = LOWER(?)", zoneName)
+	}
+
+	// Limit to recent properties (last 30 days) to avoid overwhelming users
+	thirtyDaysAgo := time.Now().AddDate(0, 0, -30)
+	query = query.Where("created_at >= ?", thirtyDaysAgo)
+
+	// Order by creation date (newest first) and limit to top 5
+	query = query.Order("created_at DESC").Limit(5)
+
+	if err := query.Find(&properties).Error; err != nil {
+		log.Printf("❌ Error finding properties for user %d: %v", userID, err)
+		return err
+	}
+
+	if len(properties) == 0 {
+		log.Printf("📭 No existing properties found for user %d in city %s", userID, cityName)
+		return nil
+	}
+
+	log.Printf("📦 Found %d existing properties for user %d in city %s", len(properties), userID, cityName)
+
+	// Get user's push tokens
+	tokens, err := ns.getUserPushTokens(userID)
+	if err != nil {
+		log.Printf("⚠️ Failed to get push tokens for user %d: %v", userID, err)
+		return err
+	}
+
+	if len(tokens) == 0 {
+		log.Printf("⚠️ No push tokens found for user %d", userID)
+		return nil
+	}
+
+	// Send notifications for each property (batch them intelligently)
+	// Send first property immediately, then batch the rest
+	successCount := 0
+	for i, property := range properties {
+		// Get first image URL
+		var imageURL string
+		if len(property.Images) > 0 && property.Images[0] != "" {
+			imageURL = property.Images[0]
+		}
+
+		// Build notification content
+		details := fmt.Sprintf("%d bedrooms • %d bathrooms • %d m²", property.Bedrooms, property.Bathrooms, property.SquareFootage)
+		if cityName != "" {
+			details += fmt.Sprintf(" • %s", cityName)
+		}
+
+		title := "🏠 Properties Available in Your Favorite City!"
+		body := fmt.Sprintf("%s\n%s", property.Title, details)
+
+		// Notification data for deep linking
+		dataMap := map[string]string{
+			"type":       "existing_property",
+			"id":         fmt.Sprintf("%d", property.ID),
+			"propertyId": fmt.Sprintf("%d", property.ID),
+			"screen":     "PropertySaleDetails",
+			"params":     fmt.Sprintf(`{"propertyId": %d}`, property.ID),
+			"action":     "view_property",
+		}
+
+		// Send notification with image
+		for _, token := range tokens {
+			expoToken := token
+			if strings.Contains(token, "|") {
+				expoToken = strings.Split(token, "|")[0]
+			}
+
+			if err := utils.SendRichNotification(expoToken, title, body, imageURL, dataMap); err != nil {
+				log.Printf("⚠️ Failed to send notification to user %d for property %d: %v", userID, property.ID, err)
+			} else {
+				successCount++
+			}
+		}
+
+		// Add delay between notifications to avoid overwhelming the user
+		if i < len(properties)-1 {
+			time.Sleep(2 * time.Second)
+		}
+	}
+
+	log.Printf("✅ Sent %d notifications about existing properties to user %d", successCount, userID)
+	return nil
 }
 
 // Global notification service instance

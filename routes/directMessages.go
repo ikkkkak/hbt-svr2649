@@ -293,7 +293,7 @@ func SendDirectMessage(ctx iris.Context) {
 			receiverTokens := pushsvc.GetUserPushTokens(body.ReceiverID)
 			if len(receiverTokens) > 0 {
 				go func() {
-					err := pushsvc.SendPushWithImage(receiverTokens, notificationTitle, messageBody, senderAvatarURL)
+					err := pushsvc.SendPushWithImage(receiverTokens, notificationTitle, messageBody, senderAvatarURL, nil)
 					if err != nil {
 						log.Printf("⚠️ Failed to send push notification: %v", err)
 					} else {

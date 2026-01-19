@@ -13,13 +13,14 @@ func isExpoToken(token string) bool {
 
 // SendPush sends push notifications using FCM if available, falls back to Expo
 func SendPush(tokens []string, title, body string) error {
-	return SendPushWithImage(tokens, title, body, "")
+	return SendPushWithImage(tokens, title, body, "", nil)
 }
 
 // SendPushWithImage sends push notifications with optional image/avatar URL
 // imageURL: URL to sender's avatar/image (shown instead of app icon)
+// data: Optional custom data map for deep linking (can be nil)
 // Automatically routes Expo tokens to Expo Push service and FCM/APNs tokens to FCM
-func SendPushWithImage(tokens []string, title, body, imageURL string) error {
+func SendPushWithImage(tokens []string, title, body, imageURL string, data map[string]string) error {
 	if len(tokens) == 0 {
 		return nil
 	}
@@ -47,7 +48,7 @@ func SendPushWithImage(tokens []string, title, body, imageURL string) error {
 	// Send Expo tokens via Expo Push service
 	if len(expoTokens) > 0 {
 		log.Printf("🔔 Sending %d Expo token(s) via Expo Push (with image: %v)", len(expoTokens), imageURL != "")
-		expoErr = SendExpoPushWithImage(expoTokens, title, body, imageURL)
+		expoErr = SendExpoPushWithImage(expoTokens, title, body, imageURL, data)
 		if expoErr != nil {
 			log.Printf("⚠️ Expo Push error: %v", expoErr)
 		}

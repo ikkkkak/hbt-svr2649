@@ -74,7 +74,7 @@ func CreateMessage(ctx iris.Context) {
 				if len(receiverTokens) > 0 {
 					title := senderName
 					go func() {
-						err := pushsvc.SendPushWithImage(receiverTokens, title, messageBody, senderAvatarURL)
+						err := pushsvc.SendPushWithImage(receiverTokens, title, messageBody, senderAvatarURL, nil)
 						if err != nil {
 							log.Printf("⚠️ Failed to send push notification: %v", err)
 						} else {
