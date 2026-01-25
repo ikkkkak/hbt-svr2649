@@ -630,7 +630,7 @@ func PublicOfferInsights(ctx iris.Context) {
 
 	// Only for published properties
 	var property models.PropertySale
-	if err := storage.DB.Where("id = ? AND status = ? AND is_published = ?", propertyID, "published", true).First(&property).Error; err != nil {
+	if err := storage.DB.Where("id = ? AND status = ? AND is_published = ? AND is_deactivated = ? AND deleted_at IS NULL", propertyID, "published", true, false).First(&property).Error; err != nil {
 		ctx.StatusCode(http.StatusNotFound)
 		ctx.JSON(iris.Map{"error": "Property not found"})
 		return
@@ -671,7 +671,7 @@ func GetPublicPropertyOffers(ctx iris.Context) {
 
 	// Only for published properties
 	var property models.PropertySale
-	if err := storage.DB.Where("id = ? AND status = ? AND is_published = ?", propertyID, "published", true).First(&property).Error; err != nil {
+	if err := storage.DB.Where("id = ? AND status = ? AND is_published = ? AND is_deactivated = ? AND deleted_at IS NULL", propertyID, "published", true, false).First(&property).Error; err != nil {
 		ctx.StatusCode(http.StatusNotFound)
 		ctx.JSON(iris.Map{"error": "Property not found"})
 		return
@@ -1203,7 +1203,9 @@ func GetPublishedProperties(ctx iris.Context) {
 	q := storage.DB.Model(&models.PropertySale{}).
 		Preload("Organization").
 		Preload("Agent.User").
-		Where("property_sales.status = ? OR property_sales.is_published = ?", "published", true)
+		Where("property_sales.status = ? OR property_sales.is_published = ?", "published", true).
+		Where("property_sales.is_deactivated = ?", false).
+		Where("property_sales.deleted_at IS NULL")
 
 	if userID > 0 {
 		fmt.Printf("🔍 GetPublishedProperties: Applying filters for user ID: %d\n", userID)
@@ -1441,7 +1443,7 @@ func GetPublishedProperty(ctx iris.Context) {
 	}
 
 	var property models.PropertySale
-	if err := storage.DB.Preload("Organization").Preload("Agent.User").Preload("Owner").Preload("AmenityList").Where("id = ? AND (status = ? OR is_published = ?)", id, "published", true).First(&property).Error; err != nil {
+	if err := storage.DB.Preload("Organization").Preload("Agent.User").Preload("Owner").Preload("AmenityList").Where("id = ? AND (status = ? OR is_published = ?) AND is_deactivated = ? AND deleted_at IS NULL", id, "published", true, false).First(&property).Error; err != nil {
 		ctx.StatusCode(http.StatusNotFound)
 		ctx.JSON(iris.Map{"error": "Property not found"})
 		return
@@ -1490,13 +1492,55 @@ func GetPublishedProperty(ctx iris.Context) {
 		
 		// Only increment view count if not owner
 		if !isOwner {
+			// Increment view count
 			storage.DB.Model(&property).UpdateColumn("view_count", gorm.Expr("view_count + ?", 1))
-			log.Printf("👁️ View count incremented for property %d (viewer: userID=%d, deviceID=%s)", property.ID, viewerUserID, func() string {
+			
+			// Get updated view count
+			var newViewCount int64
+			storage.DB.Model(&property).Select("view_count").Scan(&newViewCount)
+			
+			log.Printf("👁️ View count incremented for property %d (viewer: userID=%d, deviceID=%s, new count: %d)", property.ID, viewerUserID, func() string {
 				if len(deviceID) > 10 {
 					return deviceID[:10] + "..."
 				}
 				return deviceID
-			}())
+			}(), newViewCount)
+			
+			// Check if we hit a milestone (100, 200, 300, etc.)
+			milestone := (newViewCount / 100) * 100
+			previousMilestone := ((newViewCount - 1) / 100) * 100
+			
+			if milestone > 0 && milestone != previousMilestone && milestone > property.LastMilestoneNotified {
+				// Hit a new milestone - notify host and viewers
+				propertyImage := ""
+				if len(property.Images) > 0 {
+					propertyImage = property.Images[0]
+				}
+				
+				// Notify host (async - don't block response)
+				go func() {
+					if err := services.NotificationServiceInstance.NotifyHostOnViewMilestone(
+						property.ID,
+						newViewCount,
+						property.Title,
+						propertyImage,
+					); err != nil {
+						log.Printf("❌ Failed to notify host on milestone: %v", err)
+					}
+				}()
+				
+				// Notify viewers (async)
+				go func() {
+					if err := services.NotificationServiceInstance.NotifyViewersOnViewMilestone(
+						property.ID,
+						newViewCount,
+						property.Title,
+						propertyImage,
+					); err != nil {
+						log.Printf("❌ Failed to notify viewers on milestone: %v", err)
+					}
+				}()
+			}
 		} else {
 			log.Printf("🔒 Owner view detected for property %d - view not counted", property.ID)
 		}
@@ -1551,7 +1595,7 @@ func ReportPublishedPropertySale(ctx iris.Context) {
 
 	// Ensure property is published
 	var property models.PropertySale
-	if err := storage.DB.Where("id = ? AND (status = ? OR is_published = ?)", id, "published", true).First(&property).Error; err != nil {
+	if err := storage.DB.Where("id = ? AND (status = ? OR is_published = ?) AND is_deactivated = ? AND deleted_at IS NULL", id, "published", true, false).First(&property).Error; err != nil {
 		ctx.StatusCode(http.StatusNotFound)
 		ctx.JSON(iris.Map{"error": "Property not found"})
 		return

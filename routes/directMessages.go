@@ -561,14 +561,18 @@ func ListDirectMessageConversations(ctx iris.Context) {
 	log.Printf("✅ ListDirectMessageConversations: Found %d unique conversation partners for user %d", len(partners), uid)
 
 	// SECURITY: Filter out blocked users
-	var blockedUserIDs []uint
-	storage.DB.Model(&models.UserBlock{}).
-		Where("(blocker_id = ? OR blocked_id = ?) AND deleted_at IS NULL", uid, uid).
-		Pluck("CASE WHEN blocker_id = ? THEN blocked_id ELSE blocker_id END", &blockedUserIDs)
+	// Get all blocks where user is either blocker or blocked
+	var blocks []models.UserBlock
+	storage.DB.Where("(blocker_id = ? OR blocked_id = ?) AND deleted_at IS NULL", uid, uid).Find(&blocks)
 
 	blockedMap := make(map[uint]bool)
-	for _, blockedID := range blockedUserIDs {
-		blockedMap[blockedID] = true
+	for _, block := range blocks {
+		// Determine which user is blocked (the other one)
+		if block.BlockerID == uid {
+			blockedMap[block.BlockedID] = true
+		} else {
+			blockedMap[block.BlockerID] = true
+		}
 	}
 
 	var filteredPartners []ConversationPartner
@@ -672,10 +676,28 @@ func ListDirectMessageConversations(ctx iris.Context) {
 			otherUserName = otherUser.Email
 		}
 
+		// Get organization image if user owns an organization
+		avatarURL := otherUser.AvatarURL
+		var organization models.Organization
+		// Suppress "record not found" errors - not all users have organizations (expected)
+		if err := storage.DB.Where("owner_id = ? AND deleted_at IS NULL", partner.OtherUserID).First(&organization).Error; err == nil {
+			// User owns an organization - prefer organization banner/logo
+			if organization.BannerImage != "" {
+				avatarURL = organization.BannerImage
+			} else if organization.Logo != "" {
+				avatarURL = organization.Logo
+			}
+			// Update name to show organization name if available
+			if organization.Name != "" {
+				otherUserName = organization.Name
+			}
+		}
+		// Note: "record not found" is expected for users without organizations - no error logging needed
+
 		summaries = append(summaries, ConversationSummary{
 			OtherUserID:     partner.OtherUserID,
 			OtherUserName:   otherUserName,
-			OtherUserAvatar: otherUser.AvatarURL,
+			OtherUserAvatar: avatarURL,
 			LastMessage:     &lastMessage,
 			UnreadCount:     int(unreadCount),
 		})

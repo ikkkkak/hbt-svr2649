@@ -1207,7 +1207,9 @@ func SubmitVerification(ctx iris.Context) {
 }
 
 func returnUser(user models.User, ctx iris.Context) {
-	tokenPair, tokenErr := utils.CreateTokenPair(user.ID)
+	// Get device ID from request header (optional)
+	deviceID := ctx.GetHeader("X-Device-ID")
+	tokenPair, tokenErr := utils.CreateTokenPair(user.ID, deviceID)
 	if tokenErr != nil {
 		utils.CreateInternalServerError(ctx)
 		return
@@ -1223,6 +1225,7 @@ func returnUser(user models.User, ctx iris.Context) {
 		"allowsNotifications": user.AllowsNotifications,
 		"accessToken":         string(tokenPair.AccessToken),
 		"refreshToken":        string(tokenPair.RefreshToken),
+		"expiresIn":           utils.AccessTokenExpiresInSeconds(),
 	})
 
 }

@@ -24,7 +24,8 @@ import (
 	"gorm.io/gorm"
 )
 
-// Optional authentication middleware - allows requests with or without JWT tokens
+// Optional authentication middleware - allows requests with or without JWT tokens.
+// On expired access token: sets X-Token-Expired: true (client should call POST /api/auth/refresh) and continues as unauthenticated; no log spam.
 func optionalAuthMiddleware(ctx iris.Context) {
 	authHeader := ctx.GetHeader("Authorization")
 	if token := strings.TrimSpace(authHeader); strings.HasPrefix(token, "Bearer ") {
@@ -36,20 +37,22 @@ func optionalAuthMiddleware(ctx iris.Context) {
 			if verifiedToken, err := verifier.VerifyToken([]byte(rawToken)); err == nil && verifiedToken != nil {
 				if err := verifiedToken.Claims(claims); err == nil && claims != nil && claims.ID > 0 {
 					ctx.Values().Set("userID", claims.ID)
-					// Also set in JWT context for compatibility with jsonWT.Get(ctx)
 					ctx.Values().Set("jwt.claims", claims)
-					fmt.Printf("🔍 Optional auth: User ID %d authenticated\n", claims.ID)
-				} else {
-					fmt.Printf("🔍 Optional auth: Failed to decode claims (%v) - ignoring and continuing\n", err)
 				}
 			} else {
-				fmt.Printf("🔍 Optional auth: Invalid token (%v) - ignoring and continuing\n", err)
+				errMsg := ""
+				if err != nil {
+					errMsg = err.Error()
+				}
+				if strings.Contains(errMsg, "expired") {
+					ctx.Header("X-Token-Expired", "true")
+					// Do not log: expected when client has not refreshed; avoids log flood.
+				} else if errMsg != "" {
+					log.Printf("Optional auth: invalid token (%s) - proceeding as unauthenticated", errMsg)
+				}
 			}
 		}
-	} else {
-		fmt.Printf("🔍 Optional auth: No token or invalid token - proceeding without auth\n")
 	}
-	// Always continue to the next handler
 	ctx.Next()
 }
 
@@ -131,6 +134,10 @@ func main() {
 			}
 		}()
 		storage.InitializeDB()
+		
+		// Start property cleanup scheduler (runs daily at 2 AM)
+		cleanupService := services.NewPropertyCleanupService()
+		cleanupService.StartCleanupScheduler()
 		fmt.Println("✅ Database initialized successfully")
 		// Auto-migrate chat and moderation tables (idempotent)
 		if err := storage.DB.AutoMigrate(
@@ -142,6 +149,7 @@ func main() {
 			&models.UserBehavior{}, // User behavior tracking for intelligent notifications
 			&models.AnonymousUserPreference{}, // Anonymous user preferences for intelligent notifications
 			&models.CrashLog{}, // Crash logs for error tracking
+			&models.Interaction{}, &models.RecommendationCache{}, &models.NotificationEvent{}, &models.NotificationDeliveryLog{}, // Recommendation & notification system
 		); err != nil {
 			fmt.Printf("❌ Failed to migrate moderation tables: %v\n", err)
 		} else {
@@ -285,6 +293,12 @@ func main() {
 		return tokenInput.RefreshToken
 	})
 
+	// Auth routes - Token refresh endpoint
+	auth := app.Party("/api/auth")
+	{
+		auth.Post("/refresh", refreshTokenVerifierMiddleware, utils.RefreshToken)
+	}
+
 	// Health check endpoint - CRITICAL for Render
 	fmt.Println("🔧 Setting up health check endpoint...")
 	app.Get("/health", func(ctx iris.Context) {
@@ -352,6 +366,17 @@ func main() {
 	}
 	// Debug endpoint to view behavior stats (public for debugging)
 	app.Get("/api/user/behavior/stats", routes.GetBehaviorStats)
+
+	// Append-only interaction tracking for recommendation engine (optional auth; deviceId for anonymous)
+	app.Post("/api/interactions/track", optionalAuthMiddleware, routes.TrackInteraction)
+
+	// Recommendation feed and suggested content (optional auth; device_id for anonymous)
+	rec := app.Party("/api/recommendations", optionalAuthMiddleware)
+	{
+		rec.Get("/feed", routes.GetRecommendedFeed)
+		rec.Get("/suggested-properties", routes.GetSuggestedProperties)
+		rec.Get("/suggested-videos", routes.GetSuggestedVideosForProperty)
+	}
 	{	
 		user.Post("/check-exists", routes.CheckUserExists)
 		user.Post("/register", routes.Register)
@@ -1084,6 +1109,14 @@ func main() {
 		propertySales.Get("/offers/organization", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.GetOrganizationOffers)
 		propertySales.Patch("/offers/{id:uint}/status", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.UpdateOfferStatus)
 		propertySales.Get("/{id:uint}/offer-insights", routes.PublicOfferInsights)
+		// Property Management Routes
+		propertySales.Put("/{id:uint}/deactivate", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.DeactivatePropertySale)
+		propertySales.Put("/{id:uint}/reactivate", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.ReactivatePropertySale)
+		propertySales.Delete("/{id:uint}", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.DeletePropertySale)
+		propertySales.Put("/{id:uint}/sold", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.MarkPropertySaleAsSold)
+		propertySales.Put("/{id:uint}/unsold", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.MarkPropertySaleAsUnsold)
+		// Contact Host Route
+		propertySales.Post("/contact-host", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.ContactPropertySaleHost)
 		propertySales.Get("/{id:uint}/offers", routes.GetPublicPropertyOffers)
 	}
 
@@ -1167,7 +1200,6 @@ func main() {
 		adminQuartiers.Delete("/{id:uint}", routes.AdminDeleteQuartier)
 	}
 
-	app.Post("/api/refresh", refreshTokenVerifierMiddleware, utils.RefreshToken)
 
 	// Crash Logs - Public endpoint (crashes can happen before login)
 	app.Post("/api/crash-logs", routes.CreateCrashLog)

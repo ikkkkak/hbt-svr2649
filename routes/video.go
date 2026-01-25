@@ -69,6 +69,13 @@ func CreateVideo(ctx iris.Context) {
 		notifyPreviousViewersOfNewVideo(videoID, hostUserID)
 	}(video.ID, userID)
 
+	// Notify users who viewed this property or its videos (TikTok-style, dedup/cooldown in NotifyNewVideoForProperty)
+	if video.PropertyID != nil {
+		go func(v models.Video) {
+			services.NotificationServiceInstance.NotifyNewVideoForProperty("rent", v.PropertyID, nil, v.ID, v.Caption, v.ThumbnailURL)
+		}(video)
+	}
+
 	ctx.JSON(iris.Map{"success": true, "video": video})
 }
 
@@ -467,9 +474,13 @@ func LikeVideo(ctx iris.Context) {
 	}
 	storage.DB.Model(&models.Video{}).Where("id = ?", input.VideoID).UpdateColumn("likes_count", gorm.Expr("likes_count + ?", 1))
 
-	// Send push notification to video owner
+	// Send push notification to video owner and record interaction for recommendations
 	var video models.Video
 	if err := storage.DB.First(&video, input.VideoID).Error; err == nil {
+		services.InteractionServiceInstance().Record(services.InteractionInput{
+			EntityType: models.EntityVideo, EntityID: input.VideoID, PropertyID: video.PropertyID,
+			EventType: models.EventLike, UserID: &userID, DeviceID: nil,
+		})
 		var user models.User
 		if err := storage.DB.First(&user, userID).Error; err == nil {
 			userName := fmt.Sprintf("%s %s", user.FirstName, user.LastName)
@@ -549,9 +560,13 @@ func SaveVideo(ctx iris.Context) {
 	}
 	storage.DB.Model(&models.Video{}).Where("id = ?", input.VideoID).UpdateColumn("saves_count", gorm.Expr("saves_count + ?", 1))
 
-	// Get updated saves count
+	// Get updated saves count and record interaction for recommendations
 	var video models.Video
 	if err := storage.DB.First(&video, input.VideoID).Error; err == nil {
+		services.InteractionServiceInstance().Record(services.InteractionInput{
+			EntityType: models.EntityVideo, EntityID: input.VideoID, PropertyID: video.PropertyID,
+			EventType: models.EventSave, UserID: &userID, DeviceID: nil,
+		})
 		ctx.JSON(iris.Map{"success": true, "savesCount": video.SavesCount})
 	} else {
 		ctx.JSON(iris.Map{"success": true})
@@ -970,9 +985,10 @@ func RecordVideoView(ctx iris.Context) {
 		fmt.Printf("🔍 RecordVideoView: No userID found - recording as anonymous view\n")
 	}
 
-	// Get device ID from request body (for anonymous users)
+	// Get device ID and watch duration from request body (for anonymous users and meaningful view)
 	var input struct {
-		DeviceID *string `json:"deviceID"`
+		DeviceID         *string  `json:"deviceID"`
+		WatchDurationSec *float64 `json:"watchDurationSec"`
 	}
 	ctx.ReadJSON(&input)
 	if input.DeviceID != nil && *input.DeviceID != "" {
@@ -1014,6 +1030,8 @@ func RecordVideoView(ctx iris.Context) {
 		// View already recorded recently, just update timestamp
 		existingView.ViewedAt = time.Now()
 		storage.DB.Save(&existingView)
+		// Still record interaction for watch_duration (append-only; useful for ML)
+		services.InteractionServiceInstance().RecordVideoView(videoID, video.PropertyID, input.WatchDurationSec, userID, deviceID)
 		ctx.JSON(iris.Map{"success": true, "message": "View updated"})
 		return
 	}
@@ -1035,6 +1053,9 @@ func RecordVideoView(ctx iris.Context) {
 
 	// Increment video view count
 	storage.DB.Model(&video).UpdateColumn("view_count", gorm.Expr("view_count + 1"))
+
+	// Append-only interaction for recommendations (meaningful view computed in service)
+	services.InteractionServiceInstance().RecordVideoView(videoID, video.PropertyID, input.WatchDurationSec, userID, deviceID)
 
 	ctx.JSON(iris.Map{"success": true, "message": "View recorded"})
 }

@@ -2,6 +2,7 @@ package routes
 
 import (
 	"apartments-clone-server/models"
+	"apartments-clone-server/services"
 	"apartments-clone-server/storage"
 	"apartments-clone-server/utils"
 	"fmt"
@@ -32,17 +33,28 @@ func RecordPropertySaleVideoView(ctx iris.Context) {
 		userID = &ctxUserID
 	}
 
-	// Get deviceID from request body (optional)
+	// Get deviceID and watchDurationSec from request body (optional)
 	var input struct {
-		DeviceID *string `json:"deviceID"`
+		DeviceID         *string  `json:"deviceID"`
+		WatchDurationSec *float64 `json:"watchDurationSec"`
 	}
-	if err := ctx.ReadJSON(&input); err == nil && input.DeviceID != nil {
-		deviceID = input.DeviceID
+	if err := ctx.ReadJSON(&input); err == nil {
+		if input.DeviceID != nil {
+			deviceID = input.DeviceID
+		}
 	}
 
-	// For property sale videos, we don't have a separate PropertySaleVideo table
-	// Views are tracked at the PropertySale level or we can create a view tracking table
-	// For now, we'll just log the view (can be extended later to track in a separate table)
+	// Append-only interaction for recommendations (entity=property_sale when viewing listing's video)
+	psID := propertySaleID
+	services.InteractionServiceInstance().Record(services.InteractionInput{
+		EntityType:       models.EntityPropertySale,
+		EntityID:         propertySaleID,
+		PropertySaleID:   &psID,
+		EventType:        models.EventVideoView,
+		WatchDurationSec: input.WatchDurationSec,
+		UserID:           userID,
+		DeviceID:         deviceID,
+	})
 
 	log.Printf("📹 Property Sale Video View: propertySaleID=%d, userID=%v, deviceID=%v",
 		propertySaleID, userID, deviceID)
@@ -99,6 +111,12 @@ func CreatePropertySaleVideo(ctx iris.Context) {
 		utils.CreateInternalServerError(ctx)
 		return
 	}
+
+	// Notify users who viewed this property or its videos (TikTok-style, dedup/cooldown)
+	psID := video.PropertySaleID
+	go func() {
+		services.NotificationServiceInstance.NotifyNewVideoForProperty("sale", nil, &psID, video.ID, video.Caption, video.ThumbnailURL)
+	}()
 
 	ctx.JSON(iris.Map{"success": true, "video": video})
 }
@@ -345,6 +363,13 @@ func LikePropertySaleVideo(ctx iris.Context) {
 		return
 	}
 
+	// Record interaction for recommendations (id can be property_sale_id for synthetic or PropertySaleVideo.ID)
+	psID := videoID
+	services.InteractionServiceInstance().Record(services.InteractionInput{
+		EntityType: models.EntityPropertySale, EntityID: videoID, PropertySaleID: &psID,
+		EventType: models.EventLike, UserID: &userID, DeviceID: nil,
+	})
+
 	// Count total likes for this property sale video (synthetic videos, so count from likes table)
 	var likesCount int64
 	storage.DB.Model(&models.PropertySaleVideoLike{}).Where("property_sale_video_id = ?", videoID).Count(&likesCount)
@@ -424,6 +449,13 @@ func SavePropertySaleVideo(ctx iris.Context) {
 		utils.CreateInternalServerError(ctx)
 		return
 	}
+
+	// Record interaction for recommendations
+	psID := videoID
+	services.InteractionServiceInstance().Record(services.InteractionInput{
+		EntityType: models.EntityPropertySale, EntityID: videoID, PropertySaleID: &psID,
+		EventType: models.EventSave, UserID: &userID, DeviceID: nil,
+	})
 
 	// Count total saves for this property sale video (synthetic videos, so count from saves table)
 	var savesCount int64

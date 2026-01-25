@@ -36,7 +36,7 @@ func connectToDB() *gorm.DB {
 }
 
 func performMigrations(db *gorm.DB) {
-	db.AutoMigrate(
+	err := db.AutoMigrate(
 		&models.Conversation{}, // create table containing many side first
 		&models.Message{},
 		&models.User{},
@@ -130,7 +130,29 @@ func performMigrations(db *gorm.DB) {
 		// User Behavior Tracking
 		&models.UserBehavior{},
 		&models.AnonymousUserPreference{}, // Anonymous user preferences for intelligent notifications
+		// Token Management
+		&models.RefreshToken{},
+		// Recommendation & notification system (TikTok-style)
+		&models.Interaction{},
+		&models.RecommendationCache{},
+		&models.NotificationEvent{},
+		&models.NotificationDeliveryLog{},
 	)
+	if err != nil {
+		log.Printf("❌ AutoMigrate error: %v", err)
+	}
+
+	// CRITICAL: Ensure refresh_tokens table exists (safety check)
+	if !db.Migrator().HasTable(&models.RefreshToken{}) {
+		log.Println("⚠️ refresh_tokens table not found, creating it...")
+		if err := db.Migrator().CreateTable(&models.RefreshToken{}); err != nil {
+			log.Printf("❌ Failed to create refresh_tokens table: %v", err)
+		} else {
+			log.Println("✅ refresh_tokens table created successfully")
+		}
+	} else {
+		log.Println("✅ refresh_tokens table exists")
+	}
 
 	// Allow direct chat groups without an experience by making experience_id nullable
 	db.Exec("ALTER TABLE experience_groups ALTER COLUMN experience_id DROP NOT NULL;")
@@ -469,7 +491,7 @@ func performMigrations(db *gorm.DB) {
 		END $$;
 	`)
 
-	// Add view_count column to property_sales table for tracking property views
+	// Add property management and view tracking columns to property_sales table
 	db.Exec(`
 		DO $$ 
 		BEGIN
@@ -480,6 +502,32 @@ func performMigrations(db *gorm.DB) {
 			) THEN
 				ALTER TABLE property_sales ADD COLUMN view_count BIGINT DEFAULT 0;
 				CREATE INDEX IF NOT EXISTS idx_property_sales_view_count ON property_sales(view_count);
+			END IF;
+			
+			-- Add is_deactivated column if it doesn't exist
+			IF NOT EXISTS (
+				SELECT 1 FROM information_schema.columns 
+				WHERE table_name = 'property_sales' AND column_name = 'is_deactivated'
+			) THEN
+				ALTER TABLE property_sales ADD COLUMN is_deactivated BOOLEAN DEFAULT FALSE;
+				CREATE INDEX IF NOT EXISTS idx_property_sales_is_deactivated ON property_sales(is_deactivated);
+			END IF;
+			
+			-- Add is_sold column if it doesn't exist
+			IF NOT EXISTS (
+				SELECT 1 FROM information_schema.columns 
+				WHERE table_name = 'property_sales' AND column_name = 'is_sold'
+			) THEN
+				ALTER TABLE property_sales ADD COLUMN is_sold BOOLEAN DEFAULT FALSE;
+				CREATE INDEX IF NOT EXISTS idx_property_sales_is_sold ON property_sales(is_sold);
+			END IF;
+			
+			-- Add last_milestone_notified column if it doesn't exist
+			IF NOT EXISTS (
+				SELECT 1 FROM information_schema.columns 
+				WHERE table_name = 'property_sales' AND column_name = 'last_milestone_notified'
+			) THEN
+				ALTER TABLE property_sales ADD COLUMN last_milestone_notified BIGINT DEFAULT 0;
 			END IF;
 		END $$;
 	`)

@@ -812,6 +812,141 @@ func (ns *NotificationService) NotifyUserAboutExistingProperties(userID uint, ci
 	return nil
 }
 
+// NotifyNewVideoForProperty notifies users who viewed the property or its videos when a new video is added.
+// Uses: Interaction for candidates; NotificationDeliveryLog for cooldown and fingerprint dedup.
+// Excludes: users with notifications off, no tokens, or notified for this property within cooldown.
+// propertyKind: "rent" | "sale"; videoID: Video.ID (rent) or PropertySaleVideo.ID (sale); propertyID/propertySaleID set accordingly.
+func (ns *NotificationService) NotifyNewVideoForProperty(propertyKind string, propertyID, propertySaleID *uint, videoID uint, title, imageURL string) error {
+	if (propertyKind == "rent" && (propertyID == nil || *propertyID == 0)) || (propertyKind == "sale" && (propertySaleID == nil || *propertySaleID == 0)) {
+		return nil
+	}
+
+	// 1) Persist event for audit
+	ev := models.NotificationEvent{
+		EventType:      models.NotificationEventNewVideoForProperty,
+		PropertyKind:   propertyKind,
+		PropertyID:     propertyID,
+		PropertySaleID: propertySaleID,
+		VideoID:        nil,
+		VideoSaleID:    nil,
+	}
+	if propertyKind == "rent" {
+		ev.VideoID = &videoID
+	} else {
+		ev.VideoSaleID = &videoID
+	}
+	storage.DB.Create(&ev)
+
+	// 2) Find user IDs: viewed this property OR viewed videos linked to this property (from Interaction)
+	var userIDs []uint
+	if propertyKind == "rent" && propertyID != nil {
+		storage.DB.Model(&models.Interaction{}).Where("user_id IS NOT NULL AND (event_type = ? OR event_type = ?) AND (property_id = ? OR (entity_type = ? AND property_id = ?))",
+			models.EventPropertyView, models.EventVideoView, *propertyID, models.EntityVideo, *propertyID).
+			Distinct("user_id").Pluck("user_id", &userIDs)
+	} else if propertyKind == "sale" && propertySaleID != nil {
+		storage.DB.Model(&models.Interaction{}).Where("user_id IS NOT NULL AND (event_type = ? OR event_type = ?) AND (property_sale_id = ? OR (entity_type IN (?) AND property_sale_id = ?))",
+			models.EventPropertyView, models.EventVideoView, *propertySaleID, []string{models.EntityPropertySale, models.EntityPropertySaleVideo}, *propertySaleID).
+			Distinct("user_id").Pluck("user_id", &userIDs)
+	}
+
+	// Deduplicate
+	seen := make(map[uint]bool)
+	var candidates []uint
+	for _, u := range userIDs {
+		if u > 0 && !seen[u] {
+			seen[u] = true
+			candidates = append(candidates, u)
+		}
+	}
+
+	// 3) Cooldown: do not notify same user about same property within 12h
+	cooldown := 12 * time.Hour
+	cut := time.Now().Add(-cooldown)
+
+	eventType := models.NotificationEventNewVideoForProperty
+	timeWindow := time.Now().Format("2006-01-02") // fingerprint date
+
+	var lastErr error
+	sent := 0
+	for _, uid := range candidates {
+		// Skip if already notified within cooldown
+		var existing models.NotificationDeliveryLog
+		q := storage.DB.Where("user_id = ? AND event_type = ?", uid, eventType).Where("created_at >= ?", cut)
+		if propertyKind == "rent" && propertyID != nil {
+			q = q.Where("property_kind = ? AND property_id = ?", "rent", *propertyID)
+		} else if propertyKind == "sale" && propertySaleID != nil {
+			q = q.Where("property_kind = ? AND property_sale_id = ?", "sale", *propertySaleID)
+		}
+		if err := q.First(&existing).Error; err == nil {
+			continue // within cooldown
+		}
+
+		// Fingerprint for dedup (same user+property+event+day)
+		fp := models.BuildFingerprint(uid, propertyKind, propertyID, propertySaleID, eventType, timeWindow)
+		var dup models.NotificationDeliveryLog
+		if storage.DB.Where("fingerprint = ?", fp).First(&dup).Error == nil {
+			continue
+		}
+
+		// getUserPushTokens checks AllowsNotifications and tokens
+		if _, err := ns.getUserPushTokens(uid); err != nil {
+			continue
+		}
+
+		// Build message
+		body := "New video for a property you viewed."
+		if title != "" {
+			body = "New video: " + title
+		}
+		notifTitle := "📹 New Video"
+
+		params := fmt.Sprintf(`{"videoId":%d}`, videoID)
+		if propertyKind == "rent" && propertyID != nil {
+			params = fmt.Sprintf(`{"videoId":%d,"propertyId":%d}`, videoID, *propertyID)
+		} else if propertyKind == "sale" && propertySaleID != nil {
+			params = fmt.Sprintf(`{"videoId":%d,"propertySaleId":%d}`, videoID, *propertySaleID)
+		}
+
+		data := NotificationData{
+			Type:   "new_video_for_property",
+			ID:     fmt.Sprintf("%d", videoID),
+			Screen: "VideoFeed",
+			Params: params,
+			Action: "view_video",
+		}
+		if propertyKind == "rent" && propertyID != nil {
+			data.PropertyID = fmt.Sprintf("%d", *propertyID)
+		}
+
+		if err := ns.SendNotificationToUser(uid, notifTitle, body, data); err != nil {
+			lastErr = err
+		} else {
+			sent++
+			// Log delivery for cooldown and fingerprint dedup
+			logEntry := models.NotificationDeliveryLog{
+				UserID:         uid,
+				EventType:      eventType,
+				PropertyKind:   propertyKind,
+				PropertyID:     propertyID,
+				PropertySaleID: propertySaleID,
+				Fingerprint:    fp,
+			}
+			storage.DB.Create(&logEntry)
+		}
+	}
+
+	// Mark event processed
+	now := time.Now()
+	storage.DB.Model(&ev).Update("processed_at", &now)
+	log.Printf("✅ NotifyNewVideoForProperty: %s %v, candidates=%d, sent=%d", propertyKind, func() interface{} {
+		if propertyKind == "rent" {
+			return propertyID
+		}
+		return propertySaleID
+	}(), len(candidates), sent)
+	return lastErr
+}
+
 // Global notification service instance
 var NotificationServiceInstance = NewNotificationService()
 
@@ -842,4 +977,161 @@ func (ns *NotificationService) DebugUserNotificationSettings(userID uint) {
 			log.Printf("  - Error unmarshaling tokens: %v", err)
 		}
 	}
+}
+
+// NotifyHostOnViewMilestone notifies host when property hits view milestones (100, 200, 300, etc.)
+func (ns *NotificationService) NotifyHostOnViewMilestone(propertyID uint, viewCount int64, propertyTitle string, propertyImage string) error {
+	// Get property to find host
+	var property models.PropertySale
+	if err := storage.DB.First(&property, propertyID).Error; err != nil {
+		log.Printf("❌ Failed to find property %d for milestone notification: %v", propertyID, err)
+		return err
+	}
+
+	// Determine host ID (organization owner or individual owner)
+	var hostID uint
+	if property.OrganizationID != nil && *property.OrganizationID > 0 {
+		var org models.Organization
+		if err := storage.DB.First(&org, *property.OrganizationID).Error; err == nil && org.OwnerID > 0 {
+			hostID = org.OwnerID
+		}
+	} else if property.OwnerID != nil && *property.OwnerID > 0 {
+		hostID = *property.OwnerID
+	}
+
+	if hostID == 0 {
+		log.Printf("⚠️ No host found for property %d", propertyID)
+		return fmt.Errorf("no host found for property")
+	}
+
+	// Check if we've already notified for this milestone
+	milestone := (viewCount / 100) * 100 // Round down to nearest 100
+	if property.LastMilestoneNotified >= milestone {
+		return nil // Already notified for this milestone
+	}
+
+	// Update last milestone notified
+	storage.DB.Model(&property).UpdateColumn("last_milestone_notified", milestone)
+
+	title := fmt.Sprintf("🎉 %d Views Milestone!", viewCount)
+	body := fmt.Sprintf("Your property '%s' has reached %d views! Keep it up!", propertyTitle, viewCount)
+
+	params := fmt.Sprintf(`{"propertyId": %d, "viewCount": %d}`, propertyID, viewCount)
+	data := NotificationData{
+		Type:       "property_view_milestone",
+		ID:         fmt.Sprintf("%d", propertyID),
+		PropertyID: fmt.Sprintf("%d", propertyID),
+		HostID:     fmt.Sprintf("%d", hostID),
+		Screen:     "PropertySaleDetails",
+		Params:     params,
+		Action:     "view_property",
+	}
+
+	// Send notification with image
+	tokens, err := ns.getUserPushTokens(hostID)
+	if err != nil {
+		return err
+	}
+
+	// Use utils.SendNotification with image
+	dataMap := map[string]string{
+		"type":       data.Type,
+		"id":         data.ID,
+		"propertyId": data.PropertyID,
+		"hostId":     data.HostID,
+		"screen":     data.Screen,
+		"params":     data.Params,
+		"action":     data.Action,
+	}
+
+	var lastError error
+	for _, token := range tokens {
+		expoToken := token
+		if strings.Contains(token, "|") {
+			expoToken = strings.Split(token, "|")[0]
+		}
+
+		// Send with image using SendRichNotification
+		if err := utils.SendRichNotification(expoToken, title, body, propertyImage, dataMap); err != nil {
+			log.Printf("Failed to send milestone notification to token %s: %v", expoToken, err)
+			lastError = err
+		}
+	}
+
+	log.Printf("✅ View milestone notification sent to host %d for property %d (%d views)", hostID, propertyID, viewCount)
+	return lastError
+}
+
+// NotifyViewersOnViewMilestone notifies users who viewed the property when it hits milestones
+func (ns *NotificationService) NotifyViewersOnViewMilestone(propertyID uint, viewCount int64, propertyTitle string, propertyImage string) error {
+	// Get all users who viewed this property (from view tracking if available)
+	// For now, we'll use a simple approach: get users from property inquiries/tours
+	// In production, you might want a dedicated property_views table
+
+	var viewers []struct {
+		UserID uint
+	}
+
+	// Get users from inquiries
+	storage.DB.Table("property_inquiries").
+		Where("property_sale_id = ?", propertyID).
+		Select("DISTINCT user_id as user_id").
+		Scan(&viewers)
+
+	// Get users from tour bookings
+	var tourViewers []struct {
+		UserID uint
+	}
+	storage.DB.Table("property_tours").
+		Where("property_sale_id = ?", propertyID).
+		Select("DISTINCT user_id as user_id").
+		Scan(&tourViewers)
+
+	// Combine and deduplicate
+	viewerMap := make(map[uint]bool)
+	for _, v := range viewers {
+		viewerMap[v.UserID] = true
+	}
+	for _, v := range tourViewers {
+		viewerMap[v.UserID] = true
+	}
+
+	title := fmt.Sprintf("🔥 Popular Property Alert!")
+	body := fmt.Sprintf("The property '%s' you viewed has reached %d views! It's getting attention!", propertyTitle, viewCount)
+
+	params := fmt.Sprintf(`{"propertyId": %d, "viewCount": %d}`, propertyID, viewCount)
+	dataMap := map[string]string{
+		"type":       "property_popularity_alert",
+		"id":         fmt.Sprintf("%d", propertyID),
+		"propertyId": fmt.Sprintf("%d", propertyID),
+		"screen":     "PropertySaleDetails",
+		"params":     params,
+		"action":     "view_property",
+	}
+
+	var lastError error
+	notifiedCount := 0
+	for userID := range viewerMap {
+		tokens, err := ns.getUserPushTokens(userID)
+		if err != nil {
+			continue // Skip if no tokens
+		}
+
+		for _, token := range tokens {
+			expoToken := token
+			if strings.Contains(token, "|") {
+				expoToken = strings.Split(token, "|")[0]
+			}
+
+			if err := utils.SendRichNotification(expoToken, title, body, propertyImage, dataMap); err != nil {
+				log.Printf("Failed to send popularity alert to user %d: %v", userID, err)
+				lastError = err
+			} else {
+				notifiedCount++
+			}
+		}
+	}
+
+	log.Printf("✅ Popularity alerts sent to %d viewers for property %d (%d views)", notifiedCount, propertyID, viewCount)
+	return lastError
 }

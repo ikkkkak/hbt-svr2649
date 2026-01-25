@@ -156,8 +156,15 @@ type PropertySale struct {
 	IsPublished bool   `json:"is_published" gorm:"default:false"`
 	IsFeatured  bool   `json:"is_featured" gorm:"default:false"`
 	
+	// Property Management
+	IsDeactivated bool   `json:"is_deactivated" gorm:"default:false;index"` // Host can deactivate property
+	IsSold        bool   `json:"is_sold" gorm:"default:false;index"`       // Host can mark as sold
+	
 	// View Count - Tracks total views (excluding owner views)
 	ViewCount int64 `json:"view_count" gorm:"default:0;index"`
+	
+	// Last milestone notified (to avoid duplicate notifications)
+	LastMilestoneNotified int64 `json:"last_milestone_notified" gorm:"default:0"`
 
 	// Verification Information
 	VerifiedBy        *uint      `json:"verified_by"`
