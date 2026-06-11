@@ -731,7 +731,7 @@ func NewAIService() *AIService {
 		}
 		fmt.Printf("✅ OpenRouter API key loaded: %s\n", visible)
 	}
-
+	
 	model := os.Getenv("OPENROUTER_MODEL")
 	if model == "" {
 		model = "openai/gpt-4o-mini" // fast, cheap, multilingual
