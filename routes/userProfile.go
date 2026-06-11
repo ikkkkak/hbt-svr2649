@@ -300,9 +300,11 @@ func CreateOrUpdateUserProfile(ctx iris.Context) {
 		input.FirstName, input.LastName, input.Email)
 	fmt.Printf("📝 Full input data: %+v\n", input)
 
-	// Upload avatar if provided and not already a Cloudinary URL
+	// Upload avatar if provided and not already a hosted URL (Cloudinary or GCS)
 	avatarURL := input.AvatarURL
-	if avatarURL != "" && !strings.Contains(avatarURL, "res.cloudinary.com") {
+	if avatarURL != "" &&
+		!strings.Contains(avatarURL, "res.cloudinary.com") &&
+		!strings.Contains(avatarURL, "storage.googleapis.com") {
 		// Generate unique filename with timestamp
 		timestamp := time.Now().UnixNano() / int64(time.Millisecond)
 		publicID := fmt.Sprintf("profiles/%d/avatar_%d", userID, timestamp)
@@ -338,6 +340,26 @@ func CreateOrUpdateUserProfile(ctx iris.Context) {
 		userUpdates["email"] = input.Email
 	} else {
 		fmt.Printf("⚠️ Email is empty, skipping update\n")
+	}
+	if input.PhoneNumber != nil {
+		phone := strings.TrimSpace(*input.PhoneNumber)
+		if phone == "" {
+			userUpdates["phone_number"] = nil
+		} else {
+			if !utils.ValidatePhoneNumber(phone) {
+				ctx.StatusCode(iris.StatusBadRequest)
+				ctx.JSON(iris.Map{"error": "Invalid phone number format. Mauritanian phone numbers must be 8 digits starting with 2, 3, or 4."})
+				return
+			}
+			formatted := utils.NormalizePhoneNumber(phone)
+			var existing models.User
+			if err := storage.DB.Where("phone_number = ? AND id != ?", formatted, userID).Limit(1).Find(&existing).Error; err == nil && existing.ID > 0 {
+				ctx.StatusCode(iris.StatusBadRequest)
+				ctx.JSON(iris.Map{"error": "This phone number is already registered to another account."})
+				return
+			}
+			userUpdates["phone_number"] = formatted
+		}
 	}
 	if input.AvatarURL != "" {
 		userUpdates["avatar_url"] = avatarURL
@@ -600,6 +622,7 @@ type CreateOrUpdateProfileInput struct {
 	FirstName         string   `json:"firstName"`
 	LastName          string   `json:"lastName"`
 	Email             string   `json:"email"`
+	PhoneNumber       *string  `json:"phoneNumber"` // optional - for email users to add phone
 	AvatarURL         string   `json:"avatarURL"`
 	DateOfBirth       string   `json:"dateOfBirth"`
 	Bio               string   `json:"bio"`

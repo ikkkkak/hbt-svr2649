@@ -2,8 +2,12 @@ package storage
 
 import (
 	"apartments-clone-server/models"
+	"database/sql"
+	"fmt"
 	"log"
 	"os"
+	"strings"
+	"time"
 
 	"github.com/joho/godotenv"
 	"gorm.io/driver/postgres"
@@ -11,6 +15,14 @@ import (
 )
 
 var DB *gorm.DB
+
+// SQLDB exposes the underlying *sql.DB for fast raw queries (create listing, etc.).
+func SQLDB() (*sql.DB, error) {
+	if DB == nil {
+		return nil, fmt.Errorf("database not initialized")
+	}
+	return DB.DB()
+}
 
 func connectToDB() *gorm.DB {
 	// Only load .env in development (when RENDER env var is not set)
@@ -25,10 +37,27 @@ func connectToDB() *gorm.DB {
 	if dsn == "" {
 		log.Panic("DB_CONNECTION_STRING environment variable is required")
 	}
+	if !strings.Contains(dsn, "connect_timeout") {
+		sep := "?"
+		if strings.Contains(dsn, "?") {
+			sep = "&"
+		}
+		dsn += sep + "connect_timeout=5"
+	}
 
 	db, dbError := gorm.Open(postgres.Open(dsn), &gorm.Config{})
 	if dbError != nil {
 		log.Panic("error connection to db: " + dbError.Error())
+	}
+
+	// Connection pool tuning (important on Cloud Run/Cloud SQL to avoid stalls/timeouts).
+	if sqlDB, err := db.DB(); err == nil {
+		sqlDB.SetMaxOpenConns(40)
+		sqlDB.SetMaxIdleConns(10)
+		sqlDB.SetConnMaxLifetime(30 * time.Minute)
+		sqlDB.SetConnMaxIdleTime(5 * time.Minute)
+	} else {
+		log.Printf("⚠️ Could not access sql.DB for pool tuning: %v", err)
 	}
 
 	DB = db
@@ -85,8 +114,12 @@ func performMigrations(db *gorm.DB) {
 		&models.OrganizationInviteCode{}, // Secure invite codes
 		&models.OrganizationAuditLog{},   // Audit logging
 		&models.PropertySale{},
+		&models.PropertyPlace{},
 		&models.PropertyTour{},
 		&models.PropertyInquiry{},
+		&models.GuideComment{},
+		&models.GuideNotification{},
+		&models.GuideHostPreference{},
 		&models.PropertyOffer{},
 		&models.PropertySaleVideo{},
 		&models.PropertySaleVideoLike{},
@@ -98,6 +131,8 @@ func performMigrations(db *gorm.DB) {
 		&models.DeviceSession{},
 		&models.HiddenPropertySaleVideo{},
 		&models.Landmark{},
+		&models.LandmarkVideoLike{},
+		&models.LandmarkVideoSave{},
 		&models.NotificationPreference{},
 		&models.MarketingDevice{},
 		&models.CrashLog{},
@@ -105,6 +140,7 @@ func performMigrations(db *gorm.DB) {
 		&models.VideoReport{},
 		&models.UserFlag{},
 		&models.HiddenVideo{},
+		&models.Banner{},
 		// Stories
 		&models.Story{},
 		&models.StoryView{},
@@ -130,6 +166,7 @@ func performMigrations(db *gorm.DB) {
 		// User Behavior Tracking
 		&models.UserBehavior{},
 		&models.AnonymousUserPreference{}, // Anonymous user preferences for intelligent notifications
+		&models.PropertyFeedSeen{}, // Smart property feed seen-history
 		// Token Management
 		&models.RefreshToken{},
 		// Recommendation & notification system (TikTok-style)
@@ -137,10 +174,79 @@ func performMigrations(db *gorm.DB) {
 		&models.RecommendationCache{},
 		&models.NotificationEvent{},
 		&models.NotificationDeliveryLog{},
+		&models.DiscoveryEngagementLog{},
+		&models.GoldPropertyStat{},
+		// MeskenyGPT AI analytics
+		&models.AIInteraction{},
+		&models.AIFeedback{},
+		&models.MarketSnapshot{},
+		&models.MeskenyKnowledgeEntry{},
+		&models.PropertyFeedSeen{},
+		&models.ListingAIUsageEvent{},
+		&models.HabitatPlan{},
+		&models.HabitatSector{},
+		&models.HabitatPlot{},
 	)
 	if err != nil {
 		log.Printf("❌ AutoMigrate error: %v", err)
 	}
+
+	ensureHabitatGISRelations(db)
+	ensureLandmarkWishlistTables(db)
+
+	// CRITICAL: Ensure smart-feed seen table exists even if AutoMigrate partially fails.
+	// This prevents the app from behaving like there is no rotation state.
+	if !db.Migrator().HasTable(&models.PropertyFeedSeen{}) {
+		log.Println("⚠️ property_feed_seen table not found, creating it...")
+		if err := db.Migrator().CreateTable(&models.PropertyFeedSeen{}); err != nil {
+			log.Printf("❌ Failed to create property_feed_seen: %v", err)
+		} else {
+			log.Println("✅ property_feed_seen table created successfully")
+		}
+	}
+	// MeskenyGPT admin knowledge (RAG) — ensure table exists if AutoMigrate skipped or failed partway.
+	if !db.Migrator().HasTable(&models.MeskenyKnowledgeEntry{}) {
+		log.Println("⚠️ meskeny_knowledge_entries table not found, creating it...")
+		if err := db.Migrator().CreateTable(&models.MeskenyKnowledgeEntry{}); err != nil {
+			log.Printf("❌ Failed to create meskeny_knowledge_entries: %v", err)
+		} else {
+			log.Println("✅ meskeny_knowledge_entries table created successfully")
+		}
+	}
+	// Indexes for fast RAG snippet selection (active + locale + priority).
+	db.Exec(`
+		CREATE INDEX IF NOT EXISTS idx_meskeny_knowledge_active_locale_priority
+		ON meskeny_knowledge_entries(active, locale, priority DESC, id DESC)
+		WHERE deleted_at IS NULL
+	`)
+	// Make sure the unique indexes used by smart-feed de-dupe are present.
+	// (Partial indexes to support both user_id and anonymous device_id.)
+	db.Exec(`
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_property_feed_seen_user_property
+		ON property_feed_seen(user_id, property_id)
+		WHERE user_id IS NOT NULL
+	`)
+	db.Exec(`
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_property_feed_seen_device_property
+		ON property_feed_seen(device_id, property_id)
+		WHERE user_id IS NULL
+	`)
+
+	// Ensure users.id has a sequence default (fix "null value in column id" on INSERT)
+	db.Exec(`
+		DO $$
+		BEGIN
+			IF NOT EXISTS (SELECT 1 FROM pg_sequences WHERE schemaname = 'public' AND sequencename = 'users_id_seq') THEN
+				CREATE SEQUENCE users_id_seq;
+				ALTER SEQUENCE users_id_seq OWNED BY users.id;
+			END IF;
+			ALTER TABLE users ALTER COLUMN id SET DEFAULT nextval('users_id_seq'::regclass);
+			PERFORM setval('users_id_seq', GREATEST(COALESCE((SELECT MAX(id) FROM users), 0), 1));
+		EXCEPTION
+			WHEN undefined_table THEN NULL;
+			WHEN undefined_column THEN NULL;
+		END $$;
+	`)
 
 	// CRITICAL: Ensure refresh_tokens table exists (safety check)
 	if !db.Migrator().HasTable(&models.RefreshToken{}) {
@@ -154,6 +260,50 @@ func performMigrations(db *gorm.DB) {
 		log.Println("✅ refresh_tokens table exists")
 	}
 
+	// Ensure refresh_tokens has token_hash column and proper constraints (idempotent).
+	// Mirrors migrations/015_refresh_token_hash_and_90days.sql but safe to run on every startup.
+	db.Exec(`ALTER TABLE refresh_tokens ADD COLUMN IF NOT EXISTS token_hash TEXT`)
+	db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_refresh_tokens_token_hash ON refresh_tokens(token_hash) WHERE token_hash IS NOT NULL`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_refresh_tokens_hash_not_deleted ON refresh_tokens(token_hash, deleted_at) WHERE token_hash IS NOT NULL`)
+	db.Exec(`ALTER TABLE refresh_tokens ALTER COLUMN token DROP NOT NULL`)
+
+	// notification_preferences: backfill missing smart notification columns on old DBs.
+	// Prevents 500 on login when inserting/updating preference payloads from mobile.
+	db.Exec(`ALTER TABLE notification_preferences ADD COLUMN IF NOT EXISTS timezone VARCHAR(64) DEFAULT ''`)
+	db.Exec(`ALTER TABLE notification_preferences ADD COLUMN IF NOT EXISTS quiet_start_hour INTEGER DEFAULT 22`)
+	db.Exec(`ALTER TABLE notification_preferences ADD COLUMN IF NOT EXISTS quiet_end_hour INTEGER DEFAULT 7`)
+	db.Exec(`ALTER TABLE notification_preferences ADD COLUMN IF NOT EXISTS max_smart_per_day INTEGER DEFAULT 2`)
+	// videos: adaptive streaming (HLS) columns
+	db.Exec(`ALTER TABLE videos ADD COLUMN IF NOT EXISTS hls_url TEXT DEFAULT ''`)
+	db.Exec(`ALTER TABLE videos ADD COLUMN IF NOT EXISTS mobile_video_url TEXT DEFAULT ''`)
+	db.Exec(`ALTER TABLE videos ADD COLUMN IF NOT EXISTS processing_status VARCHAR(32) DEFAULT 'ready'`)
+	db.Exec(`ALTER TABLE videos ADD COLUMN IF NOT EXISTS processing_error TEXT DEFAULT ''`)
+	db.Exec(`ALTER TABLE videos ADD COLUMN IF NOT EXISTS source_width INTEGER DEFAULT 0`)
+	db.Exec(`ALTER TABLE videos ADD COLUMN IF NOT EXISTS source_height INTEGER DEFAULT 0`)
+	db.Exec(`ALTER TABLE videos ADD COLUMN IF NOT EXISTS renditions_json JSONB DEFAULT '[]'::jsonb`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_videos_processing_status ON videos(processing_status)`)
+	db.Exec(`ALTER TABLE videos ADD COLUMN IF NOT EXISTS processing_progress INTEGER DEFAULT 0`)
+	db.Exec(`ALTER TABLE videos ADD COLUMN IF NOT EXISTS sprite_sheet_url TEXT DEFAULT ''`)
+	db.Exec(`ALTER TABLE videos ADD COLUMN IF NOT EXISTS sprite_vtt_url TEXT DEFAULT ''`)
+
+	// landmarks: admin-curated high-visibility flag (used in ranking & badges).
+	db.Exec(`ALTER TABLE landmarks ADD COLUMN IF NOT EXISTS is_gold BOOLEAN DEFAULT false`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_landmarks_is_gold ON landmarks(is_gold)`)
+
+	// property_places: nearby restaurants, hospitals, schools (Google Places) — ensure table exists
+	if !db.Migrator().HasTable(&models.PropertyPlace{}) {
+		log.Println("⚠️ property_places table not found, creating it...")
+		if err := db.Migrator().CreateTable(&models.PropertyPlace{}); err != nil {
+			log.Printf("❌ Failed to create property_places table: %v", err)
+		} else {
+			log.Println("✅ property_places table created successfully")
+		}
+	}
+	if db.Migrator().HasTable(&models.PropertyPlace{}) {
+		db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS property_place_unique ON property_places(property_sale_id, place_id)`)
+		db.Exec(`CREATE INDEX IF NOT EXISTS property_places_property_id_idx ON property_places(property_sale_id)`)
+	}
+
 	// Allow direct chat groups without an experience by making experience_id nullable
 	db.Exec("ALTER TABLE experience_groups ALTER COLUMN experience_id DROP NOT NULL;")
 
@@ -162,6 +312,45 @@ func performMigrations(db *gorm.DB) {
 
 	// Make organization_id nullable in property_sales to allow individual owners
 	db.Exec("ALTER TABLE property_sales ALTER COLUMN organization_id DROP NOT NULL;")
+
+	// Add truckeck column (quality control validated by admin) - IF NOT EXISTS for idempotency
+	db.Exec("ALTER TABLE property_sales ADD COLUMN IF NOT EXISTS truckeck BOOLEAN DEFAULT FALSE;")
+	// Host-private notes for sale/rent/landmark creation flows (owner/internal use only)
+	db.Exec("ALTER TABLE property_sales ADD COLUMN IF NOT EXISTS host_private_note TEXT;")
+	db.Exec("ALTER TABLE landmarks ADD COLUMN IF NOT EXISTS host_private_note TEXT;")
+	db.Exec("ALTER TABLE properties ADD COLUMN IF NOT EXISTS host_private_note TEXT;")
+
+	// Landmarks: structured location + cadastre plot confirmation (see migrations/20260526_landmark_location_verification.sql)
+	db.Exec("ALTER TABLE landmarks ADD COLUMN IF NOT EXISTS city_id BIGINT;")
+	db.Exec("ALTER TABLE landmarks ADD COLUMN IF NOT EXISTS zone_id BIGINT;")
+	db.Exec("ALTER TABLE landmarks ADD COLUMN IF NOT EXISTS quartier_id BIGINT;")
+	db.Exec("ALTER TABLE landmarks ADD COLUMN IF NOT EXISTS habitat_plot_id BIGINT;")
+	db.Exec("ALTER TABLE landmarks ADD COLUMN IF NOT EXISTS plot_confirmed BOOLEAN NOT NULL DEFAULT false;")
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_landmarks_city_id ON landmarks(city_id);")
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_landmarks_zone_id ON landmarks(zone_id);")
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_landmarks_quartier_id ON landmarks(quartier_id);")
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_landmarks_habitat_plot_id ON landmarks(habitat_plot_id);")
+
+	// Add true_broker column to users (admin-verified broker; all their properties show TrueBroker)
+	db.Exec("ALTER TABLE users ADD COLUMN IF NOT EXISTS true_broker BOOLEAN DEFAULT FALSE;")
+
+	// Banners table for promotional content in property sale feed
+	db.Exec(`
+		CREATE TABLE IF NOT EXISTS banners (
+			id SERIAL PRIMARY KEY,
+			image_url TEXT NOT NULL,
+			link_url TEXT DEFAULT '',
+			width INTEGER DEFAULT 800,
+			height INTEGER DEFAULT 200,
+			sort_order INTEGER DEFAULT 0,
+			is_active BOOLEAN DEFAULT true,
+			created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+			updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+			deleted_at TIMESTAMP WITH TIME ZONE
+		);
+	`)
+	db.Exec("ALTER TABLE banners ADD COLUMN IF NOT EXISTS width INTEGER DEFAULT 800;")
+	db.Exec("ALTER TABLE banners ADD COLUMN IF NOT EXISTS height INTEGER DEFAULT 200;")
 
 	// Update foreign key constraint for property_sales to allow NULL
 	db.Exec(`
@@ -186,6 +375,18 @@ func performMigrations(db *gorm.DB) {
 
 	// Make organization_id nullable in landmarks to allow individual owners
 	db.Exec("ALTER TABLE landmarks ALTER COLUMN organization_id DROP NOT NULL;")
+
+	// Landmarks: make map highlight optional (allow NULL coordinates) + optional lots
+	// NOTE: AutoMigrate does NOT reliably drop NOT NULL constraints, so we do a best-effort SQL fix.
+	db.Exec("ALTER TABLE landmarks ADD COLUMN IF NOT EXISTS lots INTEGER;")
+	db.Exec("ALTER TABLE landmarks ALTER COLUMN point1_lat DROP NOT NULL;")
+	db.Exec("ALTER TABLE landmarks ALTER COLUMN point1_lng DROP NOT NULL;")
+	db.Exec("ALTER TABLE landmarks ALTER COLUMN point2_lat DROP NOT NULL;")
+	db.Exec("ALTER TABLE landmarks ALTER COLUMN point2_lng DROP NOT NULL;")
+	db.Exec("ALTER TABLE landmarks ALTER COLUMN point3_lat DROP NOT NULL;")
+	db.Exec("ALTER TABLE landmarks ALTER COLUMN point3_lng DROP NOT NULL;")
+	db.Exec("ALTER TABLE landmarks ALTER COLUMN point4_lat DROP NOT NULL;")
+	db.Exec("ALTER TABLE landmarks ALTER COLUMN point4_lng DROP NOT NULL;")
 
 	// Update foreign key constraint for landmarks to allow NULL
 	db.Exec(`
@@ -531,6 +732,85 @@ func performMigrations(db *gorm.DB) {
 			END IF;
 		END $$;
 	`)
+}
+
+// ensureLandmarkWishlistTables creates landmark like/save tables if missing (wishlist hearts).
+// Mirrors migrations/016_landmark_video_likes_saves.sql — safe on every startup.
+func ensureLandmarkWishlistTables(db *gorm.DB) {
+	if !db.Migrator().HasTable(&models.Landmark{}) {
+		log.Println("⚠️ landmarks table missing; skipping landmark_video_saves setup")
+		return
+	}
+
+	if !db.Migrator().HasTable(&models.LandmarkVideoLike{}) {
+		log.Println("⚠️ landmark_video_likes table not found, creating it...")
+		if err := db.Migrator().CreateTable(&models.LandmarkVideoLike{}); err != nil {
+			log.Printf("❌ GORM create landmark_video_likes failed: %v — trying SQL fallback", err)
+		}
+	}
+
+	if !db.Migrator().HasTable(&models.LandmarkVideoSave{}) {
+		log.Println("⚠️ landmark_video_saves table not found, creating it...")
+		if err := db.Migrator().CreateTable(&models.LandmarkVideoSave{}); err != nil {
+			log.Printf("❌ GORM create landmark_video_saves failed: %v — trying SQL fallback", err)
+		}
+	}
+
+	// Idempotent SQL (handles partial GORM failures and old DBs that never ran migration 016).
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS landmark_video_likes (
+			id SERIAL PRIMARY KEY,
+			landmark_id INTEGER NOT NULL REFERENCES landmarks(id) ON DELETE CASCADE,
+			user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			created_at TIMESTAMPTZ DEFAULT NOW(),
+			updated_at TIMESTAMPTZ DEFAULT NOW(),
+			deleted_at TIMESTAMPTZ,
+			UNIQUE(landmark_id, user_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_landmark_video_likes_landmark ON landmark_video_likes(landmark_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_landmark_video_likes_user ON landmark_video_likes(user_id)`,
+		`CREATE TABLE IF NOT EXISTS landmark_video_saves (
+			id SERIAL PRIMARY KEY,
+			landmark_id INTEGER NOT NULL REFERENCES landmarks(id) ON DELETE CASCADE,
+			user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			created_at TIMESTAMPTZ DEFAULT NOW(),
+			updated_at TIMESTAMPTZ DEFAULT NOW(),
+			deleted_at TIMESTAMPTZ,
+			UNIQUE(landmark_id, user_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_landmark_video_saves_landmark ON landmark_video_saves(landmark_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_landmark_video_saves_user ON landmark_video_saves(user_id)`,
+	}
+	for _, stmt := range stmts {
+		if err := db.Exec(stmt).Error; err != nil {
+			log.Printf("❌ ensureLandmarkWishlistTables SQL: %v", err)
+			return
+		}
+	}
+
+	if db.Migrator().HasTable(&models.LandmarkVideoSave{}) {
+		log.Println("✅ landmark_video_saves table ready")
+	}
+}
+
+// ensureHabitatGISRelations adds plan_id on plots and indexes (idempotent).
+func ensureHabitatGISRelations(db *gorm.DB) {
+	if !db.Migrator().HasTable(&models.HabitatPlot{}) {
+		return
+	}
+	if !db.Migrator().HasColumn(&models.HabitatPlot{}, "PlanID") {
+		_ = db.Migrator().AddColumn(&models.HabitatPlot{}, "PlanID")
+	}
+	db.Exec(`
+		UPDATE habitat_plots p
+		SET plan_id = s.plan_id
+		FROM habitat_sectors s
+		WHERE p.sector_id = s.id AND (p.plan_id IS NULL OR p.plan_id <> s.plan_id)
+	`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_habitat_plots_plan ON habitat_plots(plan_id)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_habitat_plots_plan_sector ON habitat_plots(plan_id, sector_id)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_habitat_plots_number ON habitat_plots(plot_number)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_habitat_sectors_plan ON habitat_sectors(plan_id)`)
 }
 
 func InitializeDB() *gorm.DB {

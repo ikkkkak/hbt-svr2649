@@ -19,6 +19,19 @@ type Video struct {
 	DurationSec  float64 `json:"durationSec"`
 	Caption      string  `json:"caption" gorm:"type:text"`
 
+	// Adaptive streaming (HLS) — populated by async transcoding worker
+	HlsURL          string `json:"hlsURL" gorm:"column:hls_url"`
+	MobileVideoURL  string `json:"mobile_video_url" gorm:"column:mobile_video_url"`
+	ProcessingStatus string `json:"processingStatus" gorm:"column:processing_status;default:ready;index"` // pending | processing | ready | failed
+	ProcessingError  string `json:"processingError,omitempty" gorm:"column:processing_error;type:text"`
+	SourceWidth      int    `json:"sourceWidth,omitempty" gorm:"column:source_width"`
+	SourceHeight     int    `json:"sourceHeight,omitempty" gorm:"column:source_height"`
+	RenditionsJSON      []byte `json:"renditions,omitempty" gorm:"column:renditions_json;type:jsonb"`
+	ProcessingProgress  int    `json:"processingProgress" gorm:"column:processing_progress;default:0"`
+	SpriteSheetURL      string `json:"spriteSheetURL" gorm:"column:sprite_sheet_url"`
+	SpriteVttURL        string `json:"spriteVttURL,omitempty" gorm:"column:sprite_vtt_url"`
+	PreviewBlurURL      string `json:"preview_blur_url" gorm:"column:preview_blur_url"`
+
 	LikesCount    int64 `json:"likesCount" gorm:"default:0"`
 	CommentsCount int64 `json:"commentsCount" gorm:"default:0"`
 	SavesCount    int64 `json:"savesCount" gorm:"default:0"`

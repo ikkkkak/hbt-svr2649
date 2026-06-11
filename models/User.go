@@ -2,6 +2,7 @@ package models
 
 import (
 	"encoding/json"
+	"time"
 
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
@@ -35,10 +36,25 @@ type User struct {
 	IDBackImage         string         `json:"idBackImage"`
 	SelfieImage         string         `json:"selfieImage"`
 	Role                string         `json:"role" gorm:"type:varchar(20);default:user;index"` // user, host, admin, super_admin
+	TrueBroker          bool           `json:"true_broker" gorm:"default:false"`                // admin-verified broker; all their properties show TrueBroker
+	BrokerID            string         `json:"broker_id" gorm:"uniqueIndex;size:32"`            // public ID e.g. MSK-B-100042
+	BrokerStatus        string         `json:"broker_status" gorm:"default:'none';index"`       // none, pending, approved, rejected
+	BrokerVerifiedAt    *time.Time     `json:"broker_verified_at"`
+	BrokerVerifiedBy    *uint          `json:"broker_verified_by"`
+	BrokerSubmittedAt   *time.Time     `json:"broker_submitted_at"`
+	BrokerLicenseURL    string         `json:"broker_license_url"`
+	BrokerSpokenLanguages datatypes.JSON `json:"broker_spoken_languages" gorm:"type:jsonb"`
+	BrokerRejectionNotes string        `json:"broker_rejection_notes,omitempty" gorm:"type:text"`
+	// When false, public listings still show verified badge + broker ID but hide name/avatar.
+	BrokerShowProfileOnListings bool `json:"broker_show_profile_on_listings" gorm:"default:true"`
 	FavoriteCityID      *uint        `json:"favoriteCityId" gorm:"index"`
 	FavoriteCityName    string         `json:"favoriteCityName" gorm:"type:varchar(255)"`
 	FavoriteZoneID      *uint          `json:"favoriteZoneId" gorm:"index"`
 	FavoriteZoneName    string         `json:"favoriteZoneName" gorm:"type:varchar(255)"`
+	// Host buyer-matching: nil = never asked; false = declined; true = opted in.
+	ShareProfileWithHosts *bool `json:"shareProfileWithHosts" gorm:"index"`
+	// When set, buyer profile is only shared with this host (exclusive).
+	HostShareLockedHostID *uint `json:"hostShareLockedHostId" gorm:"index"`
 }
 
 // Custom JSON marshaling to handle JSON fields properly

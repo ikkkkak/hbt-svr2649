@@ -7,16 +7,227 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
-	"math/rand"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/kataras/iris/v12"
 	"github.com/kataras/iris/v12/middleware/jwt"
-	"gorm.io/gorm"
 )
+
+// attachApprovedListingVideos sets Property.ListingVideo from the `videos` table (property-linked rent tours).
+// Uploads start as status=pending (CreateVideo); we prefer approved but fall back to latest pending so the row
+// in `videos` actually surfaces on discovery cards before/without admin action.
+// rentDiscoveryFilters holds optional query filters for GET …/criteria/:id/properties (rent listings).
+type rentDiscoveryFilters struct {
+	PropertyType string
+	CityID       *uint
+	ZoneID       *uint
+	QuartierID   *uint
+	MinPrice     *float64
+	MaxPrice     *float64
+}
+
+func (f rentDiscoveryFilters) active() bool {
+	return f.PropertyType != "" || f.CityID != nil || f.ZoneID != nil || f.QuartierID != nil ||
+		f.MinPrice != nil || f.MaxPrice != nil
+}
+
+func parseRentDiscoveryFilters(ctx iris.Context) rentDiscoveryFilters {
+	var f rentDiscoveryFilters
+	pt := strings.TrimSpace(ctx.URLParam("property_type"))
+	if pt == "" {
+		pt = strings.TrimSpace(ctx.URLParam("propertyType"))
+	}
+	pt = strings.ToLower(strings.TrimSpace(pt))
+	if pt != "" && pt != "all" {
+		f.PropertyType = pt
+	}
+	if v := strings.TrimSpace(ctx.URLParam("city_id")); v != "" {
+		if n, err := strconv.ParseUint(v, 10, 32); err == nil && n > 0 {
+			u := uint(n)
+			f.CityID = &u
+		}
+	}
+	if v := strings.TrimSpace(ctx.URLParam("zone_id")); v != "" {
+		if n, err := strconv.ParseUint(v, 10, 32); err == nil && n > 0 {
+			u := uint(n)
+			f.ZoneID = &u
+		}
+	}
+	if v := strings.TrimSpace(ctx.URLParam("quartier_id")); v != "" {
+		if n, err := strconv.ParseUint(v, 10, 32); err == nil && n > 0 {
+			u := uint(n)
+			f.QuartierID = &u
+		}
+	}
+	if v := strings.TrimSpace(ctx.URLParam("min_price")); v != "" {
+		if x, err := strconv.ParseFloat(v, 64); err == nil {
+			f.MinPrice = &x
+		}
+	}
+	if v := strings.TrimSpace(ctx.URLParam("max_price")); v != "" {
+		if x, err := strconv.ParseFloat(v, 64); err == nil {
+			f.MaxPrice = &x
+		}
+	}
+	return f
+}
+
+func propertyMatchesRentDiscovery(p models.Property, f rentDiscoveryFilters) bool {
+	if f.PropertyType != "" {
+		pt := strings.ToLower(strings.TrimSpace(p.PropertyType))
+		if pt != f.PropertyType {
+			return false
+		}
+	}
+	if f.CityID != nil {
+		if p.CityID == nil || *p.CityID != *f.CityID {
+			return false
+		}
+	}
+	if f.ZoneID != nil {
+		if p.ZoneID == nil || *p.ZoneID != *f.ZoneID {
+			return false
+		}
+	}
+	if f.QuartierID != nil {
+		if p.QuartierID == nil || *p.QuartierID != *f.QuartierID {
+			return false
+		}
+	}
+	n := float64(p.NightlyPrice)
+	if f.MinPrice != nil && n < *f.MinPrice {
+		return false
+	}
+	if f.MaxPrice != nil && n > *f.MaxPrice {
+		return false
+	}
+	return true
+}
+
+func publicRentListingStatuses(ctx iris.Context) []string {
+	raw := strings.TrimSpace(ctx.URLParam("status"))
+	if raw == "" {
+		return []string{"approved", "published"}
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	seen := map[string]struct{}{}
+	for _, p := range parts {
+		p = strings.TrimSpace(strings.ToLower(p))
+		if p != "approved" && p != "published" {
+			continue
+		}
+		if _, ok := seen[p]; ok {
+			continue
+		}
+		seen[p] = struct{}{}
+		out = append(out, p)
+	}
+	if len(out) == 0 {
+		return []string{"approved", "published"}
+	}
+	return out
+}
+
+func isBlockedRentListingStatus(status string) bool {
+	st := strings.TrimSpace(strings.ToLower(status))
+	if st == "" {
+		return true
+	}
+	if strings.Contains(st, "reject") {
+		return true
+	}
+	switch st {
+	case "pending", "draft", "denied", "cancelled", "canceled", "suspended", "inactive", "blocked":
+		return true
+	default:
+		return false
+	}
+}
+
+func isPublicRentListingStatus(status string) bool {
+	if isBlockedRentListingStatus(status) {
+		return false
+	}
+	st := strings.TrimSpace(strings.ToLower(status))
+	switch st {
+	case "approved", "published":
+		return true
+	default:
+		return false
+	}
+}
+
+func removePropertyFromLocationCriteria(propertyID uint) error {
+	return storage.DB.Where("property_id = ?", propertyID).Delete(&models.LocationCriteriaProperty{}).Error
+}
+
+func filterPropertiesByRentDiscovery(props []models.Property, f rentDiscoveryFilters) []models.Property {
+	out := make([]models.Property, 0, len(props))
+	for i := range props {
+		if propertyMatchesRentDiscovery(props[i], f) {
+			out = append(out, props[i])
+		}
+	}
+	return out
+}
+
+func attachApprovedListingVideos(pageItems []models.Property) {
+	if len(pageItems) == 0 {
+		return
+	}
+	ids := make([]uint, len(pageItems))
+	for i := range pageItems {
+		ids[i] = pageItems[i].ID
+	}
+	var rows []models.Video
+	q := storage.DB.Model(&models.Video{}).
+		Where("videos.property_id IN ?", ids).
+		Where("videos.video_url IS NOT NULL AND TRIM(videos.video_url) <> ''").
+		Where("COALESCE(videos.is_promotional, false) = ?", false).
+		Where("COALESCE(videos.is_flagged, false) = ?", false).
+		Where("LOWER(TRIM(COALESCE(videos.status, ''))) IN ?", []string{"approved", "pending"}).
+		Order(`videos.property_id ASC,
+			CASE WHEN LOWER(TRIM(COALESCE(videos.status, ''))) = 'approved' THEN 0 ELSE 1 END ASC,
+			videos.id DESC`)
+	if err := q.Find(&rows).Error; err != nil {
+		return
+	}
+	seen := make(map[uint]struct{})
+	for _, v := range rows {
+		if v.PropertyID == nil {
+			continue
+		}
+		pid := *v.PropertyID
+		if _, ok := seen[pid]; ok {
+			continue
+		}
+		seen[pid] = struct{}{}
+		st := strings.ToLower(strings.TrimSpace(v.Status))
+		if st == "" {
+			st = "pending"
+		}
+		lv := &models.PropertyListingVideo{
+			VideoID:      v.ID,
+			PropertyID:   pid,
+			VideoURL:     strings.TrimSpace(v.VideoURL),
+			ThumbnailURL: v.ThumbnailURL,
+			Caption:      v.Caption,
+			DurationSec:  v.DurationSec,
+			Status:       st,
+		}
+		for i := range pageItems {
+			if pageItems[i].ID == pid {
+				pageItems[i].ListingVideo = lv
+				break
+			}
+		}
+	}
+}
 
 // GetLocationCriteria returns all active location criteria
 func GetLocationCriteria(ctx iris.Context) {
@@ -88,6 +299,13 @@ func GetLocationProperties(ctx iris.Context) {
 	if err != nil || limit <= 0 {
 		limit = 8
 	}
+	if limit > 50 {
+		limit = 50
+	}
+	page := ctx.URLParamIntDefault("page", 1)
+	if page < 1 {
+		page = 1
+	}
 
 	// Get the location criteria
 	var criteria models.LocationCriteria
@@ -123,8 +341,18 @@ func GetLocationProperties(ctx iris.Context) {
 		}
 	}
 
-	// Build base query for properties
-	query := storage.DB.Where("location_criteria_id = ? AND is_active = ?", criteriaID, true)
+	allowedStatuses := publicRentListingStatuses(ctx)
+
+	// Build base query — only link rows whose property is active + publicly listable (approved).
+	query := storage.DB.
+		Where("location_criteria_id = ? AND is_active = ?", criteriaID, true).
+		Where(`property_id IN (
+			SELECT id FROM properties
+			WHERE COALESCE(is_active, true) = true
+			AND COALESCE(is_flagged, false) = false
+			AND LOWER(TRIM(COALESCE(status, ''))) IN ?
+			AND LOWER(TRIM(COALESCE(status, ''))) NOT IN ?
+		)`, allowedStatuses, []string{"rejected", "pending", "draft", "denied", "cancelled", "canceled", "suspended", "inactive", "blocked"})
 
 	// Apply user-specific exclusions if authenticated
 	if userID > 0 {
@@ -133,13 +361,11 @@ func GetLocationProperties(ctx iris.Context) {
 		query = query.Where("property_id NOT IN (SELECT p.id FROM properties p JOIN user_flags uf ON p.host_id = uf.flagged_user_id WHERE uf.flagger_id = ? AND uf.status='active')", userID)
 	}
 
-	// Get all properties assigned to this criteria (only active + approved/live)
+	// Get all properties assigned to this criteria (SQL already enforces public status)
 	var allCriteriaProperties []models.LocationCriteriaProperty
 
 	if err := query.
-		Preload("Property", func(db *gorm.DB) *gorm.DB {
-			return db.Where("is_active = ? AND status IN (?)", true, []string{"approved", "live"})
-		}).
+		Preload("Property").
 		Preload("Property.Host").
 		Find(&allCriteriaProperties).Error; err != nil {
 		ctx.StatusCode(iris.StatusInternalServerError)
@@ -150,9 +376,27 @@ func GetLocationProperties(ctx iris.Context) {
 	// Extract all properties first
 	var allProperties []models.Property
 	for _, cp := range allCriteriaProperties {
-		if cp.Property.ID != 0 { // Ensure property exists
-			allProperties = append(allProperties, cp.Property)
+		if cp.Property.ID == 0 {
+			continue
 		}
+		if !isPublicRentListingStatus(cp.Property.Status) {
+			continue
+		}
+		if cp.Property.IsActive != nil && !*cp.Property.IsActive {
+			continue
+		}
+		if cp.Property.IsFlagged {
+			continue
+		}
+		allProperties = append(allProperties, cp.Property)
+	}
+
+	rdFilters := parseRentDiscoveryFilters(ctx)
+	if rdFilters.active() {
+		before := len(allProperties)
+		allProperties = filterPropertiesByRentDiscovery(allProperties, rdFilters)
+		fmt.Printf("🔎 Rent discovery filters applied: %d -> %d properties (criteria=%d)\n",
+			before, len(allProperties), criteria.ID)
 	}
 
 	fmt.Printf("✅ Found %d properties for criteria '%s' before rotation\n", len(allProperties), criteria.Name)
@@ -186,71 +430,91 @@ func GetLocationProperties(ctx iris.Context) {
 
 	fmt.Printf("📸 Properties with images: %d, without images: %d\n", len(withImages), len(withoutImages))
 
-	// Apply time-based rotation for TikTok-like cycling
-	// Rotation changes per-request with high precision + random component for maximum variety
-	// This ensures users see different properties on each visit/reload
-	now := time.Now()
-	// High-precision rotation: includes seconds, nanoseconds, Unix timestamp, and random component
-	// Random component ensures different results even if requests happen at exact same time
-	rand.Seed(now.UnixNano()) // Seed random with current nanosecond for true randomness
-	randomComponent := int64(rand.Intn(10000)) // Random 0-9999
-	rotationSeed := int64(now.Second()) + 
-		int64(now.Minute())*60 + 
-		int64(now.Hour())*3600 + 
-		int64(now.Day())*86400 + 
-		int64(now.Month())*2678400 + 
-		(now.UnixNano() % 1000000) + // Use nanoseconds for microsecond-level variation
-		randomComponent // Add random component for guaranteed variation
-	
-	// Rotate both lists with different offsets for maximum variety
-	// Uses multiple rotation passes for better distribution
-	rotateProperties := func(props []models.Property, seed int64) []models.Property {
-		if len(props) == 0 {
+	// Rank each bucket first (fresh + popular content), then rotate with a deterministic seed.
+	// This gives variety between requests without unstable randomness or duplicate-heavy order.
+	sortBucket := func(props []models.Property) {
+		sort.SliceStable(props, func(i, j int) bool {
+			pi := props[i]
+			pj := props[j]
+			score := func(p models.Property) float64 {
+				s := 0.0
+				age := time.Since(p.CreatedAt)
+				if age <= 24*time.Hour {
+					s += 18
+				} else if age <= 7*24*time.Hour {
+					s += 10
+				}
+				if p.Rating >= 4.7 {
+					s += 10
+				} else if p.Rating >= 4.0 {
+					s += 6
+				}
+				if p.NightlyPrice > 0 {
+					// Slight preference for realistic market prices over outliers
+					s += 2
+				}
+				return s
+			}
+			si := score(pi)
+			sj := score(pj)
+			if si != sj {
+				return si > sj
+			}
+			if !pi.CreatedAt.Equal(pj.CreatedAt) {
+				return pi.CreatedAt.After(pj.CreatedAt)
+			}
+			return pi.ID > pj.ID
+		})
+	}
+	rotateBySeed := func(props []models.Property, seed uint64) []models.Property {
+		if len(props) <= 1 {
 			return props
 		}
-		if len(props) == 1 {
-			return props
-		}
-		
-		// Calculate offset with multiple components for better distribution
-		offset1 := int(seed % int64(len(props)))
-		offset2 := int((seed * 7) % int64(len(props))) // Different multiplier for variety
-		
-		// Use the larger offset, but ensure it's not 0
-		offset := offset1
-		if offset2 > offset1 {
-			offset = offset2
-		}
+		offset := int(seed % uint64(len(props)))
 		if offset == 0 {
-			offset = int((seed * 13) % int64(len(props)-1)) + 1 // Force non-zero with different multiplier
+			return props
 		}
-		
-		// Perform rotation
-		rotated := make([]models.Property, len(props))
-		copy(rotated, props[offset:])
-		copy(rotated[len(props)-offset:], props[:offset])
+		rotated := make([]models.Property, 0, len(props))
+		rotated = append(rotated, props[offset:]...)
+		rotated = append(rotated, props[:offset]...)
 		return rotated
 	}
 
-	withImages = rotateProperties(withImages, rotationSeed)
-	withoutImages = rotateProperties(withoutImages, rotationSeed+5000) // Different offset for variety
+	sortBucket(withImages)
+	sortBucket(withoutImages)
+
+	timeBucket := time.Now().Unix() / 30 // refresh ordering every ~30s
+	seedBase := uint64(criteriaID) ^ uint64(limit*31) ^ uint64(page*131) ^ uint64(timeBucket)
+	if userID > 0 {
+		seedBase ^= uint64(userID) * 11400714819323198485
+	}
+	withImages = rotateBySeed(withImages, seedBase)
+	withoutImages = rotateBySeed(withoutImages, seedBase^0x9e3779b97f4a7c15)
 
 	// Combine: properties with images first, then without
 	var properties []models.Property
 	properties = append(properties, withImages...)
 	properties = append(properties, withoutImages...)
 
-	// Apply limit after rotation
-	if limit > 0 && limit < len(properties) {
-		properties = properties[:limit]
+	totalCount := len(properties)
+	offset := (page - 1) * limit
+	if offset > totalCount {
+		offset = totalCount
 	}
+	end := offset + limit
+	if end > totalCount {
+		end = totalCount
+	}
+	pageItems := properties[offset:end]
+	hasMore := end < totalCount
 
-	fmt.Printf("✅ Returning %d properties (rotated, images prioritized, limit: %d)\n", len(properties), limit)
+	fmt.Printf("✅ Returning %d properties (criteria=%d page=%d limit=%d total=%d hasMore=%v)\n",
+		len(pageItems), criteria.ID, page, limit, totalCount, hasMore)
 
 	// Localize property fields based on requested language
 	lang := strings.ToLower(strings.TrimSpace(ctx.URLParamDefault("lang", "en")))
-	for i := range properties {
-		p := &properties[i]
+	for i := range pageItems {
+		p := &pageItems[i]
 		p.Title = utils.ResolveLocalizedText(p.Title, p.TitleTranslations, lang)
 		p.Description = utils.ResolveLocalizedText(p.Description, p.DescriptionTranslations, lang)
 		p.NeighborhoodDescription = utils.ResolveLocalizedText(
@@ -260,9 +524,11 @@ func GetLocationProperties(ctx iris.Context) {
 		)
 	}
 
+	attachApprovedListingVideos(pageItems)
+
 	// Log how many properties were found
-	fmt.Printf("🔍 FOUND %d PROPERTIES FOR CRITERIA '%s':\n", len(properties), criteria.Name)
-	for i, prop := range properties {
+	fmt.Printf("🔍 FOUND %d PROPERTIES FOR CRITERIA '%s' ON THIS PAGE:\n", len(pageItems), criteria.Name)
+	for i, prop := range pageItems {
 		fmt.Printf("  %d. ID: %d, Title: '%s', Price: %.2f MRU, Host: %s\n",
 			i+1, prop.ID, prop.Title, prop.NightlyPrice, prop.Host.FirstName+" "+prop.Host.LastName)
 	}
@@ -280,18 +546,24 @@ func GetLocationProperties(ctx iris.Context) {
 		IsActive:      criteria.IsActive,
 		Icon:          criteria.Icon,
 		Color:         criteria.Color,
-		PropertyCount: len(properties),
+		PropertyCount: totalCount,
 	}
 
 	response := models.GetLocationPropertiesResponse{
 		LocationCriteria: criteriaResponse,
-		Properties:       properties,
-		TotalCount:       len(properties),
+		Properties:       pageItems,
+		TotalCount:       totalCount,
 	}
 
 	ctx.JSON(iris.Map{
 		"success": true,
 		"data":    response,
+		"meta": iris.Map{
+			"page":    page,
+			"limit":   limit,
+			"total":   totalCount,
+			"hasMore": hasMore,
+		},
 	})
 }
 
@@ -336,8 +608,27 @@ func AssignPropertiesToCriteriaEndpoint(ctx iris.Context) {
 func AssignSinglePropertyToLocationCriteria(propertyID uint) error {
 	// Get the property
 	var property models.Property
-	if err := storage.DB.Where("id = ? AND is_active = ?", propertyID, true).First(&property).Error; err != nil {
+	if err := storage.DB.Where("id = ?", propertyID).First(&property).Error; err != nil {
 		return fmt.Errorf("property not found: %v", err)
+	}
+
+	if !isPublicRentListingStatus(property.Status) {
+		if err := removePropertyFromLocationCriteria(propertyID); err != nil {
+			return fmt.Errorf("failed to clear non-public property from criteria: %v", err)
+		}
+		return nil
+	}
+	if property.IsActive != nil && !*property.IsActive {
+		if err := removePropertyFromLocationCriteria(propertyID); err != nil {
+			return fmt.Errorf("failed to clear inactive property from criteria: %v", err)
+		}
+		return nil
+	}
+	if property.IsFlagged {
+		if err := removePropertyFromLocationCriteria(propertyID); err != nil {
+			return fmt.Errorf("failed to clear flagged property from criteria: %v", err)
+		}
+		return nil
 	}
 
 	// Get all active criteria ordered by priority (highest first)
@@ -353,6 +644,9 @@ func AssignSinglePropertyToLocationCriteria(propertyID uint) error {
 
 	// Calculate distance and assign to appropriate criteria
 	propertyAssigned := false
+	var closestCriterion *models.LocationCriteria
+	var closestDistance float64 = -1
+
 	for _, criterion := range criteria {
 		distance := CalculateDistance(
 			float64(property.Lat),
@@ -378,10 +672,30 @@ func AssignSinglePropertyToLocationCriteria(propertyID uint) error {
 			fmt.Printf("✅ Property %d assigned to criteria '%s' (distance: %.2fkm)\n",
 				property.ID, criterion.Name, distance)
 		}
+
+		// Track closest criterion for fallback (approved properties must show somewhere)
+		if closestDistance < 0 || distance < closestDistance {
+			closestDistance = distance
+			c := criterion
+			closestCriterion = &c
+		}
 	}
 
-	if !propertyAssigned {
-		fmt.Printf("⚠️ Property %d not assigned to any criteria (outside all radii)\n", property.ID)
+	// Fallback: if outside all radii, assign to closest criterion so approved property shows
+	if !propertyAssigned && closestCriterion != nil {
+		assignment := models.LocationCriteriaProperty{
+			LocationCriteriaID: closestCriterion.ID,
+			PropertyID:         property.ID,
+			Distance:           closestDistance,
+			IsActive:           true,
+		}
+		if err := storage.DB.Create(&assignment).Error; err != nil {
+			return fmt.Errorf("failed to create fallback assignment: %v", err)
+		}
+		fmt.Printf("✅ Property %d fallback-assigned to nearest criteria '%s' (distance: %.2fkm, outside radius)\n",
+			property.ID, closestCriterion.Name, closestDistance)
+	} else if !propertyAssigned {
+		fmt.Printf("⚠️ Property %d not assigned (no criteria exist)\n", property.ID)
 	}
 
 	return nil

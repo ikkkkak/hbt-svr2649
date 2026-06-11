@@ -4,7 +4,8 @@ import (
 	"apartments-clone-server/models"
 	"apartments-clone-server/storage"
 	"encoding/json"
-	"net"
+
+	// "encoding/json"
 
 	"github.com/kataras/iris/v12"
 	jsonWT "github.com/kataras/iris/v12/middleware/jwt"
@@ -37,10 +38,10 @@ func GetAccessToken(ctx iris.Context) *AccessToken { return nil }
 
 func GetJWT(ctx iris.Context) interface{} { return nil }
 
-func clientIP(ctx iris.Context) string {
-	if ip := ctx.GetHeader("X-Forwarded-For"); ip != "" {
-		return ip
-	}
-	ip, _, _ := net.SplitHostPort(ctx.RemoteAddr())
-	return ip
-}
+// func clientIP(ctx iris.Context) string {
+// 	if ip := ctx.GetHeader("X-Forwarded-For"); ip != "" {
+// 		return ip
+// 	}
+// 	ip, _, _ := net.SplitHostPort(ctx.RemoteAddr())
+// 	return ip
+// }

@@ -8,7 +8,7 @@ import (
 )
 
 func CreateError(statusCode int, title string, detail string, ctx iris.Context) {
-	ctx.StopWithProblem(statusCode, iris.NewProblem().Title(title).Detail(detail))
+	RespondAPIErrorFromTitle(ctx, statusCode, title, detail)
 }
 
 func CreateInternalServerError(ctx iris.Context) {

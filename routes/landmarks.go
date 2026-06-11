@@ -11,6 +11,7 @@ import (
 	"math/rand"
 	"net/http"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -19,6 +20,39 @@ import (
 	jwt "github.com/kataras/iris/v12/middleware/jwt"
 )
 
+// landmarkPublisherContactForAPI builds guest-facing publisher contact (organization or individual owner).
+func landmarkPublisherContactForAPI(lm *models.Landmark) *models.LandmarkPublisherContact {
+	if lm == nil {
+		return nil
+	}
+	if lm.Organization != nil {
+		return &models.LandmarkPublisherContact{
+			Type:    "organization",
+			Name:    lm.Organization.Name,
+			Phone:   lm.Organization.Phone,
+			Email:   lm.Organization.Email,
+			Website: lm.Organization.Website,
+		}
+	}
+	if lm.Owner != nil {
+		name := strings.TrimSpace(fmt.Sprintf("%s %s", lm.Owner.FirstName, lm.Owner.LastName))
+		if name == "" {
+			name = lm.Owner.Email
+		}
+		phone := ""
+		if lm.Owner.PhoneNumber != nil {
+			phone = strings.TrimSpace(*lm.Owner.PhoneNumber)
+		}
+		return &models.LandmarkPublisherContact{
+			Type:  "individual",
+			Name:  name,
+			Phone: phone,
+			Email: lm.Owner.Email,
+		}
+	}
+	return nil
+}
+
 // CreateLandmark creates a new landmark for an organization or individual owner
 func CreateLandmark(ctx iris.Context) {
 	userID := ctx.Values().Get("userID").(uint)
@@ -26,7 +60,7 @@ func CreateLandmark(ctx iris.Context) {
 	// SECURITY: Check if user is a member of an organization
 	// If they are, ALL lands MUST belong to that organization
 	var organizationID *uint
-	
+
 	// First check if user is owner of an organization
 	var organization models.Organization
 	if err := storage.DB.Where("owner_id = ?", userID).First(&organization).Error; err == nil {
@@ -48,24 +82,35 @@ func CreateLandmark(ctx iris.Context) {
 	}
 
 	var input struct {
-		Title          string   `json:"title"`
-		Description    string   `json:"description"`
-		Images         []string `json:"images"`
-		Area           float64  `json:"area"`
-		AreaUnit       string   `json:"area_unit"`
-		LandType       string   `json:"land_type"`
-		Zoning         string   `json:"zoning"`
-		Utilities      []string `json:"utilities"`
-		Point1Lat      float64  `json:"point1_lat"`
-		Point1Lng      float64  `json:"point1_lng"`
-		Point2Lat      float64  `json:"point2_lat"`
-		Point2Lng      float64  `json:"point2_lng"`
-		Point3Lat      float64  `json:"point3_lat"`
-		Point3Lng      float64  `json:"point3_lng"`
-		Point4Lat      float64  `json:"point4_lat"`
-		Point4Lng      float64  `json:"point4_lng"`
-		PropertyPapers []string `json:"property_papers"`
-		// New optional fields
+		Title       string   `json:"title"`
+		Description string   `json:"description"`
+		Images      []string `json:"images"`
+		VideoURL    *string  `json:"video_url"`
+		Area        float64  `json:"area"`
+		AreaUnit    string   `json:"area_unit"`
+		LandType    string   `json:"land_type"`
+		Zoning      string   `json:"zoning"`
+		Utilities   []string `json:"utilities"`
+		// Optional: only required when highlight_location=true
+		HighlightLocation bool     `json:"highlight_location"`
+		Point1Lat         *float64 `json:"point1_lat"`
+		Point1Lng         *float64 `json:"point1_lng"`
+		Point2Lat         *float64 `json:"point2_lat"`
+		Point2Lng         *float64 `json:"point2_lng"`
+		Point3Lat         *float64 `json:"point3_lat"`
+		Point3Lng         *float64 `json:"point3_lng"`
+		Point4Lat         *float64 `json:"point4_lat"`
+		Point4Lng         *float64 `json:"point4_lng"`
+		PropertyPapers    []string `json:"property_papers"`
+		PaperTypes        []string `json:"paper_types"`
+		// Structured location (required for new listings)
+		CityID     *uint `json:"city_id"`
+		ZoneID     *uint `json:"zone_id"`
+		QuartierID *uint `json:"quartier_id"`
+		// Cadastre match from Habitat GIS
+		HabitatPlotID *uint `json:"habitat_plot_id"`
+		PlotConfirmed bool  `json:"plot_confirmed"`
+		// Display labels (kept for search/backward compatibility)
 		District        string   `json:"district"`
 		Region          string   `json:"region"`
 		PlotNumber      string   `json:"plot_number"`
@@ -73,6 +118,10 @@ func CreateLandmark(ctx iris.Context) {
 		Sides           []string `json:"sides"`
 		Price           float64  `json:"price"`
 		Currency        string   `json:"currency"`
+		Lots            *int     `json:"lots"`
+
+		// Optional host-only note (never shown to guests on public reads)
+		HostPrivateNote string `json:"host_private_note"`
 	}
 
 	if err := ctx.ReadJSON(&input); err != nil {
@@ -87,22 +136,75 @@ func CreateLandmark(ctx iris.Context) {
 		ctx.JSON(iris.Map{"error": "Title is required"})
 		return
 	}
-
-	if input.Point1Lat == 0 || input.Point1Lng == 0 || input.Point2Lat == 0 || input.Point2Lng == 0 ||
-		input.Point3Lat == 0 || input.Point3Lng == 0 || input.Point4Lat == 0 || input.Point4Lng == 0 {
+	if input.CityID == nil || *input.CityID == 0 ||
+		input.ZoneID == nil || *input.ZoneID == 0 ||
+		input.QuartierID == nil || *input.QuartierID == 0 {
 		ctx.StatusCode(http.StatusBadRequest)
-		ctx.JSON(iris.Map{"error": "All coordinate points are required"})
+		ctx.JSON(iris.Map{"error": "City, zone, and sector are required"})
 		return
 	}
-
-	// Validate coordinates are within reasonable bounds
-	if !isValidCoordinate(input.Point1Lat, input.Point1Lng) ||
-		!isValidCoordinate(input.Point2Lat, input.Point2Lng) ||
-		!isValidCoordinate(input.Point3Lat, input.Point3Lng) ||
-		!isValidCoordinate(input.Point4Lat, input.Point4Lng) {
+	if strings.TrimSpace(input.PlotNumber) == "" {
 		ctx.StatusCode(http.StatusBadRequest)
-		ctx.JSON(iris.Map{"error": "Invalid coordinates"})
+		ctx.JSON(iris.Map{"error": "Plot number is required"})
 		return
+	}
+	if !input.PlotConfirmed {
+		ctx.StatusCode(http.StatusBadRequest)
+		ctx.JSON(iris.Map{"error": "Please confirm your plot details before publishing"})
+		return
+	}
+	if err := validateLandmarkLocationIDs(*input.CityID, *input.ZoneID, *input.QuartierID); err != nil {
+		ctx.StatusCode(http.StatusBadRequest)
+		ctx.JSON(iris.Map{"error": err.Error()})
+		return
+	}
+	if input.HabitatPlotID != nil && *input.HabitatPlotID > 0 {
+		if err := validateLandmarkHabitatPlot(input.HabitatPlotID, input.PlotNumber, *input.QuartierID); err != nil {
+			ctx.StatusCode(http.StatusBadRequest)
+			ctx.JSON(iris.Map{"error": err.Error()})
+			return
+		}
+	}
+	// At least one of images or video is required
+	if len(input.Images) == 0 && (input.VideoURL == nil || *input.VideoURL == "") {
+		ctx.StatusCode(http.StatusBadRequest)
+		ctx.JSON(iris.Map{"error": "You must upload at least one image or one video"})
+		return
+	}
+	// Determine media_type
+	mediaType := "images"
+	if len(input.Images) > 0 && input.VideoURL != nil && *input.VideoURL != "" {
+		mediaType = "both"
+	} else if input.VideoURL != nil && *input.VideoURL != "" {
+		mediaType = "video"
+	}
+
+	if input.HighlightLocation {
+		// Require all points when user chooses to highlight location
+		if input.Point1Lat == nil || input.Point1Lng == nil ||
+			input.Point2Lat == nil || input.Point2Lng == nil ||
+			input.Point3Lat == nil || input.Point3Lng == nil ||
+			input.Point4Lat == nil || input.Point4Lng == nil {
+			ctx.StatusCode(http.StatusBadRequest)
+			ctx.JSON(iris.Map{"error": "All coordinate points are required"})
+			return
+		}
+
+		// Validate coordinates are within reasonable bounds
+		if !isValidCoordinate(*input.Point1Lat, *input.Point1Lng) ||
+			!isValidCoordinate(*input.Point2Lat, *input.Point2Lng) ||
+			!isValidCoordinate(*input.Point3Lat, *input.Point3Lng) ||
+			!isValidCoordinate(*input.Point4Lat, *input.Point4Lng) {
+			ctx.StatusCode(http.StatusBadRequest)
+			ctx.JSON(iris.Map{"error": "Invalid coordinates"})
+			return
+		}
+	} else {
+		// If user skipped highlight, ensure we don't accidentally store partially-provided points
+		input.Point1Lat, input.Point1Lng = nil, nil
+		input.Point2Lat, input.Point2Lng = nil, nil
+		input.Point3Lat, input.Point3Lng = nil, nil
+		input.Point4Lat, input.Point4Lng = nil, nil
 	}
 
 	// Convert arrays to JSON
@@ -113,17 +215,25 @@ func CreateLandmark(ctx iris.Context) {
 
 	// Ensure owner_id is always set (use pointer to uint)
 	ownerIDPtr := &userID
+	videoURL := (*string)(nil)
+	if input.VideoURL != nil && *input.VideoURL != "" {
+		videoURL = input.VideoURL
+		log.Printf("📹 CreateLandmark: storing video_url=%s", *videoURL)
+	}
 	landmark := models.Landmark{
 		OrganizationID: organizationID, // Can be nil for individual owners
 		OwnerID:        ownerIDPtr,     // ALWAYS set owner_id to track individual owner
 		Title:          input.Title,
 		Description:    input.Description,
 		Images:         imagesJSON,
+		VideoURL:       videoURL,
+		MediaType:      mediaType,
 		Area:           input.Area,
 		AreaUnit:       input.AreaUnit,
 		LandType:       input.LandType,
 		Zoning:         input.Zoning,
 		Utilities:      utilitiesJSON,
+		Lots:           input.Lots,
 		Point1Lat:      input.Point1Lat,
 		Point1Lng:      input.Point1Lng,
 		Point2Lat:      input.Point2Lat,
@@ -133,17 +243,24 @@ func CreateLandmark(ctx iris.Context) {
 		Point4Lat:      input.Point4Lat,
 		Point4Lng:      input.Point4Lng,
 		PropertyPapers: papersJSON,
-		// New fields
+		PaperTypes:     input.PaperTypes,
+		CityID:         input.CityID,
+		ZoneID:         input.ZoneID,
+		QuartierID:     input.QuartierID,
+		HabitatPlotID:  input.HabitatPlotID,
+		PlotConfirmed:  input.PlotConfirmed,
+		// Location labels
 		District:        input.District,
 		Region:          input.Region,
-		PlotNumber:      input.PlotNumber,
+		PlotNumber:      strings.TrimSpace(input.PlotNumber),
 		ElevationMeters: input.ElevationMeters,
 		Sides:           sidesJSON,
 		Price:           input.Price,
-		Currency:    input.Currency,
-		Status:      "draft",
-		IsPublished: false,
-		IsVerified:  false,
+		Currency:        input.Currency,
+		Status:          "draft",
+		IsPublished:     false,
+		IsVerified:      false,
+		HostPrivateNote: sanitizeHostPrivateNote(input.HostPrivateNote),
 	}
 
 	// One-time translations for landmark title & description
@@ -157,11 +274,31 @@ func CreateLandmark(ctx iris.Context) {
 	}
 
 	if err := storage.DB.Create(&landmark).Error; err != nil {
+		log.Printf("❌ CreateLandmark DB error: %v (video_url=%v)", err, videoURL != nil)
 		ctx.StatusCode(http.StatusInternalServerError)
 		ctx.JSON(iris.Map{"error": "Failed to create landmark"})
 		return
 	}
 
+	landCity := strings.TrimSpace(landmark.District)
+	if landCity == "" {
+		landCity = strings.TrimSpace(landmark.Region)
+	}
+	services.NotifyAdminNewListing(services.ListingAdminNotifyInput{
+		Kind:         services.ListingKindLand,
+		ID:           landmark.ID,
+		Title:        landmark.Title,
+		City:         landCity,
+		Price:        landmark.Price,
+		Currency:     landmark.Currency,
+		PropertyType: landmark.LandType,
+		HostUserID:   userID,
+		Status:       landmark.Status,
+	})
+
+	if videoURL != nil {
+		log.Printf("✅ CreateLandmark: saved landmark id=%d with video_url", landmark.ID)
+	}
 	ctx.StatusCode(http.StatusCreated)
 	ctx.JSON(landmark)
 }
@@ -173,7 +310,7 @@ func GetOrganizationLandmarks(ctx iris.Context) {
 	// Check if user has an organization (as owner or member)
 	var organization models.Organization
 	var hasOrganization bool
-	
+
 	// First check if user is owner
 	if err := storage.DB.Where("owner_id = ?", userID).First(&organization).Error; err == nil {
 		hasOrganization = true
@@ -188,7 +325,7 @@ func GetOrganizationLandmarks(ctx iris.Context) {
 
 	var landmarks []models.Landmark
 	query := storage.DB.Preload("Organization").Preload("Owner")
-	
+
 	if hasOrganization {
 		// Fetch landmarks from organization OR individual landmarks owned by user
 		query = query.Where(
@@ -199,7 +336,7 @@ func GetOrganizationLandmarks(ctx iris.Context) {
 		// User has no organization - fetch only individual landmarks
 		query = query.Where("organization_id IS NULL AND owner_id = ?", userID)
 	}
-	
+
 	if err := query.Find(&landmarks).Error; err != nil {
 		ctx.StatusCode(http.StatusInternalServerError)
 		ctx.JSON(iris.Map{"error": "Failed to fetch landmarks"})
@@ -215,6 +352,59 @@ func GetOrganizationLandmarks(ctx iris.Context) {
 	}
 
 	ctx.JSON(iris.Map{"landmarks": landmarks})
+}
+
+// GetLandmarkByID returns a single landmark by ID with host info (organization or owner)
+func GetLandmarkByID(ctx iris.Context) {
+	id, err := ctx.Params().GetUint("id")
+	if err != nil {
+		ctx.StatusCode(http.StatusBadRequest)
+		ctx.JSON(iris.Map{"error": "Invalid landmark ID"})
+		return
+	}
+	lang := strings.ToLower(strings.TrimSpace(ctx.URLParamDefault("lang", "en")))
+	var landmark models.Landmark
+	if err := storage.DB.Preload("Organization").Preload("Organization.Owner").Preload("Owner").
+		Where("id = ? AND is_verified = ? AND is_published = ? AND status = ?", id, true, true, "verified").
+		First(&landmark).Error; err != nil {
+		ctx.StatusCode(http.StatusNotFound)
+		ctx.JSON(iris.Map{"error": "Landmark not found"})
+		return
+	}
+	landmark.Title = utils.ResolveLocalizedText(landmark.Title, landmark.TitleTranslations, lang)
+	landmark.Description = utils.ResolveLocalizedText(landmark.Description, landmark.DescriptionTranslations, lang)
+	redactLandmarkHostNote(&landmark, optionalAuthUserID(ctx))
+	redactLandmarkBrokerProfile(&landmark)
+	// Build host info: organization (if any) or individual owner - uniform structure
+	hostInfo := map[string]interface{}{
+		"type":  "organization",
+		"name":  "",
+		"phone": "",
+		"email": "",
+	}
+	if landmark.Organization != nil {
+		hostInfo["type"] = "organization"
+		hostInfo["name"] = landmark.Organization.Name
+		hostInfo["phone"] = landmark.Organization.Phone
+		hostInfo["email"] = landmark.Organization.Email
+		hostInfo["website"] = landmark.Organization.Website
+	} else if landmark.Owner != nil {
+		hostInfo["type"] = "individual"
+		hostInfo["name"] = strings.TrimSpace(fmt.Sprintf("%s %s", landmark.Owner.FirstName, landmark.Owner.LastName))
+		if hostInfo["name"] == "" {
+			hostInfo["name"] = landmark.Owner.Email
+		}
+		if landmark.Owner.PhoneNumber != nil && *landmark.Owner.PhoneNumber != "" {
+			hostInfo["phone"] = *landmark.Owner.PhoneNumber
+		}
+		hostInfo["email"] = landmark.Owner.Email
+	}
+	landmark.PublisherContact = landmarkPublisherContactForAPI(&landmark)
+	response := iris.Map{
+		"landmark": landmark,
+		"host":     hostInfo,
+	}
+	ctx.JSON(response)
 }
 
 // GetPublicLandmarks gets all verified and published landmarks for public display
@@ -244,12 +434,108 @@ func GetPublicLandmarks(ctx iris.Context) {
 
 	q := storage.DB.Model(&models.Landmark{}).
 		Preload("Organization").
+		Preload("Owner").
 		Where("landmarks.is_verified = ? AND landmarks.is_published = ? AND landmarks.status = ?", true, true, "verified")
 
-	if userID > 0 {
+	// Join organizations for city, zone, quartier filters and user blocking check
+	hasCityFilter := ctx.URLParam("city") != "" || ctx.URLParam("city_id") != ""
+	hasZoneFilter := ctx.URLParam("zone_id") != ""
+	hasQuartierFilter := ctx.URLParam("quartier_id") != ""
+	hasUserBlocking := userID > 0
+	if hasCityFilter || hasZoneFilter || hasQuartierFilter || hasUserBlocking {
+		q = q.Joins("LEFT JOIN organizations ON organizations.id = landmarks.organization_id")
+	}
+
+	// Filtering: Price range
+	if minPrice := ctx.URLParamFloat64Default("min_price", 0); minPrice > 0 {
+		q = q.Where("landmarks.price >= ?", minPrice)
+	}
+	if maxPrice := ctx.URLParamFloat64Default("max_price", 0); maxPrice > 0 {
+		q = q.Where("landmarks.price <= ?", maxPrice)
+	}
+	if minArea := ctx.URLParamIntDefault("min_area", 0); minArea > 0 {
+		if maxArea := ctx.URLParamIntDefault("max_area", 0); maxArea > 0 {
+			q = q.Where("landmarks.area >= ? AND landmarks.area <= ?", minArea, maxArea)
+		} else {
+			buffer := int(float64(minArea) * 0.1)
+			if buffer < 10 {
+				buffer = 10
+			}
+			rangeMin := minArea - buffer
+			if rangeMin < 0 {
+				rangeMin = 0
+			}
+			rangeMax := minArea + buffer
+			q = q.Where("landmarks.area >= ? AND landmarks.area <= ?", rangeMin, rangeMax)
+		}
+	} else if maxArea := ctx.URLParamIntDefault("max_area", 0); maxArea > 0 {
+		q = q.Where("landmarks.area <= ?", maxArea)
+	}
+	if v := strings.ToLower(strings.TrimSpace(ctx.URLParam("investment_opportunity"))); v == "1" || v == "true" || v == "yes" {
+		q = q.Where("landmarks.is_investment_opportunity = ?", true)
+	}
+	// Filtering: City (from organization) - support both city name and city_id
+	if cityName := ctx.URLParam("city"); cityName != "" {
+		q = q.Where("organizations.city = ?", cityName)
+	}
+	if cityID := ctx.URLParamIntDefault("city_id", 0); cityID > 0 {
+		var city models.City
+		if err := storage.DB.First(&city, uint(cityID)).Error; err == nil {
+			q = q.Where(
+				"(landmarks.city_id = ? OR (landmarks.city_id IS NULL AND (LOWER(organizations.city) = LOWER(?) OR LOWER(organizations.city) = LOWER(?))))",
+				uint(cityID),
+				city.Name,
+				city.NameAr,
+			)
+		} else {
+			q = q.Where("1 = 0")
+		}
+	}
+	// Filtering: Zone
+	if zoneID := ctx.URLParamIntDefault("zone_id", 0); zoneID > 0 {
+		var zone models.Zone
+		if err := storage.DB.First(&zone, uint(zoneID)).Error; err == nil {
+			q = q.Where(
+				"(landmarks.zone_id = ? OR (landmarks.zone_id IS NULL AND (LOWER(landmarks.district) = LOWER(?) OR LOWER(landmarks.region) = LOWER(?) OR LOWER(organizations.state) = LOWER(?) OR LOWER(landmarks.district) = LOWER(?) OR LOWER(landmarks.region) = LOWER(?) OR LOWER(organizations.state) = LOWER(?))))",
+				uint(zoneID),
+				zone.Name,
+				zone.Name,
+				zone.Name,
+				zone.NameAr,
+				zone.NameAr,
+				zone.NameAr,
+			)
+		} else {
+			q = q.Where("1 = 0")
+		}
+	}
+	// Filtering: Quartier / sector
+	if quartierID := ctx.URLParamIntDefault("quartier_id", 0); quartierID > 0 {
+		var quartier models.Quartier
+		if err := storage.DB.First(&quartier, uint(quartierID)).Error; err == nil {
+			q = q.Where(
+				"(landmarks.quartier_id = ? OR (landmarks.quartier_id IS NULL AND (LOWER(landmarks.region) = LOWER(?) OR LOWER(landmarks.district) = LOWER(?) OR LOWER(landmarks.region) = LOWER(?) OR LOWER(landmarks.district) = LOWER(?))))",
+				uint(quartierID),
+				quartier.Name,
+				quartier.Name,
+				quartier.NameAr,
+				quartier.NameAr,
+			)
+		} else {
+			q = q.Where("1 = 0")
+		}
+	}
+	// Legacy: Zone/District (keep for backward compatibility)
+	if district := ctx.URLParam("district"); district != "" {
+		q = q.Where("landmarks.district = ?", district)
+	}
+	if region := ctx.URLParam("region"); region != "" {
+		q = q.Where("landmarks.region = ?", region)
+	}
+
+	if hasUserBlocking {
 		// Exclude landmarks from blocked organizations' owners
-		q = q.Joins("LEFT JOIN organizations ON organizations.id = landmarks.organization_id").
-			Where("NOT EXISTS (SELECT 1 FROM user_flags uf WHERE uf.flagger_id = ? AND uf.status = 'active' AND uf.flagged_user_id = organizations.owner_id)", userID)
+		q = q.Where("NOT EXISTS (SELECT 1 FROM user_flags uf WHERE uf.flagger_id = ? AND uf.status = 'active' AND uf.flagged_user_id = organizations.owner_id)", userID)
 	}
 
 	var allLandmarks []models.Landmark
@@ -264,7 +550,7 @@ func GetPublicLandmarks(ctx iris.Context) {
 	// Separate landmarks with images from those without
 	var withImages []models.Landmark
 	var withoutImages []models.Landmark
-	
+
 	for _, landmark := range allLandmarks {
 		// Check if landmark has images (Images is stored as datatypes.JSON which is []byte)
 		hasImages := false
@@ -280,7 +566,7 @@ func GetPublicLandmarks(ctx iris.Context) {
 				}
 			}
 		}
-		
+
 		if hasImages {
 			withImages = append(withImages, landmark)
 		} else {
@@ -290,54 +576,54 @@ func GetPublicLandmarks(ctx iris.Context) {
 
 	fmt.Printf("📸 Landmarks with images: %d, without images: %d\n", len(withImages), len(withoutImages))
 
-	// Apply time-based rotation for TikTok-like cycling
-	// Rotation changes per-request with high precision + random component for maximum variety
-	// This ensures users see different landmarks on each visit/reload
+	// Gold-aware ranking: boost gold visibility while preserving discovery variety.
 	now := time.Now()
-	// High-precision rotation: includes seconds, nanoseconds, Unix timestamp, and random component
-	// Random component ensures different results even if requests happen at exact same time
-	rand.Seed(now.UnixNano()) // Seed random with current nanosecond for true randomness
-	randomComponent := int64(rand.Intn(10000)) // Random 0-9999
-	rotationSeed := int64(now.Second()) + 
-		int64(now.Minute())*60 + 
-		int64(now.Hour())*3600 + 
-		int64(now.Day())*86400 + 
-		int64(now.Month())*2678400 + 
-		(now.UnixNano() % 1000000) + // Use nanoseconds for microsecond-level variation
-		randomComponent // Add random component for guaranteed variation
-	
-	// Rotate both lists with different offsets for maximum variety
-	// Uses multiple rotation passes for better distribution
-	rotateLandmarks := func(landmarks []models.Landmark, seed int64) []models.Landmark {
-		if len(landmarks) == 0 {
-			return landmarks
+	rand.Seed(now.UnixNano())
+	scoreLandmarks := func(items []models.Landmark) []models.Landmark {
+		if len(items) <= 1 {
+			return items
 		}
-		if len(landmarks) == 1 {
-			return landmarks
+		scored := make([]struct {
+			landmark models.Landmark
+			score    float64
+		}, 0, len(items))
+		for _, lm := range items {
+			ageHours := now.Sub(lm.CreatedAt).Hours()
+			if ageHours < 0 {
+				ageHours = 0
+			}
+			// Freshness decays over ~30 days
+			freshness := 1.0 - (ageHours / (24.0 * 30.0))
+			if freshness < 0 {
+				freshness = 0
+			}
+			if freshness > 1 {
+				freshness = 1
+			}
+
+			// Gold gets a significant average lift with jitter so it's not always first.
+			goldBoost := 0.0
+			if lm.IsGold {
+				goldBoost = 0.28 + rand.Float64()*0.30 // 0.28 - 0.58
+			}
+			score := (0.45 * freshness) + (0.35 * rand.Float64()) + (0.20 * goldBoost)
+			scored = append(scored, struct {
+				landmark models.Landmark
+				score    float64
+			}{landmark: lm, score: score})
 		}
-		
-		// Calculate offset with multiple components for better distribution
-		offset1 := int(seed % int64(len(landmarks)))
-		offset2 := int((seed * 7) % int64(len(landmarks))) // Different multiplier for variety
-		
-		// Use the larger offset, but ensure it's not 0
-		offset := offset1
-		if offset2 > offset1 {
-			offset = offset2
+		sort.SliceStable(scored, func(i, j int) bool {
+			return scored[i].score > scored[j].score
+		})
+		ordered := make([]models.Landmark, 0, len(scored))
+		for _, s := range scored {
+			ordered = append(ordered, s.landmark)
 		}
-		if offset == 0 {
-			offset = int((seed * 13) % int64(len(landmarks)-1)) + 1 // Force non-zero with different multiplier
-		}
-		
-		// Perform rotation
-		rotated := make([]models.Landmark, len(landmarks))
-		copy(rotated, landmarks[offset:])
-		copy(rotated[len(landmarks)-offset:], landmarks[:offset])
-		return rotated
+		return ordered
 	}
 
-	withImages = rotateLandmarks(withImages, rotationSeed)
-	withoutImages = rotateLandmarks(withoutImages, rotationSeed+3000) // Different offset for variety
+	withImages = scoreLandmarks(withImages)
+	withoutImages = scoreLandmarks(withoutImages)
 
 	// Combine: landmarks with images first, then without
 	var landmarks []models.Landmark
@@ -353,8 +639,206 @@ func GetPublicLandmarks(ctx iris.Context) {
 		l.Title = utils.ResolveLocalizedText(l.Title, l.TitleTranslations, lang)
 		l.Description = utils.ResolveLocalizedText(l.Description, l.DescriptionTranslations, lang)
 	}
+	redactLandmarkSliceForViewer(landmarks, userID)
+	for i := range landmarks {
+		landmarks[i].PublisherContact = landmarkPublisherContactForAPI(&landmarks[i])
+	}
 
 	ctx.JSON(iris.Map{"landmarks": landmarks})
+}
+
+// GetLandmarkVideosFeed returns paginated landmark videos for the video feed tab
+// Only verified/published landmarks with video_url are returned
+// Format compatible with VideoFeedScreen (PropertySaleVideo-like structure)
+func GetLandmarkVideosFeed(ctx iris.Context) {
+	var userID uint = 0
+	if v := ctx.Values().Get("userID"); v != nil {
+		if id, ok := v.(uint); ok {
+			userID = id
+		}
+	}
+	if userID == 0 {
+		if auth := ctx.GetHeader("Authorization"); len(auth) > 7 && auth[:7] == "Bearer " {
+			verifier := jwt.NewVerifier(jwt.HS256, []byte(os.Getenv("ACCESS_TOKEN_SECRET")))
+			verifier.WithDefaultBlocklist()
+			if token, err := verifier.VerifyToken([]byte(auth[7:])); err == nil {
+				var claims utils.AccessToken
+				if err := token.Claims(&claims); err == nil {
+					userID = claims.ID
+				}
+			}
+		}
+	}
+
+	page := 1
+	if cursor := ctx.URLParam("cursor"); cursor != "" {
+		if p, err := strconv.Atoi(cursor); err == nil && p > 0 {
+			page = p
+		}
+	} else {
+		page = ctx.URLParamIntDefault("page", 1)
+	}
+	limit := ctx.URLParamIntDefault("limit", 10)
+	if page < 1 {
+		page = 1
+	}
+	if limit < 1 || limit > 50 {
+		limit = 10
+	}
+	offset := (page - 1) * limit
+	lang := strings.ToLower(strings.TrimSpace(ctx.URLParamDefault("lang", "en")))
+
+	// Filters: price range, district (zone), region (city)
+	q := storage.DB.Model(&models.Landmark{}).
+		Preload("Organization").
+		Preload("Owner").
+		Where("landmarks.is_verified = ? AND landmarks.is_published = ? AND landmarks.status = ?", true, true, "verified").
+		Where("landmarks.video_url IS NOT NULL AND landmarks.video_url != ''")
+
+	if userID > 0 {
+		q = q.Joins("LEFT JOIN organizations ON organizations.id = landmarks.organization_id").
+			Where("(organizations.id IS NULL OR NOT EXISTS (SELECT 1 FROM user_flags uf WHERE uf.flagger_id = ? AND uf.status = 'active' AND uf.flagged_user_id = organizations.owner_id))", userID)
+	}
+	// Price filter
+	if minPrice := ctx.URLParamFloat64Default("min_price", 0); minPrice > 0 {
+		q = q.Where("landmarks.price >= ?", minPrice)
+	}
+	if maxPrice := ctx.URLParamFloat64Default("max_price", 0); maxPrice > 0 {
+		q = q.Where("landmarks.price <= ?", maxPrice)
+	}
+	// Zone/district filter
+	if district := strings.TrimSpace(ctx.URLParam("district")); district != "" {
+		q = q.Where("LOWER(landmarks.district) = LOWER(?)", district)
+	}
+	// Region (city) filter
+	if region := strings.TrimSpace(ctx.URLParam("region")); region != "" {
+		q = q.Where("LOWER(landmarks.region) = LOWER(?)", region)
+	}
+
+	// Hybrid ranking: freshness + random + gold boost (boosted but non-deterministic)
+	var landmarks []models.Landmark
+	if err := q.Order(`(
+		0.45 * GREATEST(0, 1.0 - EXTRACT(EPOCH FROM (NOW() - landmarks.created_at)) / 86400.0 / 30.0) +
+		0.35 * random() +
+		0.20 * CASE WHEN landmarks.is_gold = true THEN (0.70 + random() * 0.30) ELSE random() * 0.35 END
+	) DESC`).Limit(limit + 1).Offset(offset).Find(&landmarks).Error; err != nil {
+		ctx.StatusCode(http.StatusInternalServerError)
+		ctx.JSON(iris.Map{"error": "Failed to fetch landmark videos"})
+		return
+	}
+
+	hasMore := len(landmarks) > limit
+	if hasMore {
+		landmarks = landmarks[:limit]
+	}
+
+	// Batch-fetch likes and saves counts + user's liked/saved state
+	lmIDs := make([]uint, 0, len(landmarks))
+	for _, lm := range landmarks {
+		if lm.VideoURL != nil && *lm.VideoURL != "" {
+			lmIDs = append(lmIDs, lm.ID)
+		}
+	}
+	likesCountMap := make(map[uint]int64)
+	savesCountMap := make(map[uint]int64)
+	userLikedMap := make(map[uint]bool)
+	userSavedMap := make(map[uint]bool)
+	if len(lmIDs) > 0 {
+		var likeCounts []struct {
+			LandmarkID uint
+			Cnt        int64
+		}
+		storage.DB.Model(&models.LandmarkVideoLike{}).Select("landmark_id, COUNT(*) as cnt").
+			Where("landmark_id IN ? AND deleted_at IS NULL", lmIDs).Group("landmark_id").Find(&likeCounts)
+		for _, r := range likeCounts {
+			likesCountMap[r.LandmarkID] = r.Cnt
+		}
+		var saveCounts []struct {
+			LandmarkID uint
+			Cnt        int64
+		}
+		storage.DB.Model(&models.LandmarkVideoSave{}).Select("landmark_id, COUNT(*) as cnt").
+			Where("landmark_id IN ? AND deleted_at IS NULL", lmIDs).Group("landmark_id").Find(&saveCounts)
+		for _, r := range saveCounts {
+			savesCountMap[r.LandmarkID] = r.Cnt
+		}
+		if userID > 0 {
+			var userLikes []models.LandmarkVideoLike
+			storage.DB.Where("landmark_id IN ? AND user_id = ?", lmIDs, userID).Find(&userLikes)
+			for _, l := range userLikes {
+				userLikedMap[l.LandmarkID] = true
+			}
+			var userSaves []models.LandmarkVideoSave
+			storage.DB.Where("landmark_id IN ? AND user_id = ?", lmIDs, userID).Find(&userSaves)
+			for _, s := range userSaves {
+				userSavedMap[s.LandmarkID] = true
+			}
+		}
+	}
+
+	var videos []map[string]interface{}
+	for _, lm := range landmarks {
+		if lm.VideoURL == nil || *lm.VideoURL == "" {
+			continue
+		}
+		lmForClient := lm
+		redactLandmarkHostNote(&lmForClient, userID)
+		lmTitle := utils.ResolveLocalizedText(lmForClient.Title, lmForClient.TitleTranslations, lang)
+		// Do not use landmark listing photos as video thumbnail — feed uses preview_blur / video still only.
+		thumbnailURL := ""
+		// Host info: organization (if any) or individual owner - avatar/logo for profile display
+		orgName := ""
+		orgLogo := ""
+		orgID := interface{}(nil)
+		if lmForClient.Organization != nil {
+			orgName = lmForClient.Organization.Name
+			orgLogo = lmForClient.Organization.Logo
+			orgID = lmForClient.Organization.ID
+		} else if lmForClient.Owner != nil {
+			orgName = strings.TrimSpace(fmt.Sprintf("%s %s", lmForClient.Owner.FirstName, lmForClient.Owner.LastName))
+			if orgName == "" {
+				orgName = lmForClient.Owner.Email
+			}
+			if lmForClient.Owner.AvatarURL != "" {
+				orgLogo = lmForClient.Owner.AvatarURL
+			}
+			orgID = lmForClient.Owner.ID
+		}
+		video := map[string]interface{}{
+			"ID":            lmForClient.ID,
+			"landmarkID":    lmForClient.ID,
+			"landmark":      lmForClient,
+			"videoURL":      *lmForClient.VideoURL,
+			"thumbnailURL":  thumbnailURL,
+			"caption":       lmTitle,
+			"title":         lmTitle,
+			"likesCount":    likesCountMap[lmForClient.ID],
+			"commentsCount": 0,
+			"savesCount":    savesCountMap[lmForClient.ID],
+			"viewCount":     0,
+			"liked":         userLikedMap[lmForClient.ID],
+			"saved":         userSavedMap[lmForClient.ID],
+			"organization": map[string]interface{}{
+				"id":      orgID,
+				"name":    orgName,
+				"logoURL": orgLogo,
+			},
+			"CreatedAt": lmForClient.CreatedAt,
+			"UpdatedAt": lmForClient.UpdatedAt,
+		}
+		videos = append(videos, video)
+	}
+
+	var nextCursor string
+	if hasMore {
+		nextCursor = fmt.Sprintf("%d", page+1)
+	}
+	fmt.Printf("📹 Landmark Videos Feed - Returning %d videos (page: %d)\n", len(videos), page)
+	ctx.JSON(iris.Map{
+		"videos":     videos,
+		"nextCursor": nextCursor,
+		"hasMore":    hasMore,
+	})
 }
 
 // UpdateLandmark updates an existing landmark
@@ -362,42 +846,72 @@ func UpdateLandmark(ctx iris.Context) {
 	userID := ctx.Values().Get("userID").(uint)
 	landmarkID, _ := strconv.ParseUint(ctx.Params().Get("id"), 10, 32)
 
-	// Get user's agent record to find organization
-	var agent models.Agent
-	if err := storage.DB.Where("user_id = ?", userID).First(&agent).Error; err != nil {
-		ctx.StatusCode(http.StatusNotFound)
-		ctx.JSON(iris.Map{"error": "User must be an agent to update landmarks"})
-		return
-	}
-
-	// Check if landmark exists and belongs to user's organization
 	var landmark models.Landmark
-	if err := storage.DB.Where("id = ? AND organization_id = ?", landmarkID, agent.OrganizationID).First(&landmark).Error; err != nil {
+	if err := storage.DB.Where("id = ?", landmarkID).First(&landmark).Error; err != nil {
 		ctx.StatusCode(http.StatusNotFound)
 		ctx.JSON(iris.Map{"error": "Landmark not found"})
 		return
 	}
 
+	// Authorization: user must own the landmark (owner_id) or belong to its organization
+	canUpdate := false
+	if landmark.OwnerID != nil && *landmark.OwnerID == userID {
+		canUpdate = true
+	}
+	if !canUpdate && landmark.OrganizationID != nil {
+		var org models.Organization
+		if err := storage.DB.Where("id = ? AND owner_id = ?", landmark.OrganizationID, userID).First(&org).Error; err == nil {
+			canUpdate = true
+		}
+	}
+	if !canUpdate && landmark.OrganizationID != nil {
+		var member models.OrganizationMember
+		if err := storage.DB.Where("organization_id = ? AND user_id = ? AND status = ? AND is_active = ?",
+			landmark.OrganizationID, userID, "active", true).First(&member).Error; err == nil {
+			canUpdate = true
+		}
+	}
+	if !canUpdate {
+		ctx.StatusCode(http.StatusForbidden)
+		ctx.JSON(iris.Map{"error": "You do not have permission to update this landmark"})
+		return
+	}
+
 	var input struct {
-		Title       string  `json:"title"`
-		Description string  `json:"description"`
-		Point1Lat   float64 `json:"point1_lat"`
-		Point1Lng   float64 `json:"point1_lng"`
-		Point2Lat   float64 `json:"point2_lat"`
-		Point2Lng   float64 `json:"point2_lng"`
-		Point3Lat   float64 `json:"point3_lat"`
-		Point3Lng   float64 `json:"point3_lng"`
-		Point4Lat   float64 `json:"point4_lat"`
-		Point4Lng   float64 `json:"point4_lng"`
-		Status      string  `json:"status"`
-		// New optional fields
-		District        string   `json:"district"`
-		Region          string   `json:"region"`
-		PlotNumber      string   `json:"plot_number"`
-		ElevationMeters float64  `json:"elevation_m"`
-		Sides           []string `json:"sides"`
-		Price           float64  `json:"price"`
-		Currency        string   `json:"currency"`
+		Title             string    `json:"title"`
+		Description       string    `json:"description"`
+		Images            *[]string `json:"images"` // present in JSON => update (may be empty)
+		VideoURL          *string   `json:"video_url"`
+		HighlightLocation *bool     `json:"highlight_location"`
+		Point1Lat         *float64  `json:"point1_lat"`
+		Point1Lng         *float64  `json:"point1_lng"`
+		Point2Lat         *float64  `json:"point2_lat"`
+		Point2Lng         *float64  `json:"point2_lng"`
+		Point3Lat         *float64  `json:"point3_lat"`
+		Point3Lng         *float64  `json:"point3_lng"`
+		Point4Lat         *float64  `json:"point4_lat"`
+		Point4Lng         *float64  `json:"point4_lng"`
+		PropertyPapers    []string  `json:"property_papers"`
+		PaperTypes        []string  `json:"paper_types"`
+		CityID            *uint     `json:"city_id"`
+		ZoneID            *uint     `json:"zone_id"`
+		QuartierID        *uint     `json:"quartier_id"`
+		HabitatPlotID     *uint     `json:"habitat_plot_id"`
+		PlotConfirmed     *bool     `json:"plot_confirmed"`
+		Status            string    `json:"status"`
+		District          string    `json:"district"`
+		Region            string    `json:"region"`
+		PlotNumber        string    `json:"plot_number"`
+		ElevationMeters   float64   `json:"elevation_m"`
+		Sides             []string  `json:"sides"`
+		Price             float64   `json:"price"`
+		Currency          string    `json:"currency"`
+		Lots              *int      `json:"lots"`
+		Area              float64   `json:"area"`
+		AreaUnit          string    `json:"area_unit"`
+		LandType          string    `json:"land_type"`
+		Zoning            string    `json:"zoning"`
+		HostPrivateNote   *string   `json:"host_private_note"`
 	}
 
 	if err := ctx.ReadJSON(&input); err != nil {
@@ -421,42 +935,84 @@ func UpdateLandmark(ctx iris.Context) {
 		landmark.Status = input.Status
 	}
 
-	// Location updates
-	if input.Point1Lat != 0 && input.Point1Lng != 0 {
-		if !isValidCoordinate(input.Point1Lat, input.Point1Lng) {
-			ctx.StatusCode(http.StatusBadRequest)
-			ctx.JSON(iris.Map{"error": "Invalid coordinates"})
-			return
+	// Media: images and/or video
+	if input.Images != nil {
+		urls := filterHTTPMediaURLs(*input.Images)
+		if b, err := json.Marshal(urls); err == nil {
+			landmark.Images = b
 		}
-		landmark.Point1Lat = input.Point1Lat
-		landmark.Point1Lng = input.Point1Lng
+		videoURL := landmark.VideoURL
+		if input.VideoURL != nil {
+			videoURL = input.VideoURL
+		}
+		hasVideo := videoURL != nil && strings.TrimSpace(*videoURL) != ""
+		switch {
+		case len(urls) > 0 && hasVideo:
+			landmark.MediaType = "both"
+		case hasVideo:
+			landmark.MediaType = "video"
+		case len(urls) > 0:
+			landmark.MediaType = "images"
+		default:
+			landmark.MediaType = "images"
+		}
 	}
-	if input.Point2Lat != 0 && input.Point2Lng != 0 {
-		if !isValidCoordinate(input.Point2Lat, input.Point2Lng) {
-			ctx.StatusCode(http.StatusBadRequest)
-			ctx.JSON(iris.Map{"error": "Invalid coordinates"})
-			return
-		}
-		landmark.Point2Lat = input.Point2Lat
-		landmark.Point2Lng = input.Point2Lng
+	if input.VideoURL != nil {
+		landmark.VideoURL = input.VideoURL
 	}
-	if input.Point3Lat != 0 && input.Point3Lng != 0 {
-		if !isValidCoordinate(input.Point3Lat, input.Point3Lng) {
-			ctx.StatusCode(http.StatusBadRequest)
-			ctx.JSON(iris.Map{"error": "Invalid coordinates"})
-			return
-		}
-		landmark.Point3Lat = input.Point3Lat
-		landmark.Point3Lng = input.Point3Lng
+
+	// Area and land fields
+	if input.Area > 0 {
+		landmark.Area = input.Area
 	}
-	if input.Point4Lat != 0 && input.Point4Lng != 0 {
-		if !isValidCoordinate(input.Point4Lat, input.Point4Lng) {
-			ctx.StatusCode(http.StatusBadRequest)
-			ctx.JSON(iris.Map{"error": "Invalid coordinates"})
-			return
+	if input.AreaUnit != "" {
+		landmark.AreaUnit = input.AreaUnit
+	}
+	if input.LandType != "" {
+		landmark.LandType = input.LandType
+	}
+	if input.Zoning != "" {
+		landmark.Zoning = input.Zoning
+	}
+	if input.HostPrivateNote != nil {
+		landmark.HostPrivateNote = sanitizeHostPrivateNote(*input.HostPrivateNote)
+	}
+
+	// Optional lots
+	if input.Lots != nil {
+		landmark.Lots = input.Lots
+	}
+
+	// Location highlight update:
+	// - highlight_location=true + all four points => set coordinates
+	// - highlight_location=true without points => keep existing (e.g. photo-only edit)
+	// - highlight_location=false => clear coordinates
+	if input.HighlightLocation != nil {
+		if *input.HighlightLocation {
+			hasAllPoints := input.Point1Lat != nil && input.Point1Lng != nil &&
+				input.Point2Lat != nil && input.Point2Lng != nil &&
+				input.Point3Lat != nil && input.Point3Lng != nil &&
+				input.Point4Lat != nil && input.Point4Lng != nil
+			if hasAllPoints {
+				if !isValidCoordinate(*input.Point1Lat, *input.Point1Lng) ||
+					!isValidCoordinate(*input.Point2Lat, *input.Point2Lng) ||
+					!isValidCoordinate(*input.Point3Lat, *input.Point3Lng) ||
+					!isValidCoordinate(*input.Point4Lat, *input.Point4Lng) {
+					ctx.StatusCode(http.StatusBadRequest)
+					ctx.JSON(iris.Map{"error": "Invalid coordinates"})
+					return
+				}
+				landmark.Point1Lat, landmark.Point1Lng = input.Point1Lat, input.Point1Lng
+				landmark.Point2Lat, landmark.Point2Lng = input.Point2Lat, input.Point2Lng
+				landmark.Point3Lat, landmark.Point3Lng = input.Point3Lat, input.Point3Lng
+				landmark.Point4Lat, landmark.Point4Lng = input.Point4Lat, input.Point4Lng
+			}
+		} else {
+			landmark.Point1Lat, landmark.Point1Lng = nil, nil
+			landmark.Point2Lat, landmark.Point2Lng = nil, nil
+			landmark.Point3Lat, landmark.Point3Lng = nil, nil
+			landmark.Point4Lat, landmark.Point4Lng = nil, nil
 		}
-		landmark.Point4Lat = input.Point4Lat
-		landmark.Point4Lng = input.Point4Lng
 	}
 
 	// New metadata updates
@@ -481,6 +1037,43 @@ func UpdateLandmark(ctx iris.Context) {
 	if input.Sides != nil {
 		if b, err := json.Marshal(input.Sides); err == nil {
 			landmark.Sides = b
+		}
+	}
+	if input.PaperTypes != nil {
+		landmark.PaperTypes = input.PaperTypes
+	}
+	if input.PropertyPapers != nil {
+		if b, err := json.Marshal(input.PropertyPapers); err == nil {
+			landmark.PropertyPapers = b
+		}
+	}
+	if input.CityID != nil && *input.CityID > 0 {
+		landmark.CityID = input.CityID
+	}
+	if input.ZoneID != nil && *input.ZoneID > 0 {
+		landmark.ZoneID = input.ZoneID
+	}
+	if input.QuartierID != nil && *input.QuartierID > 0 {
+		landmark.QuartierID = input.QuartierID
+	}
+	if input.HabitatPlotID != nil {
+		landmark.HabitatPlotID = input.HabitatPlotID
+	}
+	if input.PlotConfirmed != nil {
+		landmark.PlotConfirmed = *input.PlotConfirmed
+	}
+	if landmark.CityID != nil && landmark.ZoneID != nil && landmark.QuartierID != nil {
+		if err := validateLandmarkLocationIDs(*landmark.CityID, *landmark.ZoneID, *landmark.QuartierID); err != nil {
+			ctx.StatusCode(http.StatusBadRequest)
+			ctx.JSON(iris.Map{"error": err.Error()})
+			return
+		}
+	}
+	if landmark.QuartierID != nil && landmark.PlotNumber != "" {
+		if err := validateLandmarkHabitatPlot(landmark.HabitatPlotID, landmark.PlotNumber, *landmark.QuartierID); err != nil {
+			ctx.StatusCode(http.StatusBadRequest)
+			ctx.JSON(iris.Map{"error": err.Error()})
+			return
 		}
 	}
 
@@ -514,19 +1107,34 @@ func DeleteLandmark(ctx iris.Context) {
 	userID := ctx.Values().Get("userID").(uint)
 	landmarkID, _ := strconv.ParseUint(ctx.Params().Get("id"), 10, 32)
 
-	// Get user's agent record to find organization
-	var agent models.Agent
-	if err := storage.DB.Where("user_id = ?", userID).First(&agent).Error; err != nil {
+	var landmark models.Landmark
+	if err := storage.DB.Where("id = ?", landmarkID).First(&landmark).Error; err != nil {
 		ctx.StatusCode(http.StatusNotFound)
-		ctx.JSON(iris.Map{"error": "User must be an agent to delete landmarks"})
+		ctx.JSON(iris.Map{"error": "Landmark not found"})
 		return
 	}
 
-	// Check if landmark exists and belongs to user's organization
-	var landmark models.Landmark
-	if err := storage.DB.Where("id = ? AND organization_id = ?", landmarkID, agent.OrganizationID).First(&landmark).Error; err != nil {
-		ctx.StatusCode(http.StatusNotFound)
-		ctx.JSON(iris.Map{"error": "Landmark not found"})
+	// Authorization: owner or org member
+	canDelete := false
+	if landmark.OwnerID != nil && *landmark.OwnerID == userID {
+		canDelete = true
+	}
+	if !canDelete && landmark.OrganizationID != nil {
+		var org models.Organization
+		if err := storage.DB.Where("id = ? AND owner_id = ?", landmark.OrganizationID, userID).First(&org).Error; err == nil {
+			canDelete = true
+		}
+	}
+	if !canDelete && landmark.OrganizationID != nil {
+		var member models.OrganizationMember
+		if err := storage.DB.Where("organization_id = ? AND user_id = ? AND status = ? AND is_active = ?",
+			landmark.OrganizationID, userID, "active", true).First(&member).Error; err == nil {
+			canDelete = true
+		}
+	}
+	if !canDelete {
+		ctx.StatusCode(http.StatusForbidden)
+		ctx.JSON(iris.Map{"error": "You do not have permission to delete this landmark"})
 		return
 	}
 
@@ -663,8 +1271,10 @@ func GetPendingLandmarks(ctx iris.Context) {
 	}
 
 	// Now get pending ones
-	var landmarks []models.Landmark
-	if err := storage.DB.Preload("Organization").Where("status = ?", "pending_verification").Find(&landmarks).Error; err != nil {
+	landmarks, err := loadLandmarksForAdmin(
+		storage.DB.Model(&models.Landmark{}).Where("status = ?", "pending_verification"),
+	)
+	if err != nil {
 		fmt.Printf("Error fetching pending landmarks: %v\n", err)
 		ctx.StatusCode(http.StatusInternalServerError)
 		ctx.JSON(iris.Map{"error": "Failed to fetch pending landmarks"})
@@ -672,24 +1282,197 @@ func GetPendingLandmarks(ctx iris.Context) {
 	}
 
 	fmt.Printf("Found %d pending landmarks\n", len(landmarks))
-	ctx.JSON(iris.Map{"landmarks": landmarks})
+	ctx.JSON(iris.Map{"landmarks": enrichAdminLandmarks(landmarks)})
 }
 
-// AdminGetAllLandmarks gets all landmarks for admin review
+// AdminGetAllLandmarks gets all landmarks for admin review (full media + location + plot details).
 func AdminGetAllLandmarks(ctx iris.Context) {
-	var landmarks []models.Landmark
-	if err := storage.DB.Preload("Organization").Find(&landmarks).Error; err != nil {
+	landmarks, err := loadLandmarksForAdmin(storage.DB.Model(&models.Landmark{}))
+	if err != nil {
 		ctx.StatusCode(http.StatusInternalServerError)
 		ctx.JSON(iris.Map{"error": "Failed to fetch landmarks"})
 		return
 	}
+	ctx.JSON(iris.Map{"landmarks": enrichAdminLandmarks(landmarks)})
+}
 
-	ctx.JSON(iris.Map{"landmarks": landmarks})
+// AdminGetLandmarkByID returns one landmark with full admin review payload.
+func AdminGetLandmarkByID(ctx iris.Context) {
+	id, err := ctx.Params().GetUint("id")
+	if err != nil {
+		ctx.StatusCode(http.StatusBadRequest)
+		ctx.JSON(iris.Map{"error": "Invalid landmark ID"})
+		return
+	}
+	var landmark models.Landmark
+	if err := storage.DB.Preload("Organization").Preload("Owner").First(&landmark, id).Error; err != nil {
+		ctx.StatusCode(http.StatusNotFound)
+		ctx.JSON(iris.Map{"error": "Landmark not found"})
+		return
+	}
+	enriched := enrichAdminLandmarks([]models.Landmark{landmark})
+	if len(enriched) == 0 {
+		ctx.StatusCode(http.StatusNotFound)
+		ctx.JSON(iris.Map{"error": "Landmark not found"})
+		return
+	}
+	ctx.JSON(iris.Map{"landmark": enriched[0]})
 }
 
 // Helper function to validate coordinates
 func isValidCoordinate(lat, lng float64) bool {
 	return lat >= -90 && lat <= 90 && lng >= -180 && lng <= 180
+}
+
+// validateLandmarkLocationIDs ensures city → zone → quartier hierarchy is consistent.
+func validateLandmarkLocationIDs(cityID, zoneID, quartierID uint) error {
+	var city models.City
+	if err := storage.DB.First(&city, cityID).Error; err != nil {
+		return fmt.Errorf("invalid city")
+	}
+	var zone models.Zone
+	if err := storage.DB.Where("id = ? AND city_id = ?", zoneID, cityID).First(&zone).Error; err != nil {
+		return fmt.Errorf("zone does not belong to the selected city")
+	}
+	var quartier models.Quartier
+	if err := storage.DB.Where("id = ? AND zone_id = ?", quartierID, zoneID).First(&quartier).Error; err != nil {
+		return fmt.Errorf("sector does not belong to the selected zone")
+	}
+	return nil
+}
+
+// validateLandmarkHabitatPlot checks cadastre plot link when provided.
+func validateLandmarkHabitatPlot(habitatPlotID *uint, plotNumber string, quartierID uint) error {
+	if habitatPlotID == nil || *habitatPlotID == 0 {
+		return nil
+	}
+	var plot models.HabitatPlot
+	if err := storage.DB.First(&plot, *habitatPlotID).Error; err != nil {
+		return fmt.Errorf("cadastre plot not found")
+	}
+	pn := strings.TrimSpace(plotNumber)
+	if pn == "" {
+		return fmt.Errorf("plot number is required")
+	}
+	if !strings.EqualFold(strings.TrimSpace(plot.PlotNumber), pn) {
+		return fmt.Errorf("plot number does not match the cadastre record")
+	}
+	sectorID, _, err := resolveHabitatSectorIDForQuartier(quartierID)
+	if err != nil {
+		return fmt.Errorf("could not match your sector to cadastre data")
+	}
+	if plot.SectorID != sectorID {
+		return fmt.Errorf("cadastre plot is not in the selected sector")
+	}
+	return nil
+}
+
+// LikeLandmarkVideo likes a landmark's video (for feed)
+func LikeLandmarkVideo(ctx iris.Context) {
+	userIDVal := ctx.Values().Get("userID")
+	if userIDVal == nil {
+		ctx.StatusCode(http.StatusUnauthorized)
+		ctx.JSON(iris.Map{"error": "Unauthorized"})
+		return
+	}
+	userID := userIDVal.(uint)
+	id, err := ctx.Params().GetUint("id")
+	if err != nil {
+		ctx.StatusCode(http.StatusBadRequest)
+		ctx.JSON(iris.Map{"error": "Invalid landmark ID"})
+		return
+	}
+	var existing models.LandmarkVideoLike
+	if err := storage.DB.Where("landmark_id = ? AND user_id = ?", id, userID).First(&existing).Error; err == nil {
+		var likesCount int64
+		storage.DB.Model(&models.LandmarkVideoLike{}).Where("landmark_id = ? AND deleted_at IS NULL", id).Count(&likesCount)
+		ctx.JSON(iris.Map{"success": true, "message": "Already liked", "likesCount": likesCount})
+		return
+	}
+	like := models.LandmarkVideoLike{LandmarkID: id, UserID: userID}
+	if err := storage.DB.Create(&like).Error; err != nil {
+		ctx.StatusCode(http.StatusInternalServerError)
+		ctx.JSON(iris.Map{"error": "Failed to like"})
+		return
+	}
+	var likesCount int64
+	storage.DB.Model(&models.LandmarkVideoLike{}).Where("landmark_id = ? AND deleted_at IS NULL", id).Count(&likesCount)
+	ctx.JSON(iris.Map{"success": true, "likesCount": likesCount})
+}
+
+// UnlikeLandmarkVideo unlikes a landmark's video
+func UnlikeLandmarkVideo(ctx iris.Context) {
+	userIDVal := ctx.Values().Get("userID")
+	if userIDVal == nil {
+		ctx.StatusCode(http.StatusUnauthorized)
+		ctx.JSON(iris.Map{"error": "Unauthorized"})
+		return
+	}
+	userID := userIDVal.(uint)
+	id, err := ctx.Params().GetUint("id")
+	if err != nil {
+		ctx.StatusCode(http.StatusBadRequest)
+		ctx.JSON(iris.Map{"error": "Invalid landmark ID"})
+		return
+	}
+	storage.DB.Where("landmark_id = ? AND user_id = ?", id, userID).Delete(&models.LandmarkVideoLike{})
+	var likesCount int64
+	storage.DB.Model(&models.LandmarkVideoLike{}).Where("landmark_id = ? AND deleted_at IS NULL", id).Count(&likesCount)
+	ctx.JSON(iris.Map{"success": true, "likesCount": likesCount})
+}
+
+// SaveLandmarkVideo saves a landmark's video
+func SaveLandmarkVideo(ctx iris.Context) {
+	userIDVal := ctx.Values().Get("userID")
+	if userIDVal == nil {
+		ctx.StatusCode(http.StatusUnauthorized)
+		ctx.JSON(iris.Map{"error": "Unauthorized"})
+		return
+	}
+	userID := userIDVal.(uint)
+	id, err := ctx.Params().GetUint("id")
+	if err != nil {
+		ctx.StatusCode(http.StatusBadRequest)
+		ctx.JSON(iris.Map{"error": "Invalid landmark ID"})
+		return
+	}
+	var existing models.LandmarkVideoSave
+	if err := storage.DB.Where("landmark_id = ? AND user_id = ? AND deleted_at IS NULL", id, userID).First(&existing).Error; err == nil {
+		var savesCount int64
+		storage.DB.Model(&models.LandmarkVideoSave{}).Where("landmark_id = ? AND deleted_at IS NULL", id).Count(&savesCount)
+		ctx.JSON(iris.Map{"success": true, "message": "Already saved", "saved": true, "savesCount": savesCount})
+		return
+	}
+	save := models.LandmarkVideoSave{LandmarkID: id, UserID: userID}
+	if err := storage.DB.Create(&save).Error; err != nil {
+		ctx.StatusCode(http.StatusInternalServerError)
+		ctx.JSON(iris.Map{"error": "Failed to save"})
+		return
+	}
+	var savesCount int64
+	storage.DB.Model(&models.LandmarkVideoSave{}).Where("landmark_id = ? AND deleted_at IS NULL", id).Count(&savesCount)
+	ctx.JSON(iris.Map{"success": true, "saved": true, "savesCount": savesCount})
+}
+
+// UnsaveLandmarkVideo unsaves a landmark's video
+func UnsaveLandmarkVideo(ctx iris.Context) {
+	userIDVal := ctx.Values().Get("userID")
+	if userIDVal == nil {
+		ctx.StatusCode(http.StatusUnauthorized)
+		ctx.JSON(iris.Map{"error": "Unauthorized"})
+		return
+	}
+	userID := userIDVal.(uint)
+	id, err := ctx.Params().GetUint("id")
+	if err != nil {
+		ctx.StatusCode(http.StatusBadRequest)
+		ctx.JSON(iris.Map{"error": "Invalid landmark ID"})
+		return
+	}
+	storage.DB.Where("landmark_id = ? AND user_id = ?", id, userID).Delete(&models.LandmarkVideoSave{})
+	var savesCount int64
+	storage.DB.Model(&models.LandmarkVideoSave{}).Where("landmark_id = ? AND deleted_at IS NULL", id).Count(&savesCount)
+	ctx.JSON(iris.Map{"success": true, "saved": false, "savesCount": savesCount})
 }
 
 // ReportLandmark allows an authenticated user to report a public landmark

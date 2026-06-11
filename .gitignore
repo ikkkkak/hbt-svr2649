@@ -1,8 +1,13 @@
 .env
+*.exe
 access.log
 service-account.json
 google-services.json
 fcm-credentials.json
+# Firebase Admin SDK downloads (names vary — add yours if committed by mistake)
+firebase-adminsdk*.json
+*-firebase-adminsdk-*.json
+dhmine-khalil*.json
 *.json.bak
 RENDER_FCM_SETUP.md
 ENV_SETUP.md
@@ -18,3 +23,8 @@ COPYRIGHT
 README.md
 REALTIME_CHAT_FIXES.md
 MLD_PROPERTY_SELLING_SYSTEM.md
+
+.env.redis
+.env.example
+44441318
+44441318.pub

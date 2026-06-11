@@ -24,6 +24,9 @@ type NotificationDeliveryLog struct {
 
 	// Fingerprint for dedup: hash(user_id, property_ref, event_type, date)
 	Fingerprint string `json:"fingerprint" gorm:"type:varchar(64);uniqueIndex:idx_ndl_fingerprint"`
+
+	// ABVariant stores which experiment bucket was used (e.g. "A"/"B") for analytics.
+	ABVariant string `json:"abVariant" gorm:"type:varchar(8);index"`
 }
 
 // TableName for NotificationDeliveryLog

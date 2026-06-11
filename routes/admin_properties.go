@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/kataras/iris/v12"
+	"gorm.io/gorm"
 )
 
 // GET /admin/properties
@@ -116,7 +117,8 @@ func AdminUpdatePropertyStatus(ctx iris.Context) {
 		return
 	}
 	before := prop
-	prop.Status = body.Status
+	// Normalize status to lowercase for consistency (approved, live, pending, rejected, etc.)
+	prop.Status = strings.ToLower(strings.TrimSpace(body.Status))
 	prop.ReviewNotes = body.Note
 	if err := storage.DB.Save(&prop).Error; err != nil {
 		utils.JSONError(ctx, http.StatusInternalServerError, "server_error", err.Error())
@@ -134,15 +136,38 @@ func AdminUpdatePropertyStatus(ctx iris.Context) {
 			prop.Status,
 		)
 
-		// Auto-assign to location criteria when approved
-		if prop.Status == "approved" || prop.Status == "live" {
+		switch prop.Status {
+		case "approved", "live", "published":
 			if err := AssignSinglePropertyToLocationCriteria(prop.ID); err != nil {
 				fmt.Printf("⚠️ Failed to auto-assign approved property %d to location criteria: %v\n", prop.ID, err)
+			}
+		case "rejected", "pending", "draft", "denied", "cancelled", "canceled", "suspended", "inactive", "blocked":
+			if err := storage.DB.Where("property_id = ?", prop.ID).Delete(&models.LocationCriteriaProperty{}).Error; err != nil {
+				fmt.Printf("⚠️ Failed to remove rejected/pending property %d from location criteria: %v\n", prop.ID, err)
 			}
 		}
 	}
 
 	ctx.JSON(iris.Map{"data": prop})
+}
+
+// POST /admin/properties/:id/reassign-locations — reassign property to location criteria (fixes "outside all radii")
+func AdminReassignPropertyLocations(ctx iris.Context) {
+	id, err := ctx.Params().GetUint("id")
+	if err != nil {
+		utils.JSONError(ctx, http.StatusBadRequest, "invalid_id", "invalid id")
+		return
+	}
+	var prop models.Property
+	if err := storage.DB.First(&prop, id).Error; err != nil {
+		utils.JSONError(ctx, iris.StatusNotFound, "not_found", "property not found")
+		return
+	}
+	if err := AssignSinglePropertyToLocationCriteria(prop.ID); err != nil {
+		utils.JSONError(ctx, http.StatusInternalServerError, "reassign_failed", err.Error())
+		return
+	}
+	ctx.JSON(iris.Map{"success": true, "message": "Property locations reassigned"})
 }
 
 // POST /admin/properties/:id/flag { reason }
@@ -173,4 +198,35 @@ func AdminFlagProperty(ctx iris.Context) {
 	}
 	utils.Audit(ctx, "property.flag", "property", prop.ID, before, prop)
 	ctx.JSON(iris.Map{"data": prop})
+}
+
+// DELETE /admin/properties/:id
+func AdminDeleteProperty(ctx iris.Context) {
+	id, err := ctx.Params().GetUint("id")
+	if err != nil {
+		utils.JSONError(ctx, http.StatusBadRequest, "invalid_id", "invalid id")
+		return
+	}
+
+	var prop models.Property
+	if err := storage.DB.First(&prop, id).Error; err != nil {
+		utils.JSONError(ctx, http.StatusNotFound, "not_found", "property not found")
+		return
+	}
+
+	if err := storage.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("property_id = ?", id).Delete(&models.Reservation{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Unscoped().Delete(&models.Property{}, id).Error; err != nil {
+			return err
+		}
+		return nil
+	}); err != nil {
+		utils.JSONError(ctx, http.StatusInternalServerError, "server_error", err.Error())
+		return
+	}
+
+	utils.Audit(ctx, "property.delete", "property", id, prop, iris.Map{"deleted": true})
+	ctx.JSON(iris.Map{"success": true, "message": "Property deleted successfully"})
 }

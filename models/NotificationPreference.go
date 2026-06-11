@@ -12,6 +12,10 @@ type NotificationPreference struct {
 	DeviceID             string         `json:"device_id" gorm:"type:varchar(255);index"` // Device identifier for anonymous users
 	PushToken            string         `json:"push_token" gorm:"not null;index"`
 	Language             string         `json:"language" gorm:"not null;default:'en'"`
+	Timezone             string         `json:"timezone" gorm:"type:varchar(64);default:''"` // IANA, e.g. "Africa/Nouakchott"
+	QuietStartHour       int            `json:"quiet_start_hour" gorm:"default:22"`          // local hour 0-23
+	QuietEndHour         int            `json:"quiet_end_hour" gorm:"default:7"`             // local hour 0-23
+	MaxSmartPerDay       int            `json:"max_smart_per_day" gorm:"default:2"`          // anti-spam budget for smart_* events
 	Location             string         `json:"location" gorm:"not null"`
 	Latitude             float64        `json:"latitude" gorm:"not null"`
 	Longitude            float64        `json:"longitude" gorm:"not null"`

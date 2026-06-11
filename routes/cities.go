@@ -4,14 +4,21 @@ import (
 	"apartments-clone-server/models"
 	"apartments-clone-server/storage"
 	"strconv"
+	"strings"
 
 	"github.com/kataras/iris/v12"
 )
 
-// GetCities returns all active cities
+// GetCities returns active cities (optional ?country_id= filter).
 func GetCities(ctx iris.Context) {
 	var cities []models.City
-	if err := storage.DB.Where("is_active = ?", true).Preload("Zones", "is_active = ?", true).Find(&cities).Error; err != nil {
+	db := storage.DB.Where("is_active = ?", true)
+	if v := strings.TrimSpace(ctx.URLParam("country_id")); v != "" {
+		if n, err := strconv.ParseUint(v, 10, 32); err == nil && n > 0 {
+			db = db.Where("country_id = ?", uint(n))
+		}
+	}
+	if err := db.Preload("Zones", "is_active = ?", true).Order("name ASC").Find(&cities).Error; err != nil {
 		ctx.StatusCode(500)
 		ctx.JSON(iris.Map{"error": "Failed to fetch cities"})
 		return
@@ -33,8 +40,14 @@ func GetZonesByCity(ctx iris.Context) {
 		return
 	}
 
+	q := strings.TrimSpace(ctx.URLParam("q"))
+	db := storage.DB.Where("city_id = ? AND is_active = ?", uint(cityID), true)
+	if q != "" {
+		like := "%" + q + "%"
+		db = db.Where("name ILIKE ? OR name_ar ILIKE ?", like, like)
+	}
 	var zones []models.Zone
-	if err := storage.DB.Where("city_id = ? AND is_active = ?", uint(cityID), true).Find(&zones).Error; err != nil {
+	if err := db.Order("name ASC").Find(&zones).Error; err != nil {
 		ctx.StatusCode(500)
 		ctx.JSON(iris.Map{"error": "Failed to fetch zones"})
 		return
@@ -53,6 +66,7 @@ func AdminCreateCity(ctx iris.Context) {
 		NameAr    string `json:"name_ar"`
 		Country   string `json:"country"`
 		CountryAr string `json:"country_ar"`
+		CountryID *uint  `json:"country_id"`
 	}
 
 	if err := ctx.ReadJSON(&input); err != nil {
@@ -73,6 +87,9 @@ func AdminCreateCity(ctx iris.Context) {
 		Country:   input.Country,
 		CountryAr: input.CountryAr,
 		IsActive:  true,
+	}
+	if input.CountryID != nil && *input.CountryID > 0 {
+		applyCountryToCity(&city, *input.CountryID)
 	}
 
 	if err := storage.DB.Create(&city).Error; err != nil {
@@ -102,6 +119,7 @@ func AdminUpdateCity(ctx iris.Context) {
 		NameAr    string `json:"name_ar"`
 		Country   string `json:"country"`
 		CountryAr string `json:"country_ar"`
+		CountryID *uint  `json:"country_id"`
 		IsActive  *bool  `json:"is_active"`
 	}
 
@@ -130,6 +148,9 @@ func AdminUpdateCity(ctx iris.Context) {
 	}
 	if input.CountryAr != "" {
 		city.CountryAr = input.CountryAr
+	}
+	if input.CountryID != nil && *input.CountryID > 0 {
+		applyCountryToCity(&city, *input.CountryID)
 	}
 	if input.IsActive != nil {
 		city.IsActive = *input.IsActive
@@ -322,7 +343,7 @@ func AdminDeleteZone(ctx iris.Context) {
 // Admin: Get All Cities (including inactive)
 func AdminGetAllCities(ctx iris.Context) {
 	var cities []models.City
-	if err := storage.DB.Preload("Zones").Find(&cities).Error; err != nil {
+	if err := storage.DB.Preload("Zones").Preload("CountryRef").Find(&cities).Error; err != nil {
 		ctx.StatusCode(500)
 		ctx.JSON(iris.Map{"error": "Failed to fetch cities"})
 		return
@@ -359,8 +380,14 @@ func GetQuartiersByZone(ctx iris.Context) {
 		return
 	}
 
+	q := strings.TrimSpace(ctx.URLParam("q"))
+	db := storage.DB.Where("zone_id = ? AND is_active = ? AND parent_quartier_id IS NULL", uint(zoneID), true)
+	if q != "" {
+		like := "%" + q + "%"
+		db = db.Where("name ILIKE ? OR name_ar ILIKE ?", like, like)
+	}
 	var quartiers []models.Quartier
-	if err := storage.DB.Where("zone_id = ? AND is_active = ? AND parent_quartier_id IS NULL", uint(zoneID), true).Preload("SubQuartiers", "is_active = ?", true).Find(&quartiers).Error; err != nil {
+	if err := db.Preload("SubQuartiers", "is_active = ?", true).Order("name ASC").Find(&quartiers).Error; err != nil {
 		ctx.StatusCode(500)
 		ctx.JSON(iris.Map{"error": "Failed to fetch quartiers"})
 		return

@@ -11,6 +11,9 @@ type AnonymousUserPreference struct {
 	ID             uint           `json:"id" gorm:"primaryKey"`
 	DeviceID       string         `json:"device_id" gorm:"type:varchar(255);uniqueIndex;not null"` // Unique device identifier
 	PhoneNumber    *string        `json:"phone_number" gorm:"type:varchar(20);index"` // Phone number if available
+	// Explicit personalization interests captured from the app (not inferred).
+	// Stored as JSONB list of interest keys, e.g. ["investment","budget_deals"].
+	Interests []string `json:"interests" gorm:"type:jsonb;serializer:json"`
 	FavoriteCityID *uint          `json:"favorite_city_id" gorm:"index"`
 	FavoriteCityName string       `json:"favorite_city_name" gorm:"type:varchar(255)"`
 	FavoriteZoneID *uint          `json:"favorite_zone_id" gorm:"index"`

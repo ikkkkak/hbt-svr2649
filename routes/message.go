@@ -1,10 +1,13 @@
 package routes
 
 import (
+	"context"
 	"apartments-clone-server/models"
+	"apartments-clone-server/realtime"
 	"apartments-clone-server/storage"
 	"apartments-clone-server/utils"
 	pushsvc "apartments-clone-server/services/push"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -44,6 +47,20 @@ func CreateMessage(ctx iris.Context) {
 	}
 
 	storage.DB.Create(&message)
+
+	// Realtime: deliver to both participants + update inbox instantly.
+	func() {
+		out := map[string]any{
+			"type": "conv:new_message",
+			"data": message,
+		}
+		b, err := json.Marshal(out)
+		if err != nil {
+			return
+		}
+		realtime.UserHubInstance().BroadcastToUsers([]uint{req.SenderID, req.ReceiverID}, b)
+		realtime.PublishUserEvent(context.Background(), []uint{req.SenderID, req.ReceiverID}, out)
+	}()
 
 	// Send push notification to receiver with sender's avatar
 	var sender models.User
@@ -149,6 +166,8 @@ func SetMessageState(ctx iris.Context) {
 		utils.HandleValidationErrors(err, ctx)
 		return
 	}
+	claims := jwt.Get(ctx).(*utils.AccessToken)
+	readerID := claims.ID
 	updates := map[string]any{"state": req.State}
 	now := time.Now()
 	if req.State == "delivered" {
@@ -163,5 +182,29 @@ func SetMessageState(ctx iris.Context) {
 		ctx.StopWithStatus(http.StatusInternalServerError)
 		return
 	}
+
+	// Realtime: notify both participants so UI ticks update.
+	func() {
+		var conv models.Conversation
+		if err := storage.DB.First(&conv, req.ConversationID).Error; err != nil {
+			return
+		}
+		out := map[string]any{
+			"type": "conv:state",
+			"data": map[string]any{
+				"conversationID": req.ConversationID,
+				"messageIDs":     req.MessageIDs,
+				"state":          req.State,
+				"at":             now,
+				"readerID":       readerID,
+			},
+		}
+		b, err := json.Marshal(out)
+		if err != nil {
+			return
+		}
+		realtime.UserHubInstance().BroadcastToUsers([]uint{conv.OwnerID, conv.TenantID}, b)
+		realtime.PublishUserEvent(context.Background(), []uint{conv.OwnerID, conv.TenantID}, out)
+	}()
 	ctx.JSON(iris.Map{"success": true})
 }

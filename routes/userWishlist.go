@@ -356,3 +356,61 @@ func RemovePropertySaleFromWishlist(ctx iris.Context) {
 	log.Printf("✅ RemovePropertySaleFromWishlist: User %d removed property sale %d", userID, propertySaleID)
 	ctx.JSON(iris.Map{"success": true, "message": "Property sale removed from wishlist"})
 }
+
+// ============================================
+// LANDMARK WISHLIST (landmark_video_saves)
+// ============================================
+
+// GetUserLandmarkWishlist returns landmarks the user saved (wishlist).
+func GetUserLandmarkWishlist(ctx iris.Context) {
+	userID, ok := ctx.Values().Get("userID").(uint)
+	if !ok || userID == 0 {
+		log.Println("❌ GetUserLandmarkWishlist: Unauthorized - no userID in context")
+		ctx.StopWithStatus(http.StatusUnauthorized)
+		return
+	}
+
+	var saves []models.LandmarkVideoSave
+	if err := storage.DB.
+		Where("user_id = ? AND deleted_at IS NULL", userID).
+		Order("created_at DESC").
+		Find(&saves).Error; err != nil {
+		ctx.StopWithStatus(http.StatusInternalServerError)
+		return
+	}
+
+	if len(saves) == 0 {
+		ctx.JSON(iris.Map{"success": true, "landmarks": []models.Landmark{}})
+		return
+	}
+
+	landmarkIDs := make([]uint, 0, len(saves))
+	seen := make(map[uint]struct{}, len(saves))
+	for _, s := range saves {
+		if _, dup := seen[s.LandmarkID]; dup {
+			continue
+		}
+		seen[s.LandmarkID] = struct{}{}
+		landmarkIDs = append(landmarkIDs, s.LandmarkID)
+	}
+
+	var landmarks []models.Landmark
+	if err := storage.DB.Where("id IN ?", landmarkIDs).Find(&landmarks).Error; err != nil {
+		ctx.StopWithStatus(http.StatusInternalServerError)
+		return
+	}
+
+	// Preserve wishlist order (most recently saved first).
+	byID := make(map[uint]models.Landmark, len(landmarks))
+	for _, lm := range landmarks {
+		byID[lm.ID] = lm
+	}
+	ordered := make([]models.Landmark, 0, len(landmarkIDs))
+	for _, id := range landmarkIDs {
+		if lm, ok := byID[id]; ok {
+			ordered = append(ordered, lm)
+		}
+	}
+
+	ctx.JSON(iris.Map{"success": true, "landmarks": ordered})
+}

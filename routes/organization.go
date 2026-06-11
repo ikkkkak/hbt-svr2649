@@ -10,7 +10,9 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"regexp"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/kataras/iris/v12"
@@ -163,7 +165,7 @@ func GetUserOrganization(ctx iris.Context) {
 
 	// First check if user is owner
 	var organization models.Organization
-	if err := storage.DB.Preload("Owner").Preload("Members.User").Where("owner_id = ?", userID).First(&organization).Error; err != nil {
+	if err := storage.DB.Preload("Owner").Where("owner_id = ?", userID).First(&organization).Error; err != nil {
 		// If not owner, check if user is a member using helper function
 		org, _, _ := orgmember.GetUserOrganization(userID)
 		if org == nil {
@@ -172,8 +174,8 @@ func GetUserOrganization(ctx iris.Context) {
 			return
 		}
 		organization = *org
-		// Preload members if needed
-		storage.DB.Preload("Members.User").First(&organization, organization.ID)
+		// Owner preload for consistent payload shape
+		storage.DB.Preload("Owner").First(&organization, organization.ID)
 	}
 
 	// Helper function to get days left until next edit
@@ -538,6 +540,24 @@ func UpdateAgentStatus(ctx iris.Context) {
 	})
 }
 
+var mrNationalDigitsRe = regexp.MustCompile(`^\d{8}$`)
+
+// canonicalMauritanianPhone normalizes a Mauritania (+222) mobile to "+222" + 8 digits.
+func canonicalMauritanianPhone(raw string) (string, bool) {
+	s := strings.TrimSpace(raw)
+	s = strings.ReplaceAll(s, " ", "")
+	s = strings.ReplaceAll(s, "-", "")
+	s = strings.TrimPrefix(s, "+")
+	switch {
+	case len(s) == 8 && mrNationalDigitsRe.MatchString(s):
+		return "+222" + s, true
+	case len(s) == 11 && strings.HasPrefix(s, "222") && mrNationalDigitsRe.MatchString(s[3:]):
+		return "+" + s, true
+	default:
+		return "", false
+	}
+}
+
 // AdminGetOrganizations gets all organizations (admin only)
 func AdminGetOrganizations(ctx iris.Context) {
 	var organizations []models.Organization
@@ -548,6 +568,137 @@ func AdminGetOrganizations(ctx iris.Context) {
 	}
 
 	ctx.JSON(iris.Map{"organizations": organizations})
+}
+
+// AdminCreateOrganization creates an organization (admin only). Bypasses the one-org-per-user
+// rule used by the public CreateOrganization flow. Multiple orgs may share the same owner_user_id
+// (e.g. admin as technical owner for agency records).
+func AdminCreateOrganization(ctx iris.Context) {
+	adminUID, ok := ctx.Values().Get("userID").(uint)
+	if !ok || adminUID == 0 {
+		ctx.StatusCode(http.StatusUnauthorized)
+		ctx.JSON(iris.Map{"error": "User ID not found in token"})
+		return
+	}
+
+	var input struct {
+		Name          string `json:"name" validate:"required"`
+		Description   string `json:"description"`
+		Logo          string `json:"logo"`
+		BannerImage   string `json:"banner_image"`
+		Website       string `json:"website"`
+		Phone         string `json:"phone" validate:"required"`
+		Email         string `json:"email" validate:"omitempty,email"`
+		Address       string `json:"address"`
+		City          string `json:"city"`
+		State         string `json:"state"`
+		Country       string `json:"country"`
+		PostalCode    string `json:"postal_code"`
+		LicenseNumber string `json:"license_number"`
+		TaxID         string `json:"tax_id"`
+		BusinessType  string `json:"business_type"`
+		OwnerUserID   *uint  `json:"owner_user_id"` // optional; defaults to admin
+	}
+
+	if err := ctx.ReadJSON(&input); err != nil {
+		ctx.StatusCode(http.StatusBadRequest)
+		ctx.JSON(iris.Map{"error": "Invalid JSON"})
+		return
+	}
+	if err := utils.Validate.Struct(input); err != nil {
+		ctx.StatusCode(http.StatusBadRequest)
+		ctx.JSON(iris.Map{"error": "Validation failed", "details": err.Error()})
+		return
+	}
+
+	phoneCanon, phoneOK := canonicalMauritanianPhone(input.Phone)
+	if !phoneOK {
+		ctx.StatusCode(http.StatusBadRequest)
+		ctx.JSON(iris.Map{
+			"error": "Invalid Mauritanian phone: use 8 digits (e.g. 45123456) or +22245123456",
+		})
+		return
+	}
+
+	ownerID := adminUID
+	if input.OwnerUserID != nil && *input.OwnerUserID != 0 {
+		ownerID = *input.OwnerUserID
+	}
+
+	var ownerUser models.User
+	if err := storage.DB.First(&ownerUser, ownerID).Error; err != nil {
+		ctx.StatusCode(http.StatusBadRequest)
+		ctx.JSON(iris.Map{"error": "owner_user_id does not match an existing user"})
+		return
+	}
+
+	organization := models.Organization{
+		Name:          input.Name,
+		Description:   input.Description,
+		Logo:          input.Logo,
+		BannerImage:   input.BannerImage,
+		Website:       input.Website,
+		Phone:         phoneCanon,
+		Email:         input.Email,
+		Address:       input.Address,
+		City:          input.City,
+		State:         input.State,
+		Country:       input.Country,
+		PostalCode:    input.PostalCode,
+		LicenseNumber: input.LicenseNumber,
+		TaxID:         input.TaxID,
+		BusinessType:  input.BusinessType,
+		OwnerID:       ownerID,
+		Status:        "approved",
+		IsActive:      true,
+	}
+
+	if err := storage.DB.Create(&organization).Error; err != nil {
+		ctx.StatusCode(http.StatusInternalServerError)
+		ctx.JSON(iris.Map{"error": "Failed to create organization"})
+		return
+	}
+
+	adminPermissions := models.GetDefaultPermissions("admin")
+	permissionsJSON, err := json.Marshal(adminPermissions)
+	if err != nil {
+		ctx.StatusCode(http.StatusInternalServerError)
+		ctx.JSON(iris.Map{"error": "Failed to prepare owner member"})
+		return
+	}
+
+	member := models.OrganizationMember{
+		UserID:         ownerID,
+		OrganizationID: organization.ID,
+		Role:           "admin",
+		Permissions:    permissionsJSON,
+		Status:         "active",
+		IsActive:       true,
+		JoinedAt:       time.Now(),
+	}
+	if err := storage.DB.Create(&member).Error; err != nil {
+		ctx.StatusCode(http.StatusInternalServerError)
+		ctx.JSON(iris.Map{"error": "Failed to create organization member"})
+		return
+	}
+
+	agent := models.Agent{
+		UserID:         ownerID,
+		OrganizationID: organization.ID,
+		Status:         "approved",
+		IsActive:       true,
+	}
+	if err := storage.DB.Create(&agent).Error; err != nil {
+		log.Printf("⚠️ AdminCreateOrganization: could not create agent (user may already be agent elsewhere): %v", err)
+	}
+
+	orgmember.LogOrganizationAudit(organization.ID, adminUID, models.ActionOrgSettingsUpdated, models.ActionTypeOrganizationSettings, "organization", &organization.ID, "Organization created by admin", "", "")
+
+	ctx.StatusCode(http.StatusCreated)
+	ctx.JSON(iris.Map{
+		"message":      "Organization created successfully",
+		"organization": organization,
+	})
 }
 
 // AdminUpdateOrganizationStatus updates organization status (admin only)

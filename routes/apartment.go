@@ -35,18 +35,18 @@ func GetReservationsByPropertyID(ctx iris.Context) {
 
 // GetHostReservations returns reservations for all properties owned by the authenticated host
 func GetHostReservations(ctx iris.Context) {
-	tok := jwt.Get(ctx)
-	if tok == nil {
+	userIDVal := ctx.Values().Get("userID")
+	if userIDVal == nil {
 		utils.CreateError(iris.StatusUnauthorized, "Unauthorized", "Missing token", ctx)
 		return
 	}
-	user := tok.(*utils.AccessToken)
+	userID := userIDVal.(uint)
 
 	var reservations []models.Reservation
 	// Join reservations with properties to filter by host id
 	res := storage.DB.
 		Joins("JOIN properties p ON p.id = reservations.property_id").
-		Where("p.host_id = ?", user.ID).
+		Where("p.host_id = ?", userID).
 		Preload("Property").
 		Preload("Property.Host").
 		Preload("Guest").
@@ -63,12 +63,12 @@ func GetHostReservations(ctx iris.Context) {
 
 // MarkReservationAsViewed marks a reservation as viewed by the host
 func MarkReservationAsViewed(ctx iris.Context) {
-	tok := jwt.Get(ctx)
-	if tok == nil {
+	userIDVal := ctx.Values().Get("userID")
+	if userIDVal == nil {
 		utils.CreateError(iris.StatusUnauthorized, "Unauthorized", "Missing token", ctx)
 		return
 	}
-	user := tok.(*utils.AccessToken)
+	userID := userIDVal.(uint)
 
 	params := ctx.Params()
 	reservationID := params.Get("id")
@@ -77,7 +77,7 @@ func MarkReservationAsViewed(ctx iris.Context) {
 	var reservation models.Reservation
 	err := storage.DB.
 		Joins("JOIN properties p ON p.id = reservations.property_id").
-		Where("reservations.id = ? AND p.host_id = ?", reservationID, user.ID).
+		Where("reservations.id = ? AND p.host_id = ?", reservationID, userID).
 		First(&reservation).Error
 
 	if err != nil {

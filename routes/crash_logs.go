@@ -14,9 +14,17 @@ import (
 	"gorm.io/gorm"
 )
 
+// crashLogStorageEnabled is false — client crash/error reports are accepted but not persisted.
+const crashLogStorageEnabled = false
+
 // CreateCrashLog handles POST /api/crash-logs
 // Public endpoint - no auth required (crashes can happen before login)
 func CreateCrashLog(ctx iris.Context) {
+	if !crashLogStorageEnabled {
+		ctx.StatusCode(iris.StatusNoContent)
+		return
+	}
+
 	var payload struct {
 		Error          string                 `json:"error"`
 		Stack          string                 `json:"stack"`

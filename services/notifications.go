@@ -9,6 +9,8 @@ import (
 	"log"
 	"strings"
 	"time"
+
+	"gorm.io/gorm/clause"
 )
 
 // NotificationService handles all push notification logic
@@ -18,6 +20,8 @@ type NotificationService struct{}
 func NewNotificationService() *NotificationService {
 	return &NotificationService{}
 }
+
+const minPerDeviceSendInterval = time.Minute
 
 // NotificationData represents the data payload for notifications
 type NotificationData struct {
@@ -30,6 +34,107 @@ type NotificationData struct {
 	Screen string `json:"screen"`           // Target screen to navigate to
 	Params string `json:"params"`           // JSON string of navigation parameters
 	Action string `json:"action,omitempty"` // Specific action to perform
+}
+
+// High-volume marketing/discovery notification types that must be throttled per device.
+func isBulkDiscoveryNotificationType(notificationType string) bool {
+	typ := strings.TrimSpace(strings.ToLower(notificationType))
+	if typ == "" {
+		return false
+	}
+	if strings.HasPrefix(typ, "smart_") {
+		return true
+	}
+	switch typ {
+	case "new_property",
+		"existing_property",
+		"investment_opportunity",
+		"landmark_investment_opportunity",
+		"rent_suggestion",
+		"price_drop":
+		return true
+	default:
+		return false
+	}
+}
+
+func (ns *NotificationService) isDeviceThrottled(expoToken string, notificationType string, now time.Time) (bool, *models.MarketingDevice) {
+	if !isBulkDiscoveryNotificationType(notificationType) {
+		return false, nil
+	}
+
+	token := strings.TrimSpace(expoToken)
+	if token == "" {
+		return true, nil
+	}
+
+	var md models.MarketingDevice
+	if err := storage.DB.
+		Where("fcm_token = ? AND marketing_opt_in = ?", token, true).
+		Order("updated_at DESC").
+		First(&md).Error; err == nil {
+		if md.NextSendAt != nil && now.Before(*md.NextSendAt) {
+			return true, &md
+		}
+		if md.LastSentAt != nil && now.Sub(*md.LastSentAt) < minPerDeviceSendInterval {
+			return true, &md
+		}
+		return false, &md
+	}
+
+	// Fallback guard when token exists in notification_preferences but not marketing_devices.
+	var pref models.NotificationPreference
+	if err := storage.DB.
+		Where("push_token = ? AND enabled = ?", token, true).
+		Order("updated_at DESC").
+		First(&pref).Error; err == nil {
+		if pref.LastNotificationSent != nil && now.Sub(*pref.LastNotificationSent) < minPerDeviceSendInterval {
+			return true, nil
+		}
+	}
+
+	return false, nil
+}
+
+func (ns *NotificationService) markDeviceNotificationSent(expoToken string, md *models.MarketingDevice, now time.Time) {
+	token := strings.TrimSpace(expoToken)
+	if token == "" {
+		return
+	}
+
+	next := now.Add(minPerDeviceSendInterval)
+	if md != nil {
+		_ = storage.DB.Model(&models.MarketingDevice{}).
+			Where("id = ?", md.ID).
+			Updates(map[string]interface{}{
+				"last_sent_at": now,
+				"next_send_at": next,
+			}).Error
+	} else {
+		_ = storage.DB.Model(&models.MarketingDevice{}).
+			Where("fcm_token = ?", token).
+			Updates(map[string]interface{}{
+				"last_sent_at": now,
+				"next_send_at": next,
+			}).Error
+	}
+
+	_ = storage.DB.Model(&models.NotificationPreference{}).
+		Where("push_token = ?", token).
+		Update("last_notification_sent", now).Error
+}
+
+func (ns *NotificationService) sendRichToTokenWithGuards(expoToken, title, body, imageURL string, dataMap map[string]string, notificationType string) error {
+	now := time.Now()
+	if blocked, md := ns.isDeviceThrottled(expoToken, notificationType, now); blocked {
+		return fmt.Errorf("device_throttled")
+	} else {
+		if err := utils.SendRichNotification(expoToken, title, body, imageURL, dataMap); err != nil {
+			return err
+		}
+		ns.markDeviceNotificationSent(expoToken, md, now)
+		return nil
+	}
 }
 
 // getUserPushTokens retrieves all push tokens for a user
@@ -56,12 +161,63 @@ func (ns *NotificationService) getUserPushTokens(userID uint) ([]string, error) 
 		return nil, fmt.Errorf("failed to unmarshal push tokens: %v", err)
 	}
 
-	log.Printf("✅ TOKENS SUCCESS: Found %d push tokens for user %d", len(tokens), userID)
-	return tokens, nil
+	// Also include device-level marketing tokens linked to the user.
+	// This keeps notifications deliverable even when the user's app session/JWT expired.
+	var marketingDevices []models.MarketingDevice
+	if err := storage.DB.
+		Where("user_id = ? AND marketing_opt_in = ? AND fcm_token <> ''", userID, true).
+		Find(&marketingDevices).Error; err == nil {
+		for _, d := range marketingDevices {
+			tokens = append(tokens, strings.TrimSpace(d.FCMToken))
+		}
+	}
+
+	// De-duplicate tokens and drop empties.
+	seen := make(map[string]struct{}, len(tokens))
+	unique := make([]string, 0, len(tokens))
+	for _, t := range tokens {
+		token := strings.TrimSpace(t)
+		if token == "" {
+			continue
+		}
+		if _, ok := seen[token]; ok {
+			continue
+		}
+		seen[token] = struct{}{}
+		unique = append(unique, token)
+	}
+
+	log.Printf("✅ TOKENS SUCCESS: Found %d push tokens for user %d", len(unique), userID)
+	return unique, nil
 }
 
 // SendNotificationToUser sends a notification to a specific user
 func (ns *NotificationService) SendNotificationToUser(userID uint, title, body string, data NotificationData) error {
+	if NotificationOrchestratorEnabled() {
+		dataMap := map[string]string{
+			"type":       data.Type,
+			"id":         data.ID,
+			"propertyId": data.PropertyID,
+			"userId":     data.UserID,
+			"hostId":     data.HostID,
+			"screen":     data.Screen,
+			"params":     data.Params,
+			"action":     data.Action,
+		}
+		_, err := SubmitNotificationCandidate(NotificationCandidateInput{
+			UserID:           userID,
+			NotificationType: data.Type,
+			Title:            title,
+			Body:             body,
+			Data:             dataMap,
+		})
+		if err != nil {
+			log.Printf("Failed orchestrator enqueue for user %d: %v", userID, err)
+			return err
+		}
+		return nil
+	}
+
 	tokens, err := ns.getUserPushTokens(userID)
 	if err != nil {
 		log.Printf("Failed to get push tokens for user %d: %v", userID, err)
@@ -85,9 +241,21 @@ func (ns *NotificationService) SendNotificationToUser(userID uint, title, body s
 			log.Printf("📱 TOKEN EXTRACTED: Full token: %s, Expo token: %s", token, expoToken)
 		}
 
-		if err := utils.SendNotification(expoToken, title, body, dataMap); err != nil {
-			log.Printf("Failed to send notification to token %s: %v", expoToken, err)
-			lastError = err
+		now := time.Now()
+		if blocked, md := ns.isDeviceThrottled(expoToken, data.Type, now); blocked {
+			tokenPreview := expoToken
+			if len(tokenPreview) > 12 {
+				tokenPreview = tokenPreview[:12]
+			}
+			log.Printf("⏱️ Device throttle: skipped type=%s token=%s...", data.Type, tokenPreview)
+			continue
+		} else {
+			if err := utils.SendNotification(expoToken, title, body, dataMap); err != nil {
+				log.Printf("Failed to send notification to token %s: %v", expoToken, err)
+				lastError = err
+				continue
+			}
+			ns.markDeviceNotificationSent(expoToken, md, now)
 		}
 	}
 
@@ -456,7 +624,19 @@ func (ns *NotificationService) SendPropertyTourNotificationToHost(tourID, proper
 
 // SendNewPropertyNotification sends notification to users when a new property matches their favorite city
 // Uses professional matching algorithm: Prioritizes exact city ID match, then zone ID, then name-based matching
-func (ns *NotificationService) SendNewPropertyNotification(propertyID uint, propertyTitle string, cityID *uint, cityName string, zoneID *uint, zoneName string, bedrooms int, bathrooms int, squareFootage int, imageURL string) error {
+func (ns *NotificationService) SendNewPropertyNotification(
+	propertyID uint,
+	propertyTitle string,
+	cityID *uint,
+	cityName string,
+	zoneID *uint,
+	zoneName string,
+	bedrooms int,
+	bathrooms int,
+	squareFootage int,
+	imageURL string,
+	propertyCreatedAt time.Time,
+) error {
 	log.Printf("🔔 Sending new property notification for property %d in %s (CityID: %v, ZoneID: %v)", propertyID, cityName, cityID, zoneID)
 
 	// SECURITY: Find all logged-in users with favorite city matching this property
@@ -494,6 +674,93 @@ func (ns *NotificationService) SendNewPropertyNotification(propertyID uint, prop
 
 	log.Printf("📱 Found %d logged-in users to notify (matching algorithm: cityID=%v, zoneID=%v, cityName=%s)", len(users), cityID, zoneID, cityName)
 
+	now := time.Now()
+	// Keep event_type under the "smart_*" namespace so the scheduler anti-spam
+	// (last notification + budget) treats it the same way.
+	eventType := "smart_new_property_match"
+
+	// Anti-spam: respect sleep time globally when orchestrator is off (legacy broadcaster timing).
+	if !NotificationOrchestratorEnabled() && isInSleepTime(now) {
+		log.Printf("⏰ Skipping new-property notifications during sleep time (hour=%d)", now.Hour())
+		return nil
+	}
+
+	// Preload data used by relevance scoring + anti-spam budget checks.
+	userIDs := make([]uint, 0, len(users))
+	for _, u := range users {
+		userIDs = append(userIDs, u.ID)
+	}
+
+	// Unseen score data (seen recently => lower score).
+	seenAtPtrByUserID := make(map[uint]*time.Time, len(userIDs))
+	if len(userIDs) > 0 {
+		var seenRows []models.PropertyFeedSeen
+		if err := storage.DB.
+			Where("user_id IN ? AND property_id = ?", userIDs, propertyID).
+			Find(&seenRows).Error; err == nil {
+			for _, r := range seenRows {
+				if r.UserID == nil {
+					continue
+				}
+				seenAt := r.SeenAt
+				seenAtPtrByUserID[*r.UserID] = &seenAt
+			}
+		}
+	}
+
+	// User activity (device registration last seen) for offline/active decisions.
+	lastSeenAtUnixByUserID := make(map[uint]int64, len(userIDs))
+	if len(userIDs) > 0 {
+		type lastSeenAggRow struct {
+			UserID      uint  `gorm:"column:user_id"`
+			LastSeenAt int64 `gorm:"column:last_seen_at"`
+		}
+		var rows []lastSeenAggRow
+		storage.DB.Model(&models.DeviceRegistration{}).
+			Select("user_id, MAX(last_seen_at) as last_seen_at").
+			Where("user_id IN ?", userIDs).
+			Group("user_id").
+			Scan(&rows)
+		for _, r := range rows {
+			lastSeenAtUnixByUserID[r.UserID] = r.LastSeenAt
+		}
+	}
+
+	// Anti-spam budget: max N notifications per user in the last 24h.
+	deliveryCount24h := make(map[uint]int, len(userIDs))
+	lastSentAtByUserID := make(map[uint]time.Time, len(userIDs))
+	if len(userIDs) > 0 {
+		type deliveryCountRow struct {
+			UserID uint `gorm:"column:user_id"`
+			Count  int  `gorm:"column:count"`
+		}
+		type deliveryMaxRow struct {
+			UserID   uint      `gorm:"column:user_id"`
+			LastSent time.Time `gorm:"column:last_sent"`
+		}
+
+		since := now.Add(-24 * time.Hour)
+		var countRows []deliveryCountRow
+		storage.DB.Model(&models.NotificationDeliveryLog{}).
+			Where("user_id IN ? AND event_type = ? AND created_at >= ?", userIDs, eventType, since).
+			Select("user_id, COUNT(*) as count").
+			Group("user_id").
+			Scan(&countRows)
+		for _, r := range countRows {
+			deliveryCount24h[r.UserID] = r.Count
+		}
+
+		var maxRows []deliveryMaxRow
+		storage.DB.Model(&models.NotificationDeliveryLog{}).
+			Where("user_id IN ? AND event_type = ? AND created_at >= ?", userIDs, eventType, since).
+			Select("user_id, MAX(created_at) as last_sent").
+			Group("user_id").
+			Scan(&maxRows)
+		for _, r := range maxRows {
+			lastSentAtByUserID[r.UserID] = r.LastSent
+		}
+	}
+
 	// Build notification content (needed for both logged-in and anonymous users)
 	details := fmt.Sprintf("%d bedrooms • %d bathrooms • %d m²", bedrooms, bathrooms, squareFootage)
 	if cityName != "" {
@@ -503,7 +770,7 @@ func (ns *NotificationService) SendNewPropertyNotification(propertyID uint, prop
 		details += fmt.Sprintf(", %s", zoneName)
 	}
 
-	title := "🏠 New Property Available!"
+	title := "🏠 New property in your favorite area"
 	body := fmt.Sprintf("%s\n%s", propertyTitle, details)
 
 	// Notification data for deep linking
@@ -523,6 +790,11 @@ func (ns *NotificationService) SendNewPropertyNotification(propertyID uint, prop
 		"screen":     data.Screen,
 		"params":     data.Params,
 		"action":     data.Action,
+	}
+	if strings.TrimSpace(imageURL) != "" {
+		dataMap["imageURL"] = imageURL
+		dataMap["houseImage"] = imageURL
+		dataMap["propertyImage"] = imageURL
 	}
 
 	// Initialize counters
@@ -576,7 +848,7 @@ func (ns *NotificationService) SendNewPropertyNotification(propertyID uint, prop
 					if strings.Contains(expoToken, "|") {
 						expoToken = strings.Split(expoToken, "|")[0]
 					}
-					if err := utils.SendRichNotification(expoToken, title, body, imageURL, dataMap); err != nil {
+					if err := ns.sendRichToTokenWithGuards(expoToken, title, body, imageURL, dataMap, dataMap["type"]); err != nil {
 						deviceIDPreview := anonUser.DeviceID
 						if len(deviceIDPreview) > 10 {
 							deviceIDPreview = deviceIDPreview[:10]
@@ -609,25 +881,96 @@ func (ns *NotificationService) SendNewPropertyNotification(propertyID uint, prop
 			continue
 		}
 
-		tokens, err := ns.getUserPushTokens(user.ID)
-		if err != nil {
-			log.Printf("⚠️ Failed to get tokens for user %d: %v", user.ID, err)
+		// Smart decision gate (score + anti-spam + activity).
+		seenAtPtr := seenAtPtrByUserID[user.ID]
+		score := computeNewPropertyScore(user, cityID, zoneID, seenAtPtr, propertyCreatedAt, now)
+		if score < newPropertyScoreMin {
 			continue
 		}
 
-		for _, token := range tokens {
-			expoToken := token
-			if strings.Contains(token, "|") {
-				expoToken = strings.Split(token, "|")[0]
+		if !withinNewPropertyNotifBudget(deliveryCount24h[user.ID]) {
+			continue
+		}
+
+		if lastSentAt, ok := lastSentAtByUserID[user.ID]; ok {
+			// Same notification type cooldown to prevent spam.
+			if now.Sub(lastSentAt) < 24*time.Hour {
+				continue
+			}
+		}
+
+		// If the user is actively using the app, don't spam; send only when "offline".
+		lastSeenAtUnix := lastSeenAtUnixByUserID[user.ID] // 0 if unknown
+		if !isOffline(lastSeenAtUnix, now) {
+			continue
+		}
+
+		sentForUser := false
+		if NotificationOrchestratorEnabled() {
+			rel := score
+			pid := propertyID
+			dm := make(map[string]string, len(dataMap)+1)
+			for k, v := range dataMap {
+				dm[k] = v
+			}
+			dm["legacy_event_type"] = eventType
+			_, err := SubmitNotificationCandidate(NotificationCandidateInput{
+				UserID:           user.ID,
+				NotificationType: "new_property",
+				Title:            title,
+				Body:             body,
+				ImageURL:         imageURL,
+				Data:             dm,
+				RelevanceScore:   &rel,
+				UrgencyLevel:     "normal",
+				PropertySaleID:   &pid,
+			})
+			if err == nil {
+				sentForUser = true
+				successCount++
+			} else {
+				log.Printf("⚠️ Orchestrator enqueue failed for user %d: %v", user.ID, err)
+			}
+		} else {
+			tokens, err := ns.getUserPushTokens(user.ID)
+			if err != nil {
+				log.Printf("⚠️ Failed to get tokens for user %d: %v", user.ID, err)
+				continue
 			}
 
-			// Use rich notification with image
-			if err := utils.SendRichNotification(expoToken, title, body, imageURL, dataMap); err != nil {
-				log.Printf("⚠️ Failed to send notification to user %d: %v", user.ID, err)
-				lastError = err
-			} else {
-				successCount++
+			for _, token := range tokens {
+				expoToken := token
+				if strings.Contains(token, "|") {
+					expoToken = strings.Split(token, "|")[0]
+				}
+
+				// Use rich notification with image
+				if err := ns.sendRichToTokenWithGuards(expoToken, title, body, imageURL, dataMap, dataMap["type"]); err != nil {
+					log.Printf("⚠️ Failed to send notification to user %d: %v", user.ID, err)
+					lastError = err
+				} else {
+					successCount++
+					sentForUser = true
+				}
 			}
+		}
+
+		// Record delivery for legacy path only. Orchestrator logs after real FCM send (see notification_orchestrator).
+		if sentForUser && !NotificationOrchestratorEnabled() {
+			timeWindow := now.Format("2006-01-02")
+			fp := models.BuildFingerprint(user.ID, "sale", nil, &propertyID, eventType, timeWindow)
+			logEntry := models.NotificationDeliveryLog{
+				UserID:         user.ID,
+				EventType:      eventType,
+				PropertyKind:   "sale",
+				PropertyID:     nil,
+				PropertySaleID: &propertyID,
+				Fingerprint:    fp,
+				ABVariant:      ABVariantForUser(user.ID, eventType),
+			}
+			_ = storage.DB.
+				Clauses(clause.OnConflict{DoNothing: true}).
+				Create(&logEntry).Error
 		}
 	}
 
@@ -636,7 +979,17 @@ func (ns *NotificationService) SendNewPropertyNotification(propertyID uint, prop
 }
 
 // SendGenericPropertyNotification sends a generic property notification when personalization fails
-func (ns *NotificationService) SendGenericPropertyNotification(propertyID uint, propertyTitle string, cityName string, bedrooms int, bathrooms int, squareFootage int, imageURL string, userIDs []uint) error {
+func (ns *NotificationService) SendGenericPropertyNotification(
+	propertyID uint,
+	propertyTitle string,
+	cityName string,
+	bedrooms int,
+	bathrooms int,
+	squareFootage int,
+	imageURL string,
+	propertyCreatedAt time.Time,
+	userIDs []uint,
+) error {
 	log.Printf("🔔 Sending generic property notification for property %d", propertyID)
 
 	details := fmt.Sprintf("%d bedrooms • %d bathrooms • %d m²", bedrooms, bathrooms, squareFootage)
@@ -664,6 +1017,11 @@ func (ns *NotificationService) SendGenericPropertyNotification(propertyID uint, 
 		"params":     data.Params,
 		"action":     data.Action,
 	}
+	if strings.TrimSpace(imageURL) != "" {
+		dataMap["imageURL"] = imageURL
+		dataMap["houseImage"] = imageURL
+		dataMap["propertyImage"] = imageURL
+	}
 
 	var lastError error
 	successCount := 0
@@ -680,7 +1038,7 @@ func (ns *NotificationService) SendGenericPropertyNotification(propertyID uint, 
 				expoToken = strings.Split(token, "|")[0]
 			}
 
-			if err := utils.SendRichNotification(expoToken, title, body, imageURL, dataMap); err != nil {
+			if err := ns.sendRichToTokenWithGuards(expoToken, title, body, imageURL, dataMap, dataMap["type"]); err != nil {
 				lastError = err
 			} else {
 				successCount++
@@ -690,6 +1048,121 @@ func (ns *NotificationService) SendGenericPropertyNotification(propertyID uint, 
 
 	log.Printf("✅ Sent %d generic notifications successfully", successCount)
 	return lastError
+}
+
+// NotifyPriceDropForPropertySale sends a “price dropped” smart notification for a sale property.
+// It notifies users who recently viewed/saved the property, and applies anti-spam + anti-boring rules:
+// - respects sleep time (10PM–7AM) via isInSleepTime()
+// - max 2 smart notifications/day + per-type 24h cooldown via canSendSmartType()
+// - skip users who are active (last_seen_at < 24h) via isOffline()
+// - skip if the property was already shown in the smart feed in the last 10 days (property_feed_seen)
+func (ns *NotificationService) NotifyPriceDropForPropertySale(
+	propertyID uint,
+	propertyTitle string,
+	oldPrice float64,
+	newPrice float64,
+	imageURL string,
+) error {
+	now := time.Now()
+
+	// Respect sleep time: avoid pushing back-to-back boring reminders.
+	if isInSleepTime(now) {
+		return nil
+	}
+
+	if oldPrice <= 0 || newPrice <= 0 || newPrice >= oldPrice {
+		return nil
+	}
+
+	dropPct := (oldPrice - newPrice) / oldPrice * 100
+	// Avoid tiny price fluctuations.
+	if dropPct < 3 {
+		return nil
+	}
+
+	// Candidate users: those who viewed or saved this property.
+	var userIDs []uint
+	if err := storage.DB.Model(&models.Interaction{}).
+		Where("user_id IS NOT NULL AND property_sale_id = ? AND (event_type = ? OR event_type = ?)",
+			propertyID, models.EventPropertyView, models.EventSave).
+		Distinct("user_id").
+		Pluck("user_id", &userIDs).Error; err != nil {
+		return err
+	}
+
+	if len(userIDs) == 0 {
+		return nil
+	}
+
+	// Skip boring repeats: if user has seen this property recently (smart feed),
+	// don't re-notify too soon.
+	seenCut := now.Add(-seenRecentlyCutoff)
+	seenMap := make(map[uint]bool, len(userIDs))
+	var seenRows []models.PropertyFeedSeen
+	_ = storage.DB.Where("user_id IN ? AND property_id = ? AND seen_at >= ?", userIDs, propertyID, seenCut).
+		Find(&seenRows).Error
+	for _, s := range seenRows {
+		if s.UserID == nil {
+			continue
+		}
+		seenMap[*s.UserID] = true
+	}
+
+	title := "Price dropped"
+	body := fmt.Sprintf(
+		"Good news: \"%s\" is now cheaper (%.0f MRU → %.0f MRU, %.1f%% drop). Check the new price.",
+		propertyTitle,
+		oldPrice,
+		newPrice,
+		dropPct,
+	)
+
+	data := NotificationData{
+		Type:       "price_drop",
+		ID:         fmt.Sprintf("%d", propertyID),
+		PropertyID: fmt.Sprintf("%d", propertyID),
+		Screen:     "PropertySaleDetails",
+		Params:     fmt.Sprintf(`{"propertyId": %d}`, propertyID),
+		Action:     "view_property",
+	}
+
+	dataMap := map[string]string{
+		"type":       data.Type,
+		"id":         data.ID,
+		"propertyId": data.PropertyID,
+		"screen":     data.Screen,
+		"params":     data.Params,
+		"action":     data.Action,
+	}
+
+	// Notify users, best-effort.
+	var lastErr error
+	for _, uid := range userIDs {
+		if uid == 0 {
+			continue
+		}
+		if !ns.canSendSmartType(uid, "smart_price_drop", now) {
+			continue
+		}
+		if seenMap[uid] {
+			continue
+		}
+
+		// Avoid spamming active users.
+		var reg models.DeviceRegistration
+		_ = storage.DB.Where("user_id = ?", uid).Order("last_seen_at DESC").First(&reg).Error
+		if !isOffline(reg.LastSeenAt, now) {
+			continue
+		}
+
+		if ns.sendToUserWithImage(uid, title, body, imageURL, dataMap) {
+			ns.logSmartDelivery(uid, "smart_price_drop", &propertyID, now)
+		} else {
+			lastErr = nil
+		}
+	}
+
+	return lastErr
 }
 
 // NotifyUserAboutExistingProperties sends notifications to a user about existing published properties
@@ -795,7 +1268,7 @@ func (ns *NotificationService) NotifyUserAboutExistingProperties(userID uint, ci
 				expoToken = strings.Split(token, "|")[0]
 			}
 
-			if err := utils.SendRichNotification(expoToken, title, body, imageURL, dataMap); err != nil {
+			if err := ns.sendRichToTokenWithGuards(expoToken, title, body, imageURL, dataMap, dataMap["type"]); err != nil {
 				log.Printf("⚠️ Failed to send notification to user %d for property %d: %v", userID, property.ID, err)
 			} else {
 				successCount++
@@ -930,6 +1403,7 @@ func (ns *NotificationService) NotifyNewVideoForProperty(propertyKind string, pr
 				PropertyID:     propertyID,
 				PropertySaleID: propertySaleID,
 				Fingerprint:    fp,
+				ABVariant:      ABVariantForUser(uid, eventType),
 			}
 			storage.DB.Create(&logEntry)
 		}
@@ -1052,7 +1526,7 @@ func (ns *NotificationService) NotifyHostOnViewMilestone(propertyID uint, viewCo
 		}
 
 		// Send with image using SendRichNotification
-		if err := utils.SendRichNotification(expoToken, title, body, propertyImage, dataMap); err != nil {
+		if err := ns.sendRichToTokenWithGuards(expoToken, title, body, propertyImage, dataMap, dataMap["type"]); err != nil {
 			log.Printf("Failed to send milestone notification to token %s: %v", expoToken, err)
 			lastError = err
 		}
@@ -1123,7 +1597,7 @@ func (ns *NotificationService) NotifyViewersOnViewMilestone(propertyID uint, vie
 				expoToken = strings.Split(token, "|")[0]
 			}
 
-			if err := utils.SendRichNotification(expoToken, title, body, propertyImage, dataMap); err != nil {
+			if err := ns.sendRichToTokenWithGuards(expoToken, title, body, propertyImage, dataMap, dataMap["type"]); err != nil {
 				log.Printf("Failed to send popularity alert to user %d: %v", userID, err)
 				lastError = err
 			} else {

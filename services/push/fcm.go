@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -16,6 +17,81 @@ import (
 
 var fcmClient *messaging.Client
 var fcmInitialized bool
+
+func looksLikeFirebaseServiceAccount(path string) bool {
+	b, err := os.ReadFile(path)
+	if err != nil || len(b) == 0 || len(b) > 2<<20 {
+		return false
+	}
+	var meta struct {
+		Type string `json:"type"`
+	}
+	return json.Unmarshal(b, &meta) == nil && meta.Type == "service_account"
+}
+
+// discoverServiceAccountJSON finds a *.json in dir whose content is a Firebase
+// service account (type=service_account). Skips google-services.json (client SDK).
+func discoverServiceAccountJSON(dir string) string {
+	pref := []string{"service-account.json", "fcm-credentials.json"}
+	for _, name := range pref {
+		p := filepath.Join(dir, name)
+		if st, err := os.Stat(p); err == nil && !st.IsDir() && looksLikeFirebaseServiceAccount(p) {
+			return p
+		}
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return ""
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		n := e.Name()
+		ln := strings.ToLower(n)
+		if !strings.HasSuffix(ln, ".json") {
+			continue
+		}
+		if ln == "google-services.json" || ln == "package.json" || ln == "app.json" {
+			continue
+		}
+		p := filepath.Join(dir, n)
+		if looksLikeFirebaseServiceAccount(p) {
+			return p
+		}
+	}
+	return ""
+}
+
+// mergeFCMDataPayload builds FCM "data" keys (all strings) for the client / in-app feed + image URL.
+func mergeFCMDataPayload(imageURL string, data map[string]string) map[string]string {
+	if data == nil && strings.TrimSpace(imageURL) == "" {
+		return nil
+	}
+	out := make(map[string]string)
+	for k, v := range data {
+		k = strings.TrimSpace(k)
+		if k == "" || strings.TrimSpace(v) == "" {
+			continue
+		}
+		out[k] = v
+	}
+	if u := strings.TrimSpace(imageURL); u != "" {
+		if _, ok := out["imageURL"]; !ok {
+			out["imageURL"] = u
+		}
+		if _, ok := out["houseImage"]; !ok {
+			out["houseImage"] = u
+		}
+		if _, ok := out["propertyImage"]; !ok {
+			out["propertyImage"] = u
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
 
 // InitializeFCM initializes Firebase Cloud Messaging client
 // Supports multiple credential sources:
@@ -100,6 +176,12 @@ func InitializeFCM() error {
 			}
 		}
 
+		if credsPath == "" {
+			if p := discoverServiceAccountJSON("."); p != "" {
+				credsPath = p
+			}
+		}
+
 		if credsPath != "" {
 			// Validate that we're not using google-services.json (client config)
 			if strings.Contains(credsPath, "google-services.json") {
@@ -148,12 +230,12 @@ func InitializeFCM() error {
 
 // SendFCMPush sends push notification via FCM (without image)
 func SendFCMPush(tokens []string, title, body string) error {
-	return SendFCMPushWithImage(tokens, title, body, "")
+	return SendFCMPushWithImage(tokens, title, body, "", nil)
 }
 
 // SendFCMPushWithImage sends push notification via FCM with optional image/avatar URL
 // imageURL: URL to sender's avatar (shown instead of app icon, positioned below)
-func SendFCMPushWithImage(tokens []string, title, body, imageURL string) error {
+func SendFCMPushWithImage(tokens []string, title, body, imageURL string, data map[string]string) error {
 	if !fcmInitialized || fcmClient == nil {
 		log.Printf("⚠️ FCM not initialized, cannot send push notifications")
 		return nil
@@ -213,9 +295,11 @@ func SendFCMPushWithImage(tokens []string, title, body, imageURL string) error {
 	log.Printf("🔥 Sending FCM push to %d tokens [%s]", len(validTokens), strings.Join(preview, ", "))
 
 	ctx := context.Background()
+	dataPayload := mergeFCMDataPayload(imageURL, data)
 
 	// FCM message with image support
 	message := &messaging.MulticastMessage{
+		Data: dataPayload,
 		Notification: &messaging.Notification{
 			Title:    title,
 			Body:     body,
@@ -260,7 +344,7 @@ func SendFCMPushWithImage(tokens []string, title, body, imageURL string) error {
 		if strings.Contains(err.Error(), "invalid") || strings.Contains(err.Error(), "not found") {
 			// Try sending individually to identify bad tokens
 			log.Printf("🔄 Attempting individual sends to identify invalid tokens...")
-			return sendIndividualFCMPushWithImage(ctx, validTokens, title, body, imageURL)
+			return sendIndividualFCMPushWithImage(ctx, validTokens, title, body, imageURL, data)
 		}
 		return err
 	}
@@ -295,13 +379,15 @@ func SendFCMPushWithImage(tokens []string, title, body, imageURL string) error {
 
 // sendIndividualFCMPush sends FCM messages individually (used when batch fails)
 func sendIndividualFCMPush(ctx context.Context, tokens []string, title, body string) error {
-	return sendIndividualFCMPushWithImage(ctx, tokens, title, body, "")
+	return sendIndividualFCMPushWithImage(ctx, tokens, title, body, "", nil)
 }
 
 // sendIndividualFCMPushWithImage sends FCM messages individually with image
-func sendIndividualFCMPushWithImage(ctx context.Context, tokens []string, title, body, imageURL string) error {
+func sendIndividualFCMPushWithImage(ctx context.Context, tokens []string, title, body, imageURL string, data map[string]string) error {
+	dataPayload := mergeFCMDataPayload(imageURL, data)
 	for _, token := range tokens {
 		message := &messaging.Message{
+			Data: dataPayload,
 			Notification: &messaging.Notification{
 				Title:    title,
 				Body:     body,

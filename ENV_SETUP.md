@@ -75,3 +75,43 @@ After setting up, restart your server and check logs for:
 - ✅ `FCM initialized successfully` - FCM is working
 - ⚠️ `FCM initialization failed` - Check the credentials file path and format
 
+---
+
+## Google Cloud Run (required for login & profile to work)
+
+**Why 401 and “profile creation / login failing” on Cloud Run?**
+
+On Cloud Run the server runs in a Docker container. There is **no `.env` file** in the container — all variables must be set in the **Cloud Run service** (Console → your service → Edit & deploy new revision → Variables & Secrets).
+
+If `ACCESS_TOKEN_SECRET` or `REFRESH_TOKEN_SECRET` are **not set** (or empty) on Cloud Run:
+
+- JWT verification fails → every protected request returns **401 Unauthorized**
+- Profile and login appear to “fail” (USER DATA null, 401 on `/apartment/host/reservations`, etc.)
+
+**Required env vars on Cloud Run (set in Service → Edit → Variables & Secrets):**
+
+| Variable | Required | Notes |
+|----------|----------|--------|
+| `DB_CONNECTION_STRING` | ✅ Yes | e.g. Cloud SQL connection string |
+| `ACCESS_TOKEN_SECRET` | ✅ Yes | **Must match** the value in your local `.env` (same secret for signing/verifying JWTs) |
+| `REFRESH_TOKEN_SECRET` | ✅ Yes | **Must match** local `.env`; if missing/empty, refresh and auth break |
+| `PORT` | ✅ Yes | Cloud Run sets this (e.g. 8080); only override if needed |
+
+**Steps:**
+
+1. In **Google Cloud Console** → **Cloud Run** → your service (e.g. `habitat-server`) → **Edit & deploy new revision**.
+2. Open **Variables & Secrets**.
+3. Add (or update):
+   - `ACCESS_TOKEN_SECRET` = same value as in your local `.env`
+   - `REFRESH_TOKEN_SECRET` = same value as in your local `.env` (if it’s empty locally, generate a strong secret and set it both locally and here)
+4. Redeploy. The server will **fail to start** with a clear error if either secret is still missing.
+
+**Local `.env`:** Ensure `REFRESH_TOKEN_SECRET` is set (not empty). Example:
+
+```env
+ACCESS_TOKEN_SECRET=your-long-random-secret-here
+REFRESH_TOKEN_SECRET=another-long-random-secret-here
+```
+
+Use the **same** values on Cloud Run so tokens issued in production are valid.
+

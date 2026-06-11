@@ -169,7 +169,7 @@ func (s *RecommendationService) computeFeed(opt GetFeedOptions) ([]FeedItem, err
 	vq := storage.DB.Model(&models.Video{}).
 		Select("videos.id, videos.property_id, videos.likes_count as likes, videos.saves_count as saves, videos.view_count as views, videos.created_at").
 		Joins("LEFT JOIN properties ON videos.property_id = properties.id").
-		Where("properties.id IS NOT NULL AND COALESCE(properties.is_active,?) = ? AND properties.status IN (?)", true, true, []string{"approved", "live"}).
+		Where("properties.id IS NOT NULL AND COALESCE(properties.is_active,?) = ? AND LOWER(properties.status) IN (?)", true, true, []string{"approved", "live"}).
 		Where("(videos.status IS NULL OR LOWER(videos.status) <> ?)", "rejected").
 		Where("COALESCE(videos.is_promotional,?) = ?", false, false)
 	if len(excludeVideoIDs) > 0 {

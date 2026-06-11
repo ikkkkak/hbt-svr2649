@@ -72,6 +72,54 @@ func (s *InteractionService) Record(in InteractionInput) error {
 		log.Printf("interaction.Record error: %v", err)
 		return err
 	}
+
+	// Real-time notification triggers (async; never block request).
+	// We keep this minimal: after a meaningful sale property view, schedule a reminder.
+	if meaningful &&
+		in.UserID != nil &&
+		*in.UserID > 0 &&
+		in.EventType == models.EventPropertyView &&
+		in.EntityType == models.EntityPropertySale &&
+		in.PropertySaleID != nil &&
+		*in.PropertySaleID > 0 {
+		uid := *in.UserID
+		psid := *in.PropertySaleID
+		go func() {
+			EnqueueAINotificationDelayed(AINotificationJob{
+				Kind:         "sale_view_reminder",
+				UserID:       uid,
+				PropertyKind: "sale",
+				PropertySale: &psid,
+			}, time.Now().Add(45*time.Minute))
+
+			// Stronger follow-up: “still available” a few hours later (only if user stayed offline).
+			EnqueueAINotificationDelayed(AINotificationJob{
+				Kind:         "sale_still_available",
+				UserID:       uid,
+				PropertyKind: "sale",
+				PropertySale: &psid,
+			}, time.Now().Add(6*time.Hour))
+		}()
+	}
+
+	// After a user SAVES a sale property, recommend similar properties shortly after.
+	if in.UserID != nil &&
+		*in.UserID > 0 &&
+		in.EventType == models.EventSave &&
+		in.EntityType == models.EntityPropertySale &&
+		in.PropertySaleID != nil &&
+		*in.PropertySaleID > 0 {
+		uid := *in.UserID
+		psid := *in.PropertySaleID
+		go func() {
+			EnqueueAINotificationDelayed(AINotificationJob{
+				Kind:         "sale_similar_reco",
+				UserID:       uid,
+				PropertyKind: "sale",
+				PropertySale: &psid,
+			}, time.Now().Add(12*time.Minute))
+		}()
+	}
 	return nil
 }
 

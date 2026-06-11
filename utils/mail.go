@@ -1,35 +1,59 @@
 package utils
 
 import (
+	"fmt"
+	"net/smtp"
 	"os"
-
-	"github.com/mailjet/mailjet-apiv3-go"
+	"strings"
 )
 
-func SendMail(userEmail string, subject string, html string) (bool, error) {
-	publicKey := os.Getenv("EMAIL_API_KEY")
-	privateKey := os.Getenv("EMAIL_SECRET_KEY")
+func gmailUser() string {
+	if u := strings.TrimSpace(os.Getenv("GMAIL_USER")); u != "" {
+		return u
+	}
+	return strings.TrimSpace(os.Getenv("EMAIL_FROM"))
+}
 
-	mailjetClient := mailjet.NewMailjetClient(publicKey, privateKey)
-	messagesInfo := []mailjet.InfoMessagesV31{
-		{
-			From: &mailjet.RecipientV31{
-				Email: "jeremypersing21@gmail.com",
-			},
-			To: &mailjet.RecipientsV31{
-				mailjet.RecipientV31{
-					Email: userEmail,
-				},
-			},
-			Subject:  subject,
-			HTMLPart: html,
-		},
+func gmailAppPassword() string {
+	return strings.TrimSpace(os.Getenv("GMAIL_APP_PASSWORD"))
+}
+
+// EmailConfigured reports whether Gmail SMTP credentials are set.
+func EmailConfigured() bool {
+	return gmailUser() != "" && gmailAppPassword() != ""
+}
+
+func SendMail(userEmail string, subject string, html string) (bool, error) {
+	from := gmailUser()
+	password := gmailAppPassword()
+	if from == "" || password == "" {
+		return false, fmt.Errorf("set EMAIL_FROM (or GMAIL_USER) and GMAIL_APP_PASSWORD")
 	}
 
-	messages := mailjet.MessagesV31{Info: messagesInfo}
-	_, err := mailjetClient.SendMailV31(&messages)
-	if err != nil {
-		return false, err
+	to := strings.TrimSpace(userEmail)
+	if to == "" {
+		return false, fmt.Errorf("recipient email is required")
+	}
+
+	fromName := strings.TrimSpace(os.Getenv("EMAIL_FROM_NAME"))
+	if fromName == "" {
+		fromName = "Meskeny"
+	}
+	fromHeader := fmt.Sprintf("%s <%s>", fromName, from)
+
+	msg := strings.Join([]string{
+		"From: " + fromHeader,
+		"To: " + to,
+		"Subject: " + subject,
+		"MIME-Version: 1.0",
+		"Content-Type: text/html; charset=UTF-8",
+		"",
+		html,
+	}, "\r\n")
+
+	auth := smtp.PlainAuth("", from, password, "smtp.gmail.com")
+	if err := smtp.SendMail("smtp.gmail.com:587", auth, from, []string{to}, []byte(msg)); err != nil {
+		return false, fmt.Errorf("gmail smtp: %w", err)
 	}
 
 	return true, nil

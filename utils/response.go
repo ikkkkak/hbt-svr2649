@@ -19,6 +19,5 @@ func JSONPage(ctx iris.Context, data interface{}, page, perPage int, total int64
 }
 
 func JSONError(ctx iris.Context, status int, code, message string) {
-	ctx.StatusCode(status)
-	ctx.JSON(iris.Map{"error": code, "message": message})
+	RespondAPIError(ctx, status, code, message)
 }

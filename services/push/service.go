@@ -58,7 +58,7 @@ func SendPushWithImage(tokens []string, title, body, imageURL string, data map[s
 	if len(fcmTokens) > 0 {
 		if fcmInitialized && fcmClient != nil {
 			log.Printf("🔥 Sending %d FCM/APNs token(s) via FCM (with image: %v)", len(fcmTokens), imageURL != "")
-			fcmErr = SendFCMPushWithImage(fcmTokens, title, body, imageURL)
+			fcmErr = SendFCMPushWithImage(fcmTokens, title, body, imageURL, data)
 			if fcmErr != nil {
 				log.Printf("⚠️ FCM send error: %v", fcmErr)
 			}

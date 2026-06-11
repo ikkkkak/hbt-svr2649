@@ -85,3 +85,36 @@ func AdminVerifyUser(ctx iris.Context) {
 	utils.Audit(ctx, "user.verify", "user", user.ID, before, user)
 	ctx.JSON(iris.Map{"data": iris.Map{"user": user, "verification": iv}})
 }
+
+// AdminUpdateUser - PATCH /admin/users/:id { true_broker?: boolean }
+func AdminUpdateUser(ctx iris.Context) {
+	id, err := ctx.Params().GetUint("id")
+	if err != nil {
+		utils.JSONError(ctx, http.StatusBadRequest, "invalid_id", "invalid id")
+		return
+	}
+
+	var body struct {
+		TrueBroker *bool `json:"true_broker"`
+	}
+	if err := ctx.ReadJSON(&body); err != nil {
+		utils.JSONError(ctx, http.StatusBadRequest, "invalid_payload", "invalid JSON")
+		return
+	}
+
+	var user models.User
+	if err := storage.DB.First(&user, id).Error; err != nil {
+		utils.JSONError(ctx, http.StatusNotFound, "not_found", "user not found")
+		return
+	}
+
+	before := user
+	if body.TrueBroker != nil {
+		user.TrueBroker = *body.TrueBroker
+		storage.DB.Model(&models.User{}).Where("id = ?", id).Update("true_broker", *body.TrueBroker)
+	}
+
+	storage.DB.Save(&user)
+	utils.Audit(ctx, "user.update", "user", user.ID, before, user)
+	ctx.JSON(iris.Map{"data": iris.Map{"user": user}})
+}

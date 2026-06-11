@@ -19,6 +19,7 @@ type ExpoMessage struct {
 	Priority string                 `json:"priority,omitempty"`
 	Data     map[string]interface{} `json:"data,omitempty"` // Custom data including image/avatar URL
 	Image    string                 `json:"image,omitempty"` // Native image support for iOS/Android (Expo Push API v2)
+	RichContent map[string]string   `json:"richContent,omitempty"` // Android rich media compatibility payload
 	// iOS-specific fields
 	Badge *int `json:"badge,omitempty"`
 	// Android-specific fields
@@ -71,6 +72,7 @@ func SendExpoPushWithImage(tokens []string, title, body, imageURL string, data m
 		
 		if imageURL != "" {
 			msg.Image = imageURL // Native image support - displays in notification on iOS/Android
+			msg.RichContent = map[string]string{"image": imageURL}
 			// Also include image URL in data for client-side handling
 			msg.Data["imageURL"] = imageURL
 			msg.Data["avatarURL"] = imageURL // Both keys for compatibility

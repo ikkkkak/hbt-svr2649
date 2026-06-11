@@ -24,6 +24,12 @@ func CreateProperty(ctx iris.Context) {
 
 	err := ctx.ReadJSON(&input)
 	if err != nil {
+		log.Printf("[CreateProperty] JSON read error: %v", err)
+		utils.HandleValidationErrors(err, ctx)
+		return
+	}
+	if err := utils.Validate.Struct(input); err != nil {
+		log.Printf("[CreateProperty] validation failed host=%d type=%q: %v", input.HostID, input.PropertyType, err)
 		utils.HandleValidationErrors(err, ctx)
 		return
 	}
@@ -61,6 +67,9 @@ func CreateProperty(ctx iris.Context) {
 		State:              input.State,
 		Zip:                input.Zip,
 		Country:            input.Country,
+		CityID:             input.CityID,
+		ZoneID:             input.ZoneID,
+		QuartierID:         input.QuartierID,
 		Lat:                input.Lat,
 		Lng:                input.Lng,
 		Capacity:           input.Capacity,
@@ -89,6 +98,7 @@ func CreateProperty(ctx iris.Context) {
 		EquipmentViolationPolicyAccepted: input.EquipmentViolationPolicyAccepted != nil && *input.EquipmentViolationPolicyAccepted,
 		UserSafetyPolicyAccepted:         input.UserSafetyPolicyAccepted != nil && *input.UserSafetyPolicyAccepted,
 		PropertyPolicyAccepted:           input.PropertyPolicyAccepted != nil && *input.PropertyPolicyAccepted,
+		HostPrivateNote:                  sanitizeHostPrivateNote(input.HostPrivateNote),
 	}
 
 	// One-time translations for core text fields (title, description, neighborhood)
@@ -104,6 +114,12 @@ func CreateProperty(ctx iris.Context) {
 	}
 	if b, err := json.Marshal(neighTranslations); err == nil {
 		property.NeighborhoodDescriptionTranslations = b
+	}
+
+	if cid, cName, cNameAr := resolveListingCountry(input.CountryID, input.CityID, input.Country); cid != nil {
+		property.CountryID = cid
+		property.Country = cName
+		_ = cNameAr
 	}
 
 	// Optional property category id
@@ -138,6 +154,18 @@ func CreateProperty(ctx iris.Context) {
 		ctx.JSON(iris.Map{"error": "Failed to create property"})
 		return
 	}
+
+	services.NotifyAdminNewListing(services.ListingAdminNotifyInput{
+		Kind:         services.ListingKindRent,
+		ID:           property.ID,
+		Title:        property.Title,
+		City:         property.City,
+		Price:        float64(property.NightlyPrice),
+		Currency:     property.Currency,
+		PropertyType: property.PropertyType,
+		HostUserID:   property.HostID,
+		Status:       "active",
+	})
 
 	// Track property creation for host mode engagement
 	// Get user ID from middleware context
@@ -259,6 +287,9 @@ func GetProperty(ctx iris.Context) {
 		lang,
 	)
 
+	redactRentPropertyHostNote(property, optionalAuthUserID(ctx))
+	redactRentPropertyBrokerProfile(property)
+
 	ctx.JSON(property)
 }
 
@@ -267,38 +298,52 @@ func GetPropertiesByUserID(ctx iris.Context) {
 	id := params.Get("id")
 	excludeID := ctx.URLParam("exclude") // Optional: exclude a specific property ID
 
-	query := storage.DB.Preload("Host").Preload("Reviews").
-		Where("host_id = ?", id).
-		Where("is_active = ?", true).
-		Where("status IN ?", []string{"approved", "live"})
-
-	// Exclude specific property if provided
-	if excludeID != "" {
-		query = query.Where("id != ?", excludeID)
-	}
-
-	// Extract userID for user-specific exclusions (optional auth)
-	var userID uint = 0
+	// Resolve authenticated user ID (for "own list" vs "other's list")
+	var authUserID uint = 0
 	if v := ctx.Values().Get("userID"); v != nil {
-		if id, ok := v.(uint); ok {
-			userID = id
+		if uid, ok := v.(uint); ok {
+			authUserID = uid
 		}
 	}
-	if userID == 0 {
+	if authUserID == 0 && ctx.GetHeader("Authorization") != "" {
+		// Try to parse token for optional auth
 		if auth := ctx.GetHeader("Authorization"); len(auth) > 7 && auth[:7] == "Bearer " {
 			verifier := jwt.NewVerifier(jwt.HS256, []byte(os.Getenv("ACCESS_TOKEN_SECRET")))
 			verifier.WithDefaultBlocklist()
 			if token, err := verifier.VerifyToken([]byte(auth[7:])); err == nil {
 				var claims utils.AccessToken
 				if err := token.Claims(&claims); err == nil {
-					userID = claims.ID
+					authUserID = claims.ID
 				}
 			}
 		}
 	}
 
+	hostID, _ := strconv.ParseUint(id, 10, 32)
+	isOwnList := authUserID > 0 && uint(hostID) == authUserID
+
+	// Host's own list: include pending so they see newly created properties
+	// Use case-insensitive comparison to handle any status variations
+	query := storage.DB.Preload("Host").Preload("Reviews").
+		Where("host_id = ?", id).
+		Where("COALESCE(is_active, true) = ?", true)
+
+	if isOwnList {
+		// Host sees their own pending properties too
+		query = query.Where("LOWER(status) IN (?)", []string{"approved", "live", "published", "pending"})
+	} else {
+		// Public: only approved/live
+		query = query.Where("LOWER(status) IN (?)", []string{"approved", "live", "published"})
+	}
+
+	// Exclude specific property if provided
+	if excludeID != "" {
+		query = query.Where("id != ?", excludeID)
+	}
+
 	// Apply user-specific exclusions if authenticated
-	if userID > 0 {
+	if authUserID > 0 {
+		userID := authUserID
 		query = query.Where("id NOT IN (SELECT property_id FROM hidden_properties WHERE user_id = ?)", userID)
 		query = query.Where("id NOT IN (SELECT property_id FROM property_reports WHERE reporter_id = ?)", userID)
 		query = query.Where("host_id NOT IN (SELECT flagged_user_id FROM user_flags WHERE flagger_id = ? AND status='active')", userID)
@@ -312,6 +357,10 @@ func GetPropertiesByUserID(ctx iris.Context) {
 			iris.StatusInternalServerError,
 			"Error", propertiesExist.Error.Error(), ctx)
 		return
+	}
+
+	for i := range properties {
+		redactRentPropertyHostNote(&properties[i], authUserID)
 	}
 
 	ctx.JSON(properties)
@@ -333,10 +382,11 @@ func GetHostPropertiesByPropertyID(ctx iris.Context) {
 	}
 
 	// Build query for same host's properties
+	// Use case-insensitive comparison to handle any status variations
 	query := storage.DB.Preload("Host").Preload("Reviews").
 		Where("host_id = ?", base.HostID).
 		Where("is_active = ?", true).
-		Where("status IN ?", []string{"approved", "live"})
+		Where("LOWER(status) IN (?)", []string{"approved", "live", "published"})
 
 	// Exclude the current property or any explicitly excluded id
 	if excludeID != "" {
@@ -374,6 +424,9 @@ func GetHostPropertiesByPropertyID(ctx iris.Context) {
 	if err := query.Order("created_at DESC").Limit(20).Find(&properties).Error; err != nil {
 		utils.CreateError(iris.StatusInternalServerError, "Error", err.Error(), ctx)
 		return
+	}
+	for i := range properties {
+		redactRentPropertyHostNote(&properties[i], userID)
 	}
 	ctx.JSON(properties)
 }
@@ -538,8 +591,8 @@ func GetPropertiesByBoundingBox(ctx iris.Context) {
 	// Build base query
 	query := storage.DB.Preload("Host").
 		Preload("Reviews").
-		Where("lat >= ? AND lat <= ? AND lng >= ? AND lng <= ? AND is_active = true AND status IN (?)",
-			boundingBox.LatLow, boundingBox.LatHigh, boundingBox.LngLow, boundingBox.LngHigh, []string{"approved", "live"})
+		Where("lat >= ? AND lat <= ? AND lng >= ? AND lng <= ? AND is_active = true AND COALESCE(is_flagged, false) = false AND LOWER(status) IN (?)",
+			boundingBox.LatLow, boundingBox.LatHigh, boundingBox.LngLow, boundingBox.LngHigh, []string{"approved", "published"})
 
 	// Apply user-specific exclusions if authenticated
 	if userID > 0 {
@@ -631,6 +684,10 @@ func GetPropertiesByBoundingBox(ctx iris.Context) {
 		)
 	}
 
+	for i := range properties {
+		redactRentPropertyHostNote(&properties[i], userID)
+	}
+
 	ctx.JSON(properties)
 }
 
@@ -640,7 +697,24 @@ func insertImages(arg InsertImages) []string {
 		if image == "" {
 			continue // Skip empty strings
 		}
-		if !(strings.Contains(image, "res.cloudinary.com")) {
+		trimmed := strings.TrimSpace(image)
+		if trimmed == "" {
+			continue
+		}
+
+		// If the client already provided a hosted URL (GCS, Cloudinary, etc),
+		// store it as-is. Trying to "upload" an https URL as base64 will fail
+		// and silently drop the image, resulting in [] persisted.
+		if strings.HasPrefix(trimmed, "http://") ||
+			strings.HasPrefix(trimmed, "https://") ||
+			strings.Contains(trimmed, "res.cloudinary.com") ||
+			strings.Contains(trimmed, "storage.googleapis.com") {
+			imagesArr = append(imagesArr, trimmed)
+			continue
+		}
+
+		// Otherwise, treat it as base64 / data URL and upload.
+		if true {
 			// Generate unique filename with timestamp and index
 			timestamp := time.Now().UnixNano() / int64(time.Millisecond) // milliseconds since epoch
 			publicID := fmt.Sprintf("property_%d_%d", timestamp, i)
@@ -653,16 +727,14 @@ func insertImages(arg InsertImages) []string {
 			}
 
 			fmt.Printf("Uploading image with publicID: %s\n", publicID)
-			urlMap := storage.UploadBase64Image(image, publicID)
+			urlMap := storage.UploadBase64Image(trimmed, publicID)
 			if urlMap != nil && urlMap["url"] != "" {
 				imagesArr = append(imagesArr, urlMap["url"])
 				fmt.Printf("Successfully uploaded image: %s\n", urlMap["url"])
 			} else {
 				// Log error but continue
-				fmt.Printf("Failed to upload image to Cloudinary with publicID: %s\n", publicID)
+				fmt.Printf("Failed to upload image with publicID: %s\n", publicID)
 			}
-		} else {
-			imagesArr = append(imagesArr, image)
 		}
 	}
 	return imagesArr
@@ -751,8 +823,8 @@ func DeletePropertyImage(ctx iris.Context) {
 		return
 	}
 
-	// Delete image from Cloudinary
-	if storage.DeleteImageFromCloudinary(imageURL) {
+	// Delete image from configured CDN when possible
+	if storage.DeleteMedia(imageURL) {
 		ctx.JSON(iris.Map{
 			"message": "Image deleted successfully",
 			"success": true,
@@ -760,9 +832,9 @@ func DeletePropertyImage(ctx iris.Context) {
 	} else {
 		// Even if Cloudinary deletion fails, we've removed it from the database
 		// Log the error but don't fail the request
-		fmt.Printf("WARNING: Failed to delete image from Cloudinary: %s\n", imageURL)
+		fmt.Printf("WARNING: Failed to delete image from CDN: %s\n", imageURL)
 		ctx.JSON(iris.Map{
-			"message": "Image removed from property (Cloudinary deletion may have failed)",
+			"message": "Image removed from property (CDN deletion may have failed)",
 			"success": true,
 		})
 	}
@@ -785,6 +857,10 @@ type CreateListingInput struct {
 	State              string   `json:"state" validate:"required,max=256"`
 	Zip                string   `json:"zip" validate:"required,max=32"`
 	Country            string   `json:"country" validate:"required,max=128"`
+	CountryID          *uint    `json:"country_id"`
+	CityID             *uint    `json:"city_id"`
+	ZoneID             *uint    `json:"zone_id"`
+	QuartierID         *uint    `json:"quartier_id"`
 	Lat                float32  `json:"lat" validate:"required"`
 	Lng                float32  `json:"lng" validate:"required"`
 	Capacity           int      `json:"capacity" validate:"required,gte=1,lte=16"`
@@ -814,6 +890,9 @@ type CreateListingInput struct {
 	CheckInTime             string              `json:"checkInTime"`
 	CheckOutTime            string              `json:"checkOutTime"`
 	PropertyCategoryId      uint                `json:"propertyCategoryId"`
+
+	// Optional host-only note (never shown to guests on public reads)
+	HostPrivateNote string `json:"hostPrivateNote"`
 }
 
 type UpdateListingInput struct {

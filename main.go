@@ -1,9 +1,15 @@
 package main
 
 import (
+	meskenygpt "apartments-clone-server/MeskenyGPT/ai"
 	"apartments-clone-server/models"
+	"apartments-clone-server/places"
+	"apartments-clone-server/realtime"
 	"apartments-clone-server/routes"
 	"apartments-clone-server/services"
+	"apartments-clone-server/services/listing_ai"
+	"apartments-clone-server/services/meskenyguide"
+	"apartments-clone-server/services/videoprocessing"
 	pushsvc "apartments-clone-server/services/push"
 	"apartments-clone-server/storage"
 	"apartments-clone-server/utils"
@@ -31,25 +37,12 @@ func optionalAuthMiddleware(ctx iris.Context) {
 	if token := strings.TrimSpace(authHeader); strings.HasPrefix(token, "Bearer ") {
 		rawToken := strings.TrimPrefix(token, "Bearer ")
 		if rawToken != "" {
-			verifier := irisjwt.NewVerifier(irisjwt.HS256, []byte(os.Getenv("ACCESS_TOKEN_SECRET")))
-			verifier.WithDefaultBlocklist()
-			claims := new(utils.AccessToken)
-			if verifiedToken, err := verifier.VerifyToken([]byte(rawToken)); err == nil && verifiedToken != nil {
-				if err := verifiedToken.Claims(claims); err == nil && claims != nil && claims.ID > 0 {
-					ctx.Values().Set("userID", claims.ID)
-					ctx.Values().Set("jwt.claims", claims)
-				}
-			} else {
-				errMsg := ""
-				if err != nil {
-					errMsg = err.Error()
-				}
-				if strings.Contains(errMsg, "expired") {
-					ctx.Header("X-Token-Expired", "true")
-					// Do not log: expected when client has not refreshed; avoids log flood.
-				} else if errMsg != "" {
-					log.Printf("Optional auth: invalid token (%s) - proceeding as unauthenticated", errMsg)
-				}
+			parsed := utils.ParseAccessToken(rawToken)
+			if parsed.Claims != nil {
+				ctx.Values().Set("userID", parsed.Claims.ID)
+				ctx.Values().Set("jwt.claims", parsed.Claims)
+			} else if parsed.Expired {
+				ctx.Header("X-Token-Expired", "true")
 			}
 		}
 	}
@@ -113,13 +106,21 @@ func main() {
 	fmt.Println("🚀 Starting apartments-clone-server...")
 	fmt.Println("🔍 Debug: Main function started")
 
-	// Only load .env in development
+	// Only load .env in development (Cloud Run / Docker do not have .env — set env vars in Cloud Run console)
 	if os.Getenv("RENDER") == "" {
 		fmt.Println("🔍 Debug: Loading .env file...")
 		godotenv.Load()
 		fmt.Println("📁 Loaded .env file")
 	} else {
 		fmt.Println("🌐 Running on Render (production)")
+	}
+
+	// Required for JWT: login and auth will return 401 if these are missing (e.g. on Cloud Run without env vars)
+	if s := strings.TrimSpace(os.Getenv("ACCESS_TOKEN_SECRET")); s == "" {
+		log.Fatalf("❌ ACCESS_TOKEN_SECRET is required. Set it in Cloud Run: Service → Edit → Variables → ACCESS_TOKEN_SECRET (use the same value as local .env)")
+	}
+	if s := strings.TrimSpace(os.Getenv("REFRESH_TOKEN_SECRET")); s == "" {
+		log.Fatalf("❌ REFRESH_TOKEN_SECRET is required. Set it in Cloud Run: Service → Edit → Variables → REFRESH_TOKEN_SECRET (use the same value as local .env)")
 	}
 
 	fmt.Println("🔍 Debug: About to initialize services...")
@@ -139,33 +140,41 @@ func main() {
 		cleanupService := services.NewPropertyCleanupService()
 		cleanupService.StartCleanupScheduler()
 		fmt.Println("✅ Database initialized successfully")
-		// Auto-migrate chat and moderation tables (idempotent)
+		// Auto-migrate chat, AI, and moderation tables (idempotent)
 		if err := storage.DB.AutoMigrate(
 			&models.ChatMessage{},
-			&models.HiddenProperty{}, &models.PropertyReport{}, &models.UserFlag{}, &models.HiddenVideo{}, &models.PropertySaleReport{}, &models.LandmarkReport{}, &models.HiddenPropertySale{}, &models.PropertySaleVideo{}, &models.PropertySaleVideoLike{}, &models.PropertySaleVideoSave{}, &models.PropertySaleVideoComment{}, &models.PropertySaleVideoReport{}, &models.HiddenPropertySaleVideo{}, &models.UserBlockedOrganization{},
-			&models.City{}, &models.Zone{}, &models.Quartier{},
+			&models.HiddenProperty{}, &models.PropertyReport{}, &models.UserFlag{}, &models.HiddenVideo{}, &models.PropertySaleReport{}, &models.LandmarkReport{}, &models.Landmark{}, &models.HiddenPropertySale{}, &models.PropertySaleVideo{}, &models.PropertySaleVideoLike{}, &models.PropertySaleVideoSave{}, &models.PropertySaleVideoComment{}, &models.PropertySaleVideoReport{}, &models.HiddenPropertySaleVideo{}, &models.UserBlockedOrganization{},
+			&models.Country{}, &models.City{}, &models.Zone{}, &models.Quartier{},
 			&models.AIChatSession{}, &models.AIChatMessage{},
 			&models.DeviceRegistration{}, &models.DeviceSession{},
 			&models.UserBehavior{}, // User behavior tracking for intelligent notifications
 			&models.AnonymousUserPreference{}, // Anonymous user preferences for intelligent notifications
+			&models.PropertyDNA{}, &models.AIEnrichedUser{}, &models.PropertyMatch{}, &models.UserBehaviorSummary{}, // Host suggestion engine
+			&models.PropertyFeedSeen{}, // Smart property feed seen-history
 			&models.CrashLog{}, // Crash logs for error tracking
+			&models.DiscoveryEngagementLog{}, // Discovery spotlight engagement logs
+			&models.GoldPropertyStat{}, // Gold property metrics
 			&models.Interaction{}, &models.RecommendationCache{}, &models.NotificationEvent{}, &models.NotificationDeliveryLog{}, // Recommendation & notification system
+			&models.NotificationCandidate{}, &models.UserNotificationQuota{}, &models.UserNotificationLearned{},
+			&models.AIInteraction{}, &models.AIFeedback{}, &models.MarketSnapshot{}, &models.PropertyFeedSeen{},
+			&models.ListingAIUsageEvent{},
+			&models.GuideComment{}, &models.GuideNotification{}, &models.GuideHostPreference{},
+			&models.HabitatPlan{}, &models.HabitatSector{}, &models.HabitatPlot{},
 		); err != nil {
 			fmt.Printf("❌ Failed to migrate moderation tables: %v\n", err)
 		} else {
 			fmt.Println("✅ Tables migrated (chat_messages, hidden_properties, property_reports, user_flags, hidden_videos, property_sale_reports, landmark_reports, property_sale_videos, user_blocked_organizations, ai_chat_sessions, ai_chat_messages, device_registrations, device_sessions)")
 		}
 	}()
-	fmt.Println("🔧 Initializing S3...")
+	fmt.Println("🔧 Initializing media CDN...")
 	func() {
 		defer func() {
 			if r := recover(); r != nil {
-				fmt.Printf("❌ Panic during S3 initialization: %v\n", r)
-				fmt.Println("⚠️  Continuing without S3...")
+				fmt.Printf("❌ Panic during media CDN initialization: %v\n", r)
+				fmt.Println("⚠️  Continuing without media CDN...")
 			}
 		}()
-		storage.InitializeS3()
-		fmt.Println("✅ S3 initialized successfully")
+		storage.InitializeMediaCDN()
 	}()
 
 	fmt.Println("🔧 Initializing Redis...")
@@ -201,10 +210,61 @@ func main() {
 	pushsvc.StartPushWorker()
 	pushsvc.StartMarketingReminderWorker()
 	services.StartHostModeNotificationScheduler()
+	services.StartSmartNotificationScheduler()
+	meskenyguide.StartScheduler()
+	services.StartAINotificationQueue()
+	services.StartNotificationOrchestratorWorkers()
 
 	fmt.Println("🔧 Initializing WebSocket Hub...")
 	websocketHub.InitHub()
+	// Unified user-based realtime hub (direct messages + inbox updates)
+	realtime.StartUserHubRedisSubscriber()
+	videoprocessing.StartWorkers(storage.DB)
+	// Daily refresh token cleanup (keeps refresh_tokens table lean)
+	go func() {
+		// Run once on boot, then every 24h
+		utils.PurgeOldRefreshTokens()
+		t := time.NewTicker(24 * time.Hour)
+		defer t.Stop()
+		for range t.C {
+			utils.PurgeOldRefreshTokens()
+		}
+	}()
 	fmt.Println("✅ WebSocket Hub initialized successfully")
+
+	// Initialize MeskenyGPT AI service (shared AI infrastructure)
+	fmt.Println("🔧 Initializing MeskenyGPT AI service...")
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				fmt.Printf("❌ Panic during MeskenyGPT initialization: %v\n", r)
+			}
+		}()
+		aiCfg := meskenygpt.DefaultConfigFromEnv()
+		svc := meskenygpt.NewService(aiCfg, storage.DB, storage.Redis)
+		routes.MeskenyGPTService = svc
+		services.MeskenyGPTService = svc
+		fmt.Println("✅ MeskenyGPT AI service initialized successfully and wired to /api/ai/chat")
+	}()
+
+	// Listing AI worker (Add with AI — rent / sale / land drafts)
+	fmt.Println("🔧 Initializing Listing AI worker...")
+	listingAIGen := listing_ai.NewGenerator(services.NewAIService())
+	listingAIWorker := listing_ai.NewWorker(listingAIGen)
+	listing_ai.DefaultWorker = listingAIWorker
+	routes.ListingAIWorker = listingAIWorker
+	go func() {
+		if _, err := listing_ai.GetLocationCatalog(); err != nil {
+			fmt.Printf("⚠️ Listing AI catalog warm-up: %v\n", err)
+		}
+	}()
+	fmt.Println("✅ Listing AI worker ready (/api/listing-ai/jobs)")
+
+	// Nearby places (Google Places API) for property sales — restaurants, hospitals, schools
+	places.DefaultService = places.NewService(os.Getenv("GOOGLE_PLACES_API_KEY"))
+	if places.DefaultService != nil && os.Getenv("GOOGLE_PLACES_API_KEY") != "" {
+		fmt.Println("✅ Nearby places service initialized (GOOGLE_PLACES_API_KEY set)")
+	}
 
 	fmt.Println("🔧 Creating Iris app...")
 	app := iris.New()
@@ -234,6 +294,14 @@ func main() {
 		ctx.Next()
 	})
 
+	// Log every request (diagnose publish / create-jobs not reaching handlers).
+	app.Use(func(ctx iris.Context) {
+		if ctx.Method() != iris.MethodOptions {
+			log.Printf("→ %s %s cl=%s", ctx.Method(), ctx.Path(), ctx.GetHeader("Content-Length"))
+		}
+		ctx.Next()
+	})
+
 	// Minimal middleware - compression only
 	fmt.Println("🔧 Setting up middleware...")
 	app.Use(iris.Compression)
@@ -245,68 +313,58 @@ func main() {
 		return new(utils.ForgotPasswordToken)
 	})
 
-	// Fixed JWT middleware - verify token and set userID in context
+	utils.InitAccessJWTVerifier()
+
+	// Fixed JWT middleware - verify token and set userID in context (shared verifier, not per-request).
 	accessTokenVerifierMiddleware := func(ctx iris.Context) {
 		authHeader := ctx.GetHeader("Authorization")
 		if token := strings.TrimSpace(authHeader); strings.HasPrefix(token, "Bearer ") {
 			rawToken := strings.TrimPrefix(token, "Bearer ")
 			if rawToken != "" {
-				verifier := irisjwt.NewVerifier(irisjwt.HS256, []byte(os.Getenv("ACCESS_TOKEN_SECRET")))
-				verifier.WithDefaultBlocklist()
-				claims := new(utils.AccessToken)
-				if verifiedToken, err := verifier.VerifyToken([]byte(rawToken)); err == nil && verifiedToken != nil {
-					if err := verifiedToken.Claims(claims); err == nil && claims != nil && claims.ID > 0 {
-						ctx.Values().Set("userID", claims.ID)
-						ctx.Values().Set("userRole", claims.Role)
-						// Also set in JWT context for compatibility with jwt.Get(ctx)
-						ctx.Values().Set("jwt.claims", claims)
-						// Set in the JWT middleware format for backward compatibility
-						ctx.Values().Set("iris.jwt.token", verifiedToken)
-						log.Printf("✅ accessTokenVerifierMiddleware: UserID %d authenticated", claims.ID)
-						ctx.Next()
-						return
-					} else {
-						log.Printf("❌ accessTokenVerifierMiddleware: Failed to decode claims (%v)", err)
-					}
-				} else {
-					log.Printf("❌ accessTokenVerifierMiddleware: Invalid token (%v)", err)
+				parsed := utils.ParseAccessToken(rawToken)
+				if parsed.Claims != nil {
+					ctx.Values().Set("userID", parsed.Claims.ID)
+					ctx.Values().Set("userRole", parsed.Claims.Role)
+					ctx.Values().Set("jwt.claims", parsed.Claims)
+					ctx.Next()
+					return
+				}
+				if parsed.Expired {
+					ctx.StopWithJSON(iris.StatusUnauthorized, iris.Map{
+						"error": "access token expired",
+						"code":  "TOKEN_EXPIRED",
+					})
+					return
 				}
 			}
 		}
-		// If we get here, authentication failed
-		log.Printf("❌ accessTokenVerifierMiddleware: Authentication failed")
-		ctx.StopWithJSON(iris.StatusUnauthorized, iris.Map{"error": "unauthorized"})
+		ctx.StopWithJSON(iris.StatusUnauthorized, iris.Map{"error": "unauthorized", "code": "NO_TOKEN"})
 	}
 
-	refreshTokenVerifier := irisjwt.NewVerifier(irisjwt.HS256, []byte(os.Getenv("REFRESH_TOKEN_SECRET")))
-	refreshTokenVerifier.WithDefaultBlocklist()
-	refreshTokenVerifierMiddleware := refreshTokenVerifier.Verify(func() interface{} {
-		return new(irisjwt.Claims)
-	})
-
-	refreshTokenVerifier.Extractors = append(refreshTokenVerifier.Extractors, func(ctx iris.Context) string {
-		var tokenInput utils.RefreshTokenInput
-		err := ctx.ReadJSON(&tokenInput)
-		if err != nil {
-			return ""
-		}
-		return tokenInput.RefreshToken
-	})
-
-	// Auth routes - Token refresh endpoint
+	// Auth routes — Zero Re-Login: refresh accepts opaque or legacy JWT, no middleware
 	auth := app.Party("/api/auth")
 	{
-		auth.Post("/refresh", refreshTokenVerifierMiddleware, utils.RefreshToken)
+		auth.Post("/refresh", utils.RefreshToken)
+		auth.Post("/logout", utils.RevokeRefreshToken)
+		auth.Post("/logout-all", accessTokenVerifierMiddleware, utils.RevokeAllRefreshTokens)
+		auth.Get("/sessions", accessTokenVerifierMiddleware, utils.ListRefreshTokenSessions)
 	}
 
 	// Health check endpoint - CRITICAL for Render
 	fmt.Println("🔧 Setting up health check endpoint...")
 	app.Get("/health", func(ctx iris.Context) {
-		ctx.JSON(iris.Map{"status": "ok", "message": "Server is running"})
+		ctx.JSON(iris.Map{
+			"ok":      true,
+			"code":    "SERVER_OK",
+			"status":  "ok",
+			"message": "Server is running",
+		})
 	})
-	// Secondary health check path to match current Render setting
 	app.Get("/healthz", func(ctx iris.Context) {
-		ctx.JSON(iris.Map{"status": "ok", "message": "Server is running"})
+		ctx.JSON(iris.Map{"ok": true, "code": "SERVER_OK", "status": "ok", "message": "Server is running"})
+	})
+	app.Get("/api/health", func(ctx iris.Context) {
+		ctx.JSON(iris.Map{"ok": true, "code": "SERVER_OK", "status": "ok", "message": "API is reachable"})
 	})
 
 	// Simple test endpoint
@@ -363,9 +421,16 @@ func main() {
 		user.Post("/behavior/track", optionalAuthMiddleware, routes.TrackUserBehavior)
 		user.Post("/favorite-city", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.SetFavoriteCity)
 		user.Get("/favorite-city", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.GetFavoriteCity)
+		user.Get("/notification-orchestrator", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.GetMyOrchestratorNotifications)
+		user.Get("/host-share-consent", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.GetHostShareConsent)
+		user.Put("/host-share-consent", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.PutHostShareConsent)
 	}
 	// Debug endpoint to view behavior stats (public for debugging)
 	app.Get("/api/user/behavior/stats", routes.GetBehaviorStats)
+
+	// Notification orchestrator (AI delivery) — ingest via X-Internal-Key; feedback via Bearer
+	app.Post("/api/orchestrator/candidates", routes.PostOrchestratorCandidatesInternal)
+	app.Post("/api/orchestrator/feedback", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.PostOrchestratorFeedback)
 
 	// Append-only interaction tracking for recommendation engine (optional auth; deviceId for anonymous)
 	app.Post("/api/interactions/track", optionalAuthMiddleware, routes.TrackInteraction)
@@ -398,6 +463,9 @@ func main() {
 		user.Get("/{id}", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.GetUser)
 		user.Get("/profile/status", accessTokenVerifierMiddleware, routes.GetUserProfileStatusNew)
 		user.Post("/verification", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.SubmitVerification)
+		user.Get("/broker-verification", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.GetBrokerVerificationStatus)
+		user.Post("/broker-verification", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.SubmitBrokerVerification)
+		user.Patch("/broker-verification/settings", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.UpdateBrokerVerificationSettings)
 		// Feedback
 		user.Post("/feedback", accessTokenVerifierMiddleware, routes.CreateFeedback)
 
@@ -416,6 +484,7 @@ func main() {
 		user.Get("/wishlist/property-sales", accessTokenVerifierMiddleware, routes.GetUserPropertySaleWishlist)
 		user.Post("/wishlist/property-sales", accessTokenVerifierMiddleware, routes.AddPropertySaleToWishlist)
 		user.Delete("/wishlist/property-sales/{propertySaleID:uint}", accessTokenVerifierMiddleware, routes.RemovePropertySaleFromWishlist)
+		user.Get("/wishlist/landmarks", accessTokenVerifierMiddleware, routes.GetUserLandmarkWishlist)
 		user.Delete("/wishlist/{propertyID:uint}", accessTokenVerifierMiddleware, routes.RemoveFromUserWishlist)
 
 		// Host Mode Tracking routes
@@ -468,7 +537,7 @@ func main() {
 		property.Delete("/image", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.DeletePropertyImage)
 	}
 
-	// Image upload endpoint
+	// Image upload endpoint (used by older clients; wraps the same GCS pipeline as /api/upload/image)
 	app.Post("/api/upload-image", func(ctx iris.Context) {
 		var req struct {
 			Image    string `json:"image"`
@@ -487,11 +556,15 @@ func main() {
 			return
 		}
 
-		// Upload to Cloudinary
+		// Upload to storage (now Google Cloud Storage via storage.UploadBase64Image)
 		urlMap := storage.UploadBase64Image(req.Image, req.PublicID)
 		if urlMap == nil || urlMap["url"] == "" {
+			msg := "Failed to upload image"
+			if urlMap != nil && urlMap["error"] != "" {
+				msg = urlMap["error"]
+			}
 			ctx.StatusCode(iris.StatusInternalServerError)
-			ctx.JSON(iris.Map{"error": "Failed to upload image to Cloudinary"})
+			ctx.JSON(iris.Map{"error": msg})
 			return
 		}
 
@@ -501,14 +574,23 @@ func main() {
 	// Admin routes
 	admin := app.Party("/api/admin", accessTokenVerifierMiddleware, utils.AdminOnlyMiddleware, utils.UserIDFromTokenMiddleware)
 	{
+		admin.Get("/orchestrator/stats", routes.AdminOrchestratorStats)
+		admin.Get("/orchestrator/users/{userID:uint}/log", routes.AdminOrchestratorUserLog)
 		admin.Get("/users", routes.AdminListUsers)
 		admin.Patch("/users/{id:uint}/role", utils.SuperAdminOnlyMiddleware, routes.AdminChangeUserRole)
+		admin.Patch("/users/{id:uint}", routes.AdminUpdateUser)
 		admin.Get("/users/{id:uint}", routes.AdminGetUser)
 		admin.Post("/users/{id:uint}/verify", routes.AdminVerifyUser)
+		admin.Post("/users/{id:uint}/broker-verification", routes.AdminReviewBrokerVerification)
+		admin.Get("/broker-verifications/pending", routes.AdminListPendingBrokerVerifications)
+		admin.Get("/identity-verifications", routes.AdminListIdentityVerifications)
+		admin.Get("/identity-verifications/{user_id:uint}", routes.AdminGetIdentityVerificationUser)
 		admin.Get("/properties", routes.AdminListProperties)
 		admin.Get("/properties/{id:uint}", routes.AdminGetProperty)
 		admin.Patch("/properties/{id:uint}/status", routes.AdminUpdatePropertyStatus)
+		admin.Post("/properties/{id:uint}/reassign-locations", routes.AdminReassignPropertyLocations)
 		admin.Post("/properties/{id:uint}/flag", routes.AdminFlagProperty)
+		admin.Delete("/properties/{id:uint}", routes.AdminDeleteProperty)
 		admin.Get("/experiences", routes.AdminListExperiences)
 		admin.Get("/experiences/{id:uint}", routes.AdminGetExperience)
 		admin.Patch("/experiences/{id:uint}/status", routes.AdminUpdateExperienceStatus)
@@ -531,8 +613,12 @@ func main() {
 		admin.Patch("/videos/promotional/{id:uint}", routes.AdminUpdatePromotionalVideo)
 		admin.Delete("/videos/promotional/{id:uint}", routes.AdminDeletePromotionalVideo)
 		admin.Get("/feedback", routes.AdminListFeedback)
+		admin.Post("/email/test", routes.AdminSendTestListingEmail)
 		admin.Get("/stats", routes.AdminStats)
+		admin.Get("/moderation/pending", routes.AdminModerationPending)
 		admin.Get("/activity", routes.AdminActivity)
+		admin.Get("/notifications/new-homes", routes.AdminNewHomesNotificationStats)
+		admin.Get("/notifications/new-homes/devices", routes.AdminNewHomesNotificationDeviceTiming)
 		admin.Get("/groups", routes.AdminListGroups)
 		admin.Get("/groups/{id:uint}", routes.AdminGetGroup)
 		admin.Patch("/groups/{id:uint}", routes.AdminUpdateGroup)
@@ -614,10 +700,15 @@ func main() {
 	}
 
 	notifications := app.Party("/api/notifications")
-	// Upload routes (Cloudinary)
+	// Upload routes (CDN from MEDIA_CDN)
 	upload := app.Party("/api/upload")
 	{
 		upload.Post("/image", routes.UploadImage)
+		// Chunked video upload (register before /video — specific paths first)
+		upload.Post("/video/init", accessTokenVerifierMiddleware, routes.InitChunkUpload)
+		upload.Put("/video/{uploadId}/chunk", accessTokenVerifierMiddleware, routes.UploadVideoChunk)
+		upload.Post("/video/{uploadId}/complete", accessTokenVerifierMiddleware, routes.CompleteChunkUpload)
+		// Legacy base64 video upload (small files / admin only; large bodies rejected)
 		upload.Post("/video", routes.UploadVideo)
 	}
 	{
@@ -626,6 +717,9 @@ func main() {
 		notifications.Post("/test-push", routes.SendTestNotification)
 		notifications.Post("/test-detailed/{userID:int}", routes.SendDetailedTestNotification)
 		notifications.Post("/welcome", routes.SendWelcomeNotification)
+		notifications.Get("/", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.ListUserNotifications)
+		notifications.Patch("/{id:uint}/read", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.MarkUserNotificationRead)
+		notifications.Patch("/read-all", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.MarkAllUserNotificationsRead)
 		notifications.Get("/settings", accessTokenVerifierMiddleware, routes.GetUserNotificationSettings)
 		notifications.Put("/settings", accessTokenVerifierMiddleware, routes.UpdateUserNotificationSettings)
 		// Add the missing notification endpoints
@@ -636,6 +730,11 @@ func main() {
 				PushToken   string `json:"push_token"`
 				Language    string `json:"language"`
 				Location    string `json:"location"`
+				// Optional: IANA timezone + quiet hours + smart push daily cap (used by smart notification gates).
+				Timezone       string `json:"timezone"`
+				QuietStartHour *int   `json:"quiet_start_hour"`
+				QuietEndHour   *int   `json:"quiet_end_hour"`
+				MaxSmartPerDay *int   `json:"max_smart_per_day"`
 				Coordinates struct {
 					Latitude  float64 `json:"latitude"`
 					Longitude float64 `json:"longitude"`
@@ -661,15 +760,28 @@ func main() {
 			// Create or update notification preference in database
 			now := time.Now()
 			pref := models.NotificationPreference{
-				UserID:     req.UserID,
-				DeviceID:   req.DeviceID,
-				PushToken:  req.PushToken,
-				Language:   req.Language,
-				Location:   req.Location,
-				Latitude:   req.Coordinates.Latitude,
-				Longitude:  req.Coordinates.Longitude,
-				Enabled:    true,
-				LastActive: &now,
+				UserID:         req.UserID,
+				DeviceID:       req.DeviceID,
+				PushToken:      req.PushToken,
+				Language:       req.Language,
+				Location:       req.Location,
+				Latitude:       req.Coordinates.Latitude,
+				Longitude:      req.Coordinates.Longitude,
+				Enabled:        true,
+				LastActive:     &now,
+				Timezone:       strings.TrimSpace(req.Timezone),
+				QuietStartHour: 22,
+				QuietEndHour:   7,
+				MaxSmartPerDay: 2,
+			}
+			if req.QuietStartHour != nil && *req.QuietStartHour >= 0 && *req.QuietStartHour <= 23 {
+				pref.QuietStartHour = *req.QuietStartHour
+			}
+			if req.QuietEndHour != nil && *req.QuietEndHour >= 0 && *req.QuietEndHour <= 23 {
+				pref.QuietEndHour = *req.QuietEndHour
+			}
+			if req.MaxSmartPerDay != nil && *req.MaxSmartPerDay >= 1 && *req.MaxSmartPerDay <= 20 {
+				pref.MaxSmartPerDay = *req.MaxSmartPerDay
 			}
 
 			// Use push token as unique identifier (since it's unique per device)
@@ -695,6 +807,18 @@ func main() {
 				existingPref.Enabled = true
 				existingPref.LastActive = &now
 				existingPref.UserID = req.UserID // Update user ID in case user logged in
+				if strings.TrimSpace(req.Timezone) != "" {
+					existingPref.Timezone = strings.TrimSpace(req.Timezone)
+				}
+				if req.QuietStartHour != nil && *req.QuietStartHour >= 0 && *req.QuietStartHour <= 23 {
+					existingPref.QuietStartHour = *req.QuietStartHour
+				}
+				if req.QuietEndHour != nil && *req.QuietEndHour >= 0 && *req.QuietEndHour <= 23 {
+					existingPref.QuietEndHour = *req.QuietEndHour
+				}
+				if req.MaxSmartPerDay != nil && *req.MaxSmartPerDay >= 1 && *req.MaxSmartPerDay <= 20 {
+					existingPref.MaxSmartPerDay = *req.MaxSmartPerDay
+				}
 				if req.DeviceID != "" {
 					existingPref.DeviceID = req.DeviceID // Update device ID
 				}
@@ -866,6 +990,8 @@ func main() {
 	video := app.Party("/api/video")
 	{
 		video.Post("/", accessTokenVerifierMiddleware, routes.CreateVideo)
+		video.Get("/{id:uint}/streaming", accessTokenVerifierMiddleware, routes.GetVideoStreamingStatus)
+		video.Get("/{id:uint}/streaming/events", accessTokenVerifierMiddleware, routes.VideoProcessingSSE)
 		video.Get("/feed", routes.GetVideoFeed)
 		video.Post("/like", accessTokenVerifierMiddleware, routes.LikeVideo)
 		video.Post("/unlike", accessTokenVerifierMiddleware, routes.UnlikeVideo)
@@ -910,6 +1036,8 @@ func main() {
 	app.Post("/api/device/register", routes.RegisterDevice)
 	app.Post("/api/device/session/start", routes.StartDeviceSession)
 	app.Post("/api/device/session/end", routes.EndDeviceSession)
+	app.Get("/api/device/preferences", routes.GetDevicePreferences)
+	app.Put("/api/device/preferences", routes.UpsertDevicePreferences)
 	app.Get("/api/device/analytics", accessTokenVerifierMiddleware, routes.GetDeviceAnalytics)
 	app.Get("/api/device/daily-usage", accessTokenVerifierMiddleware, routes.GetDeviceDailyUsage)
 	app.Get("/api/device/daily-usage", accessTokenVerifierMiddleware, routes.GetDeviceDailyUsage)
@@ -1004,15 +1132,32 @@ func main() {
 		chat.Post("/start-direct", accessTokenVerifierMiddleware, routes.StartDirectConversation)
 	}
 
+	// Unified real-time messaging websocket (direct messages + inbox updates)
+	// NOTE: Mobile baseURL is ".../api" so websocket path must be "/api/ws".
+	app.Get("/api/ws", routes.MessagingWS)
+
 	// AI Chat routes - Meskeny AI
 	aiChat := app.Party("/api/ai")
 	{
-		aiChat.Post("/chat", accessTokenVerifierMiddleware, routes.SendAIChatMessage)
+		// Chat + greeting can be used without being logged in (optional auth).
+		// Sessions / history remain authenticated-only.
+		aiChat.Post("/chat", optionalAuthMiddleware, routes.SendAIChatMessage)
+		aiChat.Post("/agent/run", optionalAuthMiddleware, routes.SendAIAgentRun)
+		aiChat.Post("/agent/filters", optionalAuthMiddleware, routes.UpdateAIAgentFilters)
+		aiChat.Post("/feedback", optionalAuthMiddleware, routes.SendAIFeedback)
+		aiChat.Get("/greeting", optionalAuthMiddleware, routes.GetAIGreeting)
 		aiChat.Get("/sessions", accessTokenVerifierMiddleware, routes.GetAIChatSessions)
 		aiChat.Get("/sessions/{sessionId:uint}", accessTokenVerifierMiddleware, routes.GetAIChatSession)
 		aiChat.Post("/sessions", accessTokenVerifierMiddleware, routes.CreateAIChatSession)
 		aiChat.Delete("/sessions/{sessionId:uint}", accessTokenVerifierMiddleware, routes.DeleteAIChatSession)
-		aiChat.Get("/greeting", accessTokenVerifierMiddleware, routes.GetAIGreeting)
+	}
+
+	// Listing AI — async draft generation for Add with AI flows
+	listingAI := app.Party("/api/listing-ai", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware)
+	{
+		listingAI.Post("/jobs", routes.PostListingAIJob)
+		listingAI.Get("/jobs/{jobId}", routes.GetListingAIJob)
+		listingAI.Post("/events", routes.PostListingAIEvent)
 	}
 
 	// Direct Messages - Clean Implementation
@@ -1021,6 +1166,7 @@ func main() {
 		directMessages.Post("/", accessTokenVerifierMiddleware, routes.SendDirectMessage)
 		directMessages.Get("/", accessTokenVerifierMiddleware, routes.ListDirectMessageConversations)
 		directMessages.Get("/{userID:uint}", accessTokenVerifierMiddleware, routes.GetDirectMessages)
+		directMessages.Post("/with/{userID:uint}/read", accessTokenVerifierMiddleware, routes.MarkDirectMessageThreadRead)
 		directMessages.Post("/{messageID:uint}/read", accessTokenVerifierMiddleware, routes.MarkDirectMessageRead)
 		// Message reactions
 		directMessages.Post("/{messageID:uint}/reactions", accessTokenVerifierMiddleware, routes.AddMessageReaction)
@@ -1033,6 +1179,29 @@ func main() {
 		userBlocks.Post("/{userID:uint}", accessTokenVerifierMiddleware, routes.BlockUser)
 		userBlocks.Delete("/{userID:uint}", accessTokenVerifierMiddleware, routes.UnblockUser)
 		userBlocks.Get("/", accessTokenVerifierMiddleware, routes.GetBlockedUsers)
+	}
+
+	host := app.Party("/api/host")
+	{
+		host.Get("/studio", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.GetHostStudio)
+		host.Get("/suggestions", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.GetHostSuggestions)
+		host.Get("/suggestions/pending-count", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.GetHostSuggestionPendingCount)
+		host.Post("/suggestions/{match_id:uint}/contact", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.ContactHostSuggestion)
+		host.Post("/suggestions/{match_id:uint}/dismiss", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.DismissHostSuggestion)
+
+		guide := host.Party("/guide")
+		{
+			guide.Get("/feed", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.GetGuideFeed)
+			guide.Get("/listing-previews", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.GetGuideListingPreviews)
+			guide.Get("/grouped", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.GetGuideGrouped)
+			guide.Get("/unread-count", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.GetGuideUnreadCount)
+			guide.Get("/listings/{propertySaleId:uint}/comments", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.GetListingGuideComments)
+			guide.Get("/comments/{id:uint}", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.GetGuideComment)
+			guide.Post("/comments/{id:uint}/implement", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.ImplementGuideComment)
+			guide.Post("/comments/{id:uint}/dismiss", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.DismissGuideComment)
+			guide.Post("/comments/{id:uint}/reply", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.ReplyGuideComment)
+			guide.Post("/dev/trigger", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.DevTriggerGuide)
+		}
 	}
 
 	// Location Discovery routes (Public with optional auth for better filtering)
@@ -1054,6 +1223,7 @@ func main() {
 	// Properties Search
 	properties := app.Party("/api/properties")
 	{
+		properties.Get("/", optionalAuthMiddleware, routes.ListProperties) // GET /api/properties - paginated approved properties
 		properties.Get("/search", routes.SearchProperties)
 		// Public moderation endpoints (optional auth)
 		properties.Post("/{id:uint}/hide", optionalAuthMiddleware, routes.HidePropertyPublic)
@@ -1093,10 +1263,40 @@ func main() {
 		organization.Get("/check-personal-content", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.CheckUserCanCreatePersonalContent)
 	}
 
-	propertySales := app.Party("/api/property-sales")
+	// ProfileSheet public endpoints
+	profileSheet := app.Party("/api/organizations/{orgID:uint}")
 	{
-		propertySales.Post("/", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.CreatePropertySale)
+		// Public endpoints (no auth required)
+		profileSheet.Get("/profile-sheet", routes.GetOrganizationProfileSheet)
+		profileSheet.Get("/properties-sheet", routes.GetOrganizationPropertiesForSheet)
+		profileSheet.Get("/landmarks-sheet", routes.GetOrganizationLandmarksForSheet)
+		// Authenticated endpoints
+		profileSheet.Post("/follow", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.ToggleOrganizationFollow)
+	}
+
+	// Property like endpoint
+	app.Patch("/api/properties/{propertyID:uint}/like", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.TogglePropertyLike)
+
+	propertySales := app.Party("/api/property-sales")
+	propertySales.Use(func(ctx iris.Context) {
+		if ctx.Method() == http.MethodPost || ctx.Method() == http.MethodGet {
+			p := ctx.Path()
+			if strings.Contains(p, "property-sales") &&
+				(strings.Contains(p, "create-jobs") || strings.HasSuffix(p, "property-sales/") || p == "/api/property-sales") {
+				log.Printf("📨 %s %s cl=%s", ctx.Method(), p, ctx.GetHeader("Content-Length"))
+			}
+		}
+		ctx.Next()
+	})
+	{
+		propertySales.Get("/create-jobs/ping", accessTokenVerifierMiddleware, func(ctx iris.Context) {
+			ctx.StatusCode(iris.StatusNoContent)
+		})
+		propertySales.Post("/create-jobs", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.PostPropertySaleCreateJob)
+		propertySales.Get("/create-jobs/{jobId}", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.GetPropertySaleCreateJob)
+		propertySales.Post("", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.CreatePropertySale)
 		propertySales.Get("/", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.GetUserPropertySales)
+		propertySales.Get("/{id:uint}/gold-insights", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.GetPropertySaleGoldInsights)
 		propertySales.Get("/{id:uint}", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.GetPropertySale)
 		propertySales.Put("/{id:uint}", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.UpdatePropertySale)
 		propertySales.Post("/{id:uint}/submit", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.SubmitPropertyForVerification)
@@ -1104,6 +1304,7 @@ func main() {
 		propertySales.Post("/{id:uint}/offers", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.CreateOffer)
 		propertySales.Get("/public", optionalAuthMiddleware, routes.GetPublishedProperties)
 		propertySales.Get("/public/{id:uint}", routes.GetPublishedProperty) // Add public endpoint for individual property
+		propertySales.Get("/{id:uint}/nearby", optionalAuthMiddleware, routes.GetPropertySaleNearby)
 		propertySales.Post("/{id:uint}/report", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.ReportPublishedPropertySale)
 		propertySales.Post("/{id:uint}/hide", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.HidePropertySale)
 		propertySales.Get("/offers/organization", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.GetOrganizationOffers)
@@ -1125,6 +1326,12 @@ func main() {
 		landmarks.Post("/", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.CreateLandmark)
 		landmarks.Get("/organization", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.GetOrganizationLandmarks)
 		landmarks.Get("/public", routes.GetPublicLandmarks)
+		landmarks.Get("/{id:uint}", optionalAuthMiddleware, routes.GetLandmarkByID)
+		landmarks.Get("/videos/feed", optionalAuthMiddleware, routes.GetLandmarkVideosFeed)
+		landmarks.Post("/{id:uint}/like", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.LikeLandmarkVideo)
+		landmarks.Post("/{id:uint}/unlike", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.UnlikeLandmarkVideo)
+		landmarks.Post("/{id:uint}/save", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.SaveLandmarkVideo)
+		landmarks.Post("/{id:uint}/unsave", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.UnsaveLandmarkVideo)
 		landmarks.Post("/{id:uint}/report", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.ReportLandmark)
 		landmarks.Patch("/{id:uint}", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.UpdateLandmark)
 		landmarks.Delete("/{id:uint}", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.DeleteLandmark)
@@ -1148,13 +1355,22 @@ func main() {
 	adminPropertySales := app.Party("/api/admin/property-sales", accessTokenVerifierMiddleware, utils.AdminOnlyMiddleware)
 	{
 		adminPropertySales.Get("/", routes.AdminGetPropertySales)
+		adminPropertySales.Post("/backfill-nearby", routes.AdminBackfillNearbyPlaces)
+		adminPropertySales.Get("/{id:uint}", routes.AdminGetPropertySaleByID)
+		adminPropertySales.Patch("/{id:uint}/organization", routes.AdminSetPropertySaleOrganization)
+		adminPropertySales.Patch("/{id:uint}", routes.AdminUpdatePropertySale)
 		adminPropertySales.Patch("/{id:uint}/verify", routes.AdminVerifyProperty)
 		adminPropertySales.Post("/{id:uint}/publish", routes.AdminPublishProperty)
+		adminPropertySales.Patch("/{id:uint}/sold", routes.AdminMarkPropertySaleAsSold)
+		adminPropertySales.Patch("/{id:uint}/deactivate", routes.AdminDeactivatePropertySale)
+		adminPropertySales.Patch("/{id:uint}/reactivate", routes.AdminReactivatePropertySale)
+		adminPropertySales.Delete("/{id:uint}", routes.AdminDeletePropertySale)
 	}
 
 	adminOrganizations := app.Party("/api/admin/organizations", accessTokenVerifierMiddleware, utils.AdminOnlyMiddleware)
 	{
 		adminOrganizations.Get("/", routes.AdminGetOrganizations)
+		adminOrganizations.Post("/", routes.AdminCreateOrganization)
 		adminOrganizations.Patch("/{orgID:uint}/status", routes.AdminUpdateOrganizationStatus)
 	}
 
@@ -1163,16 +1379,55 @@ func main() {
 	{
 		adminLandmarks.Get("/", routes.AdminGetAllLandmarks)
 		adminLandmarks.Get("/pending", routes.GetPendingLandmarks)
+		adminLandmarks.Get("/{id:uint}", routes.AdminGetLandmarkByID)
+		adminLandmarks.Patch("/{id:uint}", routes.AdminUpdateLandmark)
 		adminLandmarks.Patch("/{id:uint}/verify", routes.VerifyLandmark)
 		adminLandmarks.Patch("/{id:uint}/coordinates", routes.AdminUpdateLandmarkCoordinates)
+		adminLandmarks.Patch("/{id:uint}/organization", routes.AdminSetLandmarkOrganization)
+		adminLandmarks.Delete("/{id:uint}", routes.AdminDeleteLandmark)
+	}
+
+	adminInsights := app.Party("/api/admin/insights", accessTokenVerifierMiddleware, utils.AdminOnlyMiddleware)
+	{
+		adminInsights.Get("/mobile-ai", routes.AdminGetMobileAIInsights)
+		// Heavy: rebuilds user_behavior_summary (cron or manual). See README_HOST_SUGGESTIONS.md
+		adminInsights.Post("/host-suggestions/refresh-behavior-summary", routes.AdminRefreshUserBehaviorSummary)
 	}
 
 	// Cities and Zones routes
+	countries := app.Party("/api/countries")
+	{
+		countries.Get("/", routes.GetCountries)
+		countries.Get("/{countryId:uint}/cities", routes.GetCitiesByCountry)
+	}
+
 	cities := app.Party("/api/cities")
 	{
 		cities.Get("/", routes.GetCities)
 		cities.Get("/{cityId:uint}/zones", routes.GetZonesByCity)
 		cities.Get("/zones/{zoneId:uint}/quartiers", routes.GetQuartiersByZone)
+	}
+
+	// Habitat cadastre (Plan → Sector → Plot) — public read APIs
+	habitat := app.Party("/api/habitat")
+	{
+		habitat.Get("/plans", routes.GetHabitatPlans)
+		habitat.Get("/plans/{planId:uint}/sectors", routes.GetHabitatSectorsByPlan)
+		habitat.Get("/sectors/{sectorId:uint}/plots", routes.GetHabitatPlotsBySector)
+		habitat.Get("/plots/bbox", routes.GetHabitatPlotsInBBox)
+		habitat.Get("/plots/lookup", routes.LookupHabitatPlotForListing)
+		habitat.Get("/plots/lookup_in_sector", routes.LookupHabitatPlotInSector)
+		habitat.Get("/plots/{plotId:uint}/for_sale_landmark", routes.GetForSaleLandmarkByPlot)
+		habitat.Get("/plots/{plotId:uint}", routes.GetHabitatPlot)
+		habitat.Get("/search", routes.SearchHabitatPlots)
+	}
+
+	adminCountries := app.Party("/api/admin/countries", accessTokenVerifierMiddleware, utils.AdminOnlyMiddleware, utils.UserIDFromTokenMiddleware)
+	{
+		adminCountries.Get("/", routes.AdminGetAllCountries)
+		adminCountries.Post("/", routes.AdminCreateCountry)
+		adminCountries.Patch("/{id:uint}", routes.AdminUpdateCountry)
+		adminCountries.Delete("/{id:uint}", routes.AdminDeleteCountry)
 	}
 
 	// Admin Cities and Zones routes
@@ -1200,6 +1455,48 @@ func main() {
 		adminQuartiers.Delete("/{id:uint}", routes.AdminDeleteQuartier)
 	}
 
+	adminLocations := app.Party("/api/admin/locations", accessTokenVerifierMiddleware, utils.AdminOnlyMiddleware, utils.UserIDFromTokenMiddleware)
+	{
+		adminLocations.Get("/bulk/example", routes.AdminGetLocationBulkExample)
+		adminLocations.Post("/bulk", routes.AdminBulkImportLocations)
+	}
+
+	adminHabitat := app.Party("/api/admin/habitat", accessTokenVerifierMiddleware, utils.AdminOnlyMiddleware, utils.UserIDFromTokenMiddleware)
+	{
+		adminHabitat.Get("/bulk/example", routes.AdminGetHabitatBulkExample)
+		adminHabitat.Post("/bulk", routes.AdminHabitatBulkImport)
+	}
+
+	// Admin MeskenyGPT analytics (AI interactions + feedback) + structured knowledge (RAG)
+	adminAI := app.Party("/api/admin/ai", accessTokenVerifierMiddleware, utils.AdminOnlyMiddleware)
+	{
+		adminAI.Get("/interactions", routes.AdminListAIInteractions)
+		adminAI.Get("/listing-usage", routes.AdminGetListingAIUsageStats)
+		adminAI.Get("/knowledge", routes.AdminListMeskenyKnowledge)
+		adminAI.Get("/knowledge/{id:uint}", routes.AdminGetMeskenyKnowledge)
+		adminAI.Post("/knowledge", routes.AdminCreateMeskenyKnowledge)
+		adminAI.Patch("/knowledge/{id:uint}", routes.AdminUpdateMeskenyKnowledge)
+		adminAI.Delete("/knowledge/{id:uint}", routes.AdminDeleteMeskenyKnowledge)
+	}
+
+	// Admin Property Types (categories) - add, edit, delete, seed
+	adminCategories := app.Party("/api/admin/categories", accessTokenVerifierMiddleware, utils.AdminOnlyMiddleware, utils.UserIDFromTokenMiddleware)
+	{
+		adminCategories.Get("/", routes.AdminListCategories)
+		adminCategories.Post("/", routes.AdminCreateCategory)
+		adminCategories.Post("/seed-property", routes.AdminSeedPropertyCategories)
+		adminCategories.Patch("/{id:int}", routes.AdminUpdateCategory)
+		adminCategories.Delete("/{id:int}", routes.AdminDeleteCategory)
+	}
+
+	adminAmenities := app.Party("/api/admin/amenities", accessTokenVerifierMiddleware, utils.AdminOnlyMiddleware, utils.UserIDFromTokenMiddleware)
+	{
+		adminAmenities.Get("/", routes.AdminListAmenities)
+		adminAmenities.Post("/", routes.AdminCreateAmenity)
+		adminAmenities.Post("/seed", routes.AdminSeedAmenities)
+		adminAmenities.Patch("/{id:int}", routes.AdminUpdateAmenity)
+		adminAmenities.Delete("/{id:int}", routes.AdminDeleteAmenity)
+	}
 
 	// Crash Logs - Public endpoint (crashes can happen before login)
 	app.Post("/api/crash-logs", routes.CreateCrashLog)
@@ -1211,6 +1508,18 @@ func main() {
 		adminCrashLogs.Get("/stats", routes.GetCrashLogStats)
 		adminCrashLogs.Get("/{id:uint}", routes.GetCrashLog)
 		adminCrashLogs.Patch("/{id:uint}", routes.UpdateCrashLog)
+	}
+
+	// Banners - Public (for property sale feed)
+	app.Get("/api/banners", routes.GetBanners)
+
+	// Banners - Admin CRUD
+	adminBanners := app.Party("/api/admin/banners", accessTokenVerifierMiddleware, utils.AdminOnlyMiddleware, utils.UserIDFromTokenMiddleware)
+	{
+		adminBanners.Get("/", routes.ListAdminBanners)
+		adminBanners.Post("/", routes.CreateBanner)
+		adminBanners.Patch("/{id:uint}", routes.UpdateBanner)
+		adminBanners.Delete("/{id:uint}", routes.DeleteBanner)
 	}
 
 	// Properties within polygon (simple point-in-polygon)
@@ -1242,9 +1551,15 @@ func main() {
 			return inside
 		}
 
-		// Fetch all properties from database
+		// Fetch only public rent properties from database:
+		// status in approved/live/published AND active=true.
 		var properties []models.Property
-		if err := storage.DB.Preload("Host").Find(&properties).Error; err != nil {
+		if err := storage.DB.
+			Preload("Host").
+			Where("LOWER(status) IN (?)", []string{"approved", "published"}).
+			Where("COALESCE(is_active, ?) = ?", true, true).
+			Where("COALESCE(is_flagged, false) = ?", false).
+			Find(&properties).Error; err != nil {
 			ctx.StatusCode(iris.StatusInternalServerError)
 			ctx.JSON(iris.Map{"error": "Failed to fetch properties"})
 			return
@@ -1307,19 +1622,16 @@ func main() {
 	// Get port from environment; in Render, PORT must be provided. Default only in local dev.
 	port := os.Getenv("PORT")
 	if port == "" {
-		if os.Getenv("RENDER") != "" {
-			log.Fatalf("❌ PORT environment variable not set by platform; cannot start web service")
-		}
+		// In container/cloud environments, PORT must be provided.
 		port = "4000"
-		fmt.Println("⚠️  PORT environment variable not set, defaulting to 4000 (local dev)")
 	}
-	addr := "0.0.0.0:" + port // Explicitly bind to all interfaces for Render
+	addr := "0.0.0.0:" + port // Explicitly bind to all interfaces
 
 	fmt.Printf("🚀 Server starting on %s\n", addr)
-	fmt.Printf("🌐 Health check available at: http://%s/health\n", addr)
-	fmt.Printf("📡 API endpoints available at: http://%s/api/\n", addr)
+	fmt.Printf("🌐 Health check available at: http://localhost:%s/health\n", port)
+	fmt.Printf("📡 API endpoints available at: http://localhost:%s/api/\n", port)
+	fmt.Println("📋 Listing flow: GET /health | POST /api/upload/image | POST /api/property-sales/create-jobs/ | POST /api/property-sales/")
 
-	// Start server and bind to the provided PORT (Render requires binding to $PORT)
 	fmt.Println("🎯 Attempting to start server with app.Listen()...")
 	if err := app.Listen(addr); err != nil {
 		log.Fatalf("❌ Server failed to start: %v", err)

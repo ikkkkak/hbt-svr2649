@@ -92,6 +92,10 @@ func Register(ctx iris.Context) {
 }
 
 func Login(ctx iris.Context) {
+	// Rate limit login attempts (per IP)
+	if !utils.EnforceLoginRateLimit(ctx) {
+		return
+	}
 	var userInput LoginUserInput
 	err := ctx.ReadJSON(&userInput)
 	if err != nil {
@@ -187,6 +191,10 @@ func RegisterPhone(ctx iris.Context) {
 }
 
 func LoginPhone(ctx iris.Context) {
+	// Rate limit login attempts (per IP)
+	if !utils.EnforceLoginRateLimit(ctx) {
+		return
+	}
 	var userInput LoginPhoneInput
 	err := ctx.ReadJSON(&userInput)
 	if err != nil {
@@ -841,18 +849,20 @@ func CheckUserExists(ctx iris.Context) {
 	}
 
 	if err := ctx.ReadJSON(&req); err != nil {
-		utils.CreateError(iris.StatusBadRequest, "Validation Error", "Invalid request body", ctx)
+		utils.RespondAPIError(ctx, iris.StatusBadRequest, utils.ErrCodeUserCheckInvalidBody,
+			"Invalid request body", err.Error())
 		return
 	}
 
-	// Validate that exactly one field is provided
 	if req.Email == "" && req.PhoneNumber == "" {
-		utils.CreateError(iris.StatusBadRequest, "Validation Error", "Either email or phoneNumber must be provided", ctx)
+		utils.RespondAPIError(ctx, iris.StatusBadRequest, utils.ErrCodeUserCheckNoIdentifier,
+			"Either email or phone number is required")
 		return
 	}
 
 	if req.Email != "" && req.PhoneNumber != "" {
-		utils.CreateError(iris.StatusBadRequest, "Validation Error", "Provide either email or phoneNumber, not both", ctx)
+		utils.RespondAPIError(ctx, iris.StatusBadRequest, utils.ErrCodeUserCheckBothFields,
+			"Provide either email or phone number, not both")
 		return
 	}
 
@@ -872,6 +882,7 @@ func CheckUserExists(ctx iris.Context) {
 	}
 
 	ctx.JSON(iris.Map{
+		"ok":       true,
 		"exists":   exists,
 		"userType": userType,
 	})
@@ -928,9 +939,11 @@ func UpdateUserProfile(ctx iris.Context) {
 	fmt.Printf("UpdateUserProfile - Received input: FirstName='%s', LastName='%s', AvatarURL='%s'\n",
 		input.FirstName, input.LastName, input.AvatarURL)
 
-	// Upload avatar if provided
+	// Upload avatar if provided and not already hosted (Cloudinary or GCS)
 	avatarURL := input.AvatarURL
-	if avatarURL != "" && !strings.Contains(avatarURL, "res.cloudinary.com") {
+	if avatarURL != "" &&
+		!strings.Contains(avatarURL, "res.cloudinary.com") &&
+		!strings.Contains(avatarURL, "storage.googleapis.com") {
 		// Generate unique filename with timestamp
 		timestamp := time.Now().UnixNano() / int64(time.Millisecond)
 		publicID := fmt.Sprintf("hosts/%d/avatar_%d", user.ID, timestamp)
@@ -962,7 +975,35 @@ func UpdateUserProfile(ctx iris.Context) {
 	user.Languages = languagesJSON
 	user.Skills = skillsJSON
 
-	storage.DB.Save(user)
+	// Handle phone number (optional - for email users to add phone)
+	if input.PhoneNumber != nil {
+		phone := strings.TrimSpace(*input.PhoneNumber)
+		if phone == "" {
+			user.PhoneNumber = nil
+		} else {
+			if !utils.ValidatePhoneNumber(phone) {
+				utils.CreateError(iris.StatusBadRequest, "Validation Error", "Invalid phone number format. Mauritanian phone numbers must be 8 digits starting with 2, 3, or 4.", ctx)
+				return
+			}
+			formatted := utils.NormalizePhoneNumber(phone)
+			// Check phone is not taken by another user
+			var existing models.User
+			if err := storage.DB.Where("phone_number = ? AND id != ?", formatted, user.ID).Limit(1).Find(&existing).Error; err == nil && existing.ID > 0 {
+				utils.CreateError(iris.StatusBadRequest, "Validation Error", "This phone number is already registered to another account.", ctx)
+				return
+			}
+			user.PhoneNumber = &formatted
+		}
+	}
+
+	if err := storage.DB.Save(user).Error; err != nil {
+		if strings.Contains(err.Error(), "idx_users_phone_number") || strings.Contains(err.Error(), "unique constraint") {
+			utils.CreateError(iris.StatusBadRequest, "Validation Error", "This phone number is already registered.", ctx)
+			return
+		}
+		utils.CreateError(iris.StatusInternalServerError, "Server Error", "Failed to save profile. Please try again.", ctx)
+		return
+	}
 
 	fmt.Printf("UpdateUserProfile - Saved user: FirstName='%s', LastName='%s', AvatarURL='%s'\n",
 		user.FirstName, user.LastName, user.AvatarURL)
@@ -972,6 +1013,7 @@ func UpdateUserProfile(ctx iris.Context) {
 		"firstName":   user.FirstName,
 		"lastName":    user.LastName,
 		"email":       user.Email,
+		"phoneNumber": user.PhoneNumber,
 		"avatarURL":   user.AvatarURL,
 		"dateOfBirth": user.DateOfBirth,
 		"bio":         user.Bio,
@@ -1156,9 +1198,11 @@ func SubmitVerification(ctx iris.Context) {
 		return
 	}
 
-	// Upload verification images to Cloudinary
+	// Upload verification images (legacy Cloudinary, now GCS) only if not already hosted
 	idFrontURL := input.IDFrontImage
-	if !strings.Contains(idFrontURL, "res.cloudinary.com") {
+	if idFrontURL != "" &&
+		!strings.Contains(idFrontURL, "res.cloudinary.com") &&
+		!strings.Contains(idFrontURL, "storage.googleapis.com") {
 		urlMap := storage.UploadBase64Image(idFrontURL, "verification/"+strconv.FormatUint(uint64(user.ID), 10)+"/id_front")
 		if urlMap != nil && urlMap["url"] != "" {
 			idFrontURL = urlMap["url"]
@@ -1166,7 +1210,9 @@ func SubmitVerification(ctx iris.Context) {
 	}
 
 	idBackURL := input.IDBackImage
-	if !strings.Contains(idBackURL, "res.cloudinary.com") {
+	if idBackURL != "" &&
+		!strings.Contains(idBackURL, "res.cloudinary.com") &&
+		!strings.Contains(idBackURL, "storage.googleapis.com") {
 		urlMap := storage.UploadBase64Image(idBackURL, "verification/"+strconv.FormatUint(uint64(user.ID), 10)+"/id_back")
 		if urlMap != nil && urlMap["url"] != "" {
 			idBackURL = urlMap["url"]
@@ -1174,7 +1220,9 @@ func SubmitVerification(ctx iris.Context) {
 	}
 
 	selfieURL := input.SelfieImage
-	if !strings.Contains(selfieURL, "res.cloudinary.com") {
+	if selfieURL != "" &&
+		!strings.Contains(selfieURL, "res.cloudinary.com") &&
+		!strings.Contains(selfieURL, "storage.googleapis.com") {
 		urlMap := storage.UploadBase64Image(selfieURL, "verification/"+strconv.FormatUint(uint64(user.ID), 10)+"/selfie")
 		if urlMap != nil && urlMap["url"] != "" {
 			selfieURL = urlMap["url"]
@@ -1245,6 +1293,7 @@ type UpdateProfileInput struct {
 	Bio         string   `json:"bio"`
 	Languages   []string `json:"languages"`
 	Skills      []string `json:"skills"`
+	PhoneNumber *string  `json:"phoneNumber"` // optional - for email users to add phone
 }
 
 type VerificationInput struct {

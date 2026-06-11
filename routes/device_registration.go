@@ -197,6 +197,58 @@ func GetDeviceAnalytics(ctx iris.Context) {
 
 	var usageStats UsageStats
 
+	// Today's unique app opens (distinct devices active today).
+	// Use BOTH session starts and device last_seen heartbeat because some
+	// app launches may update registration before/without session logging.
+	var todayUniqueDevices int64
+	storage.DB.Raw(`
+		SELECT COUNT(DISTINCT device_id)
+		FROM (
+			SELECT device_id
+			FROM device_sessions
+			WHERE session_start >= EXTRACT(EPOCH FROM DATE_TRUNC('day', NOW()))
+			UNION
+			SELECT device_id
+			FROM device_registrations
+			WHERE is_active = true
+			  AND last_seen_at >= EXTRACT(EPOCH FROM DATE_TRUNC('day', NOW()))
+		) AS today_devices
+	`).Scan(&todayUniqueDevices)
+
+	type TodayOpenedDevice struct {
+		DeviceID   string `json:"deviceId"`
+		DeviceModel string `json:"deviceModel"`
+		Platform   string `json:"platform"`
+		AppVersion string `json:"appVersion"`
+		LastSeenAt int64  `json:"lastSeenAt"`
+	}
+	var todayOpenedDevices []TodayOpenedDevice
+	storage.DB.Raw(`
+		SELECT
+			dr.device_id as device_id,
+			COALESCE(NULLIF(dr.device_model, ''), 'Unknown') as device_model,
+			COALESCE(NULLIF(dr.platform, ''), 'unknown') as platform,
+			COALESCE(NULLIF(dr.app_version, ''), 'Unknown') as app_version,
+			dr.last_seen_at as last_seen_at
+		FROM device_registrations dr
+		WHERE dr.is_active = true
+			AND dr.device_id IN (
+				SELECT device_id
+				FROM (
+					SELECT device_id
+					FROM device_sessions
+					WHERE session_start >= EXTRACT(EPOCH FROM DATE_TRUNC('day', NOW()))
+					UNION
+					SELECT device_id
+					FROM device_registrations
+					WHERE is_active = true
+					  AND last_seen_at >= EXTRACT(EPOCH FROM DATE_TRUNC('day', NOW()))
+				) AS today_devices
+			)
+		ORDER BY dr.last_seen_at DESC
+		LIMIT 100
+	`).Scan(&todayOpenedDevices)
+
 	// Total completed sessions
 	storage.DB.Model(&models.DeviceSession{}).
 		Where("is_active = ? AND duration_sec IS NOT NULL", false).
@@ -274,6 +326,10 @@ func GetDeviceAnalytics(ctx iris.Context) {
 		"analytics": iris.Map{
 			"totalDevices":     totalDevices,
 			"activeDevices":    activeDevices,
+			"todayUniqueDevices": todayUniqueDevices,
+			"todayOpenedDevices": todayOpenedDevices,
+			"todayDate":        time.Now().Format("2006-01-02"),
+			"generatedAt":      time.Now().UTC().Format(time.RFC3339),
 			"platformStats":    platformStats,
 			"deviceModelStats": deviceModelStats,
 			"timeSeriesData":   timeSeriesData,

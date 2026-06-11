@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math/rand"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -15,11 +16,46 @@ import (
 	"github.com/kataras/iris/v12/middleware/jwt"
 )
 
+// parsePublicRentStatusParam — comma-separated status values (e.g. approved,published).
+func parsePublicRentStatusParam(status string) []string {
+	defaults := []string{"approved", "published"}
+	if status == "" {
+		return defaults
+	}
+	parts := strings.Split(status, ",")
+	out := make([]string, 0, len(parts))
+	seen := map[string]struct{}{}
+	for _, p := range parts {
+		p = strings.TrimSpace(strings.ToLower(p))
+		if p != "approved" && p != "published" {
+			continue
+		}
+		if _, ok := seen[p]; ok {
+			continue
+		}
+		seen[p] = struct{}{}
+		out = append(out, p)
+	}
+	if len(out) == 0 {
+		return defaults
+	}
+	return out
+}
+
 // SearchProperties handles property search with multiple filters
 // Works for both authenticated and unauthenticated users
 // Properties are rotated per-request to show fresh content (TikTok-like cycling)
 // Properties with images are always prioritized at the top
 func SearchProperties(ctx iris.Context) {
+	page := ctx.URLParamIntDefault("page", 1)
+	limit := ctx.URLParamIntDefault("limit", 20)
+	if page < 1 {
+		page = 1
+	}
+	if limit <= 0 || limit > 100 {
+		limit = 20
+	}
+
 	// Debug: Log all received parameters
 	fmt.Printf("🔍 SearchProperties called with parameters:\n")
 	fmt.Printf("  city: %s\n", ctx.URLParam("city"))
@@ -66,6 +102,21 @@ func SearchProperties(ctx iris.Context) {
 		fmt.Printf("🔍 Applying city filter: %s\n", city)
 		q = q.Where("LOWER(city) = LOWER(?)", city)
 	}
+	if v := strings.TrimSpace(ctx.URLParam("city_id")); v != "" {
+		if n, err := strconv.ParseUint(v, 10, 32); err == nil && n > 0 {
+			q = q.Where("properties.city_id = ?", uint(n))
+		}
+	}
+	if v := strings.TrimSpace(ctx.URLParam("zone_id")); v != "" {
+		if n, err := strconv.ParseUint(v, 10, 32); err == nil && n > 0 {
+			q = q.Where("properties.zone_id = ?", uint(n))
+		}
+	}
+	if v := strings.TrimSpace(ctx.URLParam("quartier_id")); v != "" {
+		if n, err := strconv.ParseUint(v, 10, 32); err == nil && n > 0 {
+			q = q.Where("properties.quartier_id = ?", uint(n))
+		}
+	}
 	if state := strings.TrimSpace(ctx.URLParam("state")); state != "" {
 		fmt.Printf("🔍 Applying state filter: %s\n", state)
 		q = q.Where("LOWER(state) = LOWER(?)", state)
@@ -73,6 +124,11 @@ func SearchProperties(ctx iris.Context) {
 	if country := strings.TrimSpace(ctx.URLParam("country")); country != "" {
 		fmt.Printf("🔍 Applying country filter: %s\n", country)
 		q = q.Where("LOWER(country) = LOWER(?)", country)
+	}
+	if v := strings.TrimSpace(ctx.URLParam("country_id")); v != "" {
+		if n, err := strconv.ParseUint(v, 10, 32); err == nil && n > 0 {
+			q = q.Where("properties.country_id = ?", uint(n))
+		}
 	}
 
 	// Property attributes
@@ -135,19 +191,13 @@ func SearchProperties(ctx iris.Context) {
 		}
 	}
 
-	// Enforce only approved/live properties by default for safety
-	status := strings.TrimSpace(ctx.URLParam("status"))
-	if status == "" {
-		q = q.Where("status IN (?)", []string{"approved", "live"})
-	} else {
-		// If status provided, still prevent unsafe values by intersecting
-		// Only allow approved/live explicitly; others will return empty
-		if strings.EqualFold(status, "approved") || strings.EqualFold(status, "live") {
-			q = q.Where("status = ?", status)
-		} else {
-			q = q.Where("1 = 0") // block other statuses
-		}
-	}
+	// Public rent search: never return rejected/pending/draft or flagged listings.
+	q = q.Where("LOWER(TRIM(COALESCE(status, ''))) NOT IN (?)",
+		[]string{"rejected", "pending", "draft", "denied", "cancelled", "canceled", "suspended", "inactive", "blocked"})
+	q = q.Where("COALESCE(is_flagged, false) = ?", false)
+
+	allowedStatuses := parsePublicRentStatusParam(strings.TrimSpace(ctx.URLParam("status")))
+	q = q.Where("LOWER(TRIM(COALESCE(status, ''))) IN ?", allowedStatuses)
 
 	// Active flag additionally required
 	q = q.Where("COALESCE(is_active, ?) = ?", true, true)
@@ -293,7 +343,19 @@ func SearchProperties(ctx iris.Context) {
 	properties = append(properties, withImages...)
 	properties = append(properties, withoutImages...)
 
-	fmt.Printf("✅ Returning %d properties (rotated, images prioritized)\n", len(properties))
+	total := len(properties)
+	offset := (page - 1) * limit
+	if offset >= total {
+		properties = []models.Property{}
+	} else {
+		end := offset + limit
+		if end > total {
+			end = total
+		}
+		properties = properties[offset:end]
+	}
+
+	fmt.Printf("✅ Returning %d properties (rotated, images prioritized, page=%d, limit=%d, total=%d)\n", len(properties), page, limit, total)
 
 	// Debug: Show sample property data to understand the structure
 	if len(properties) > 0 {
@@ -302,49 +364,97 @@ func SearchProperties(ctx iris.Context) {
 			if i >= 3 { // Show first 3 properties
 				break
 			}
-			fmt.Printf("  Property %d: ID=%d, Type=%s, Price=%d, Beds=%d, Baths=%d, City=%s\n",
-				i+1, prop.ID, prop.PropertyType, prop.NightlyPrice, prop.Bedrooms, prop.Bathrooms, prop.City)
-		}
-	} else {
-		fmt.Printf("🔍 No properties found - checking database structure...\n")
-		// Let's check what property types exist
-		var propertyTypes []string
-		storage.DB.Model(&models.Property{}).Distinct("property_type").Pluck("property_type", &propertyTypes)
-		fmt.Printf("🔍 Available property types in database: %v\n", propertyTypes)
-
-		// Check price ranges
-		var minPrice, maxPrice int
-		storage.DB.Model(&models.Property{}).Select("MIN(nightly_price)").Scan(&minPrice)
-		storage.DB.Model(&models.Property{}).Select("MAX(nightly_price)").Scan(&maxPrice)
-		fmt.Printf("🔍 Price range in database: %d - %d\n", minPrice, maxPrice)
-
-		// Check bedroom ranges
-		var minBeds, maxBeds int
-		storage.DB.Model(&models.Property{}).Select("MIN(bedrooms)").Scan(&minBeds)
-		storage.DB.Model(&models.Property{}).Select("MAX(bedrooms)").Scan(&maxBeds)
-		fmt.Printf("🔍 Bedroom range in database: %d - %d\n", minBeds, maxBeds)
-
-		// Check bathroom ranges
-		var minBaths, maxBaths int
-		storage.DB.Model(&models.Property{}).Select("MIN(bathrooms)").Scan(&minBaths)
-		storage.DB.Model(&models.Property{}).Select("MAX(bathrooms)").Scan(&maxBaths)
-		fmt.Printf("🔍 Bathroom range in database: %d - %d\n", minBaths, maxBaths)
-
-		// Check how many properties match the current filters
-		var count int64
-		testQuery := storage.DB.Model(&models.Property{})
-		testQuery = testQuery.Where("status IN (?)", []string{"approved", "live"})
-		testQuery = testQuery.Where("COALESCE(is_active, ?) = ?", true, true)
-		testQuery.Count(&count)
-		fmt.Printf("🔍 Total active properties in database: %d\n", count)
-
-		// Test with just property type filter
-		if pType := strings.TrimSpace(ctx.URLParam("propertyType")); pType != "" {
-			var typeCount int64
-			storage.DB.Model(&models.Property{}).Where("property_type = ? AND status IN (?) AND COALESCE(is_active, ?) = ?", pType, []string{"approved", "live"}, true, true).Count(&typeCount)
-			fmt.Printf("🔍 Properties with type '%s': %d\n", pType, typeCount)
+			fmt.Printf("  Property %d: ID=%d, Type=%s, Price=%.0f, Beds=%d, Baths=%.0f, City=%s\n",
+				i+1, prop.ID, prop.PropertyType, float64(prop.NightlyPrice), prop.Bedrooms, float64(prop.Bathrooms), prop.City)
 		}
 	}
 
+	ctx.Header("X-Page", fmt.Sprintf("%d", page))
+	ctx.Header("X-Limit", fmt.Sprintf("%d", limit))
+	ctx.Header("X-Total", fmt.Sprintf("%d", total))
 	ctx.JSON(properties)
+}
+
+// ListProperties handles GET /api/properties - returns paginated approved properties
+// Format: { data: Property[], meta: { page, limit, total } }
+func ListProperties(ctx iris.Context) {
+	page := ctx.URLParamIntDefault("page", 1)
+	limit := ctx.URLParamIntDefault("limit", 20)
+	if limit <= 0 || limit > 100 {
+		limit = 20
+	}
+	if page < 1 {
+		page = 1
+	}
+
+	// Exclusions based on user moderation (optional auth)
+	var userID uint = 0
+	if v := ctx.Values().Get("userID"); v != nil {
+		if id, ok := v.(uint); ok {
+			userID = id
+		}
+	}
+	if userID == 0 {
+		if auth := ctx.GetHeader("Authorization"); len(auth) > 7 && auth[:7] == "Bearer " {
+			verifier := jwt.NewVerifier(jwt.HS256, []byte(os.Getenv("ACCESS_TOKEN_SECRET")))
+			verifier.WithDefaultBlocklist()
+			if token, err := verifier.VerifyToken([]byte(auth[7:])); err == nil {
+				var claims utils.AccessToken
+				if err := token.Claims(&claims); err == nil {
+					userID = claims.ID
+				}
+			}
+		}
+	}
+
+	q := storage.DB.Model(&models.Property{})
+
+	// Apply user-specific exclusions if authenticated
+	if userID > 0 {
+		// Use NOT EXISTS to allow index-only lookups and avoid IN list pitfalls
+		q = q.Where("NOT EXISTS (SELECT 1 FROM hidden_properties hp WHERE hp.property_id = properties.id AND hp.user_id = ?)", userID)
+		q = q.Where("NOT EXISTS (SELECT 1 FROM property_reports pr WHERE pr.property_id = properties.id AND pr.reporter_id = ?)", userID)
+		q = q.Where("NOT EXISTS (SELECT 1 FROM user_flags uf WHERE uf.flagged_user_id = properties.host_id AND uf.flagger_id = ? AND uf.status='active')", userID)
+	}
+
+	// Only show approved/live properties (case-insensitive)
+	q = q.Where("LOWER(status) IN (?)", []string{"approved", "live", "published"})
+	
+	// Active flag additionally required
+	q = q.Where("COALESCE(is_active, ?) = ?", true, true)
+
+	// Count total matching properties
+	var total int64
+	if err := q.Count(&total).Error; err != nil {
+		fmt.Printf("❌ Error counting properties: %v\n", err)
+		ctx.StatusCode(iris.StatusInternalServerError)
+		ctx.JSON(iris.Map{"error": "Failed to count properties"})
+		return
+	}
+
+	// Fetch paginated properties
+	var properties []models.Property
+	offset := (page - 1) * limit
+	if err := q.Preload("Host").
+		Order("created_at DESC").
+		Offset(offset).
+		Limit(limit).
+		Find(&properties).Error; err != nil {
+		fmt.Printf("❌ Error fetching properties: %v\n", err)
+		ctx.StatusCode(iris.StatusInternalServerError)
+		ctx.JSON(iris.Map{"error": "Failed to fetch properties"})
+		return
+	}
+
+	fmt.Printf("✅ ListProperties: page=%d, limit=%d, total=%d, returned=%d\n", page, limit, total, len(properties))
+
+	// Return in the format expected by frontend: { data: Property[], meta: { page, limit, total } }
+	ctx.JSON(iris.Map{
+		"data": properties,
+		"meta": iris.Map{
+			"page":  page,
+			"limit": limit,
+			"total": total,
+		},
+	})
 }

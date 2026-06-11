@@ -4,8 +4,10 @@ import (
 	"apartments-clone-server/models"
 	"apartments-clone-server/services"
 	"apartments-clone-server/services/push"
+	"apartments-clone-server/services/videoprocessing"
 	"apartments-clone-server/storage"
 	"apartments-clone-server/utils"
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -50,12 +52,14 @@ func CreateVideo(ctx iris.Context) {
 	}
 
 	video := models.Video{
-		PropertyID:   &input.PropertyID,
-		UserID:       userID,
-		VideoURL:     input.VideoURL,
-		ThumbnailURL: input.ThumbnailURL,
-		DurationSec:  input.DurationSec,
-		Caption:      input.Caption,
+		PropertyID:       &input.PropertyID,
+		UserID:           userID,
+		VideoURL:         input.VideoURL,
+		ThumbnailURL:     input.ThumbnailURL,
+		DurationSec:      input.DurationSec,
+		Caption:          input.Caption,
+		Status:           "pending", // admin must approve before public feed
+		ProcessingStatus: "pending",
 	}
 
 	if err := storage.DB.Create(&video).Error; err != nil {
@@ -63,6 +67,20 @@ func CreateVideo(ctx iris.Context) {
 		utils.CreateInternalServerError(ctx)
 		return
 	}
+
+	// Async HLS transcoding (ABR ladder) — feed uses hlsURL when ready
+	videoprocessing.Enqueue(storage.DB, video.ID, userID)
+
+	// 🔴 INVALIDATE VIDEO FEED CACHE (new video added)
+	go func() {
+		bgCtx := context.Background()
+		cacheConfig := services.DefaultCacheConfig()
+		cacheService := services.NewCacheService(storage.Redis)
+		videoFeedCache := services.NewVideoFeedCacheService(cacheService, cacheConfig)
+		if err := videoFeedCache.InvalidateVideoFeed(bgCtx); err != nil {
+			fmt.Printf("⚠️ Failed to invalidate video feed cache: %v\n", err)
+		}
+	}()
 
 	// Notify previous viewers of this host's videos about the new video
 	go func(videoID uint, hostUserID uint) {
@@ -96,9 +114,74 @@ func GetVideoFeed(ctx iris.Context) {
 		fmt.Printf("❌ No JWT claims found in request\n")
 	}
 
+	fmt.Printf("🎬 GetVideoFeed called - hasAuth=%v, userID=%d\n", hasAuth, userID)
+
+	// 🔴 TRY REDIS CACHE FIRST - Skip expensive DB query if cached
+	cacheConfig := services.DefaultCacheConfig()
+	cacheService := services.NewCacheService(storage.Redis)
+	videoFeedCache := services.NewVideoFeedCacheService(cacheService, cacheConfig)
+
+	page := ctx.URLParamIntDefault("page", 1)
+	if page < 1 {
+		page = 1
+	}
+
+	bgCtx := context.Background()
+	if cachedFeed, err := videoFeedCache.GetVideoFeedFromCache(bgCtx, userID, page); err == nil && cachedFeed != nil && len(cachedFeed.Videos) > 0 {
+		fmt.Printf("💾 VIDEO FEED CACHE HIT - Returning %d videos from Redis (%.2fms instant)\n", len(cachedFeed.Videos), 0.1)
+		// Build likedMap/savedMap from cache and user's recent data
+		likedMap := make(map[uint]bool)
+		savedMap := make(map[uint]bool)
+		if hasAuth {
+			videoIDs := make([]uint, 0, len(cachedFeed.Videos))
+			for _, v := range cachedFeed.Videos {
+				videoIDs = append(videoIDs, v.ID)
+			}
+			if len(videoIDs) > 0 {
+				var likedIDs []uint
+				if err := storage.DB.Model(&models.VideoLike{}).
+					Where("video_id IN ? AND user_id = ?", videoIDs, userID).
+					Pluck("video_id", &likedIDs).Error; err == nil {
+					for _, id := range likedIDs {
+						likedMap[id] = true
+					}
+				}
+				var savedIDs []uint
+				if err := storage.DB.Model(&models.VideoSave{}).
+					Where("video_id IN ? AND user_id = ?", videoIDs, userID).
+					Pluck("video_id", &savedIDs).Error; err == nil {
+					for _, id := range savedIDs {
+						savedMap[id] = true
+					}
+				}
+			}
+		}
+		type VideoWithUserState struct {
+			models.Video
+			IsLiked bool `json:"isLiked"`
+			IsSaved bool `json:"isSaved"`
+		}
+		videosWithState := make([]VideoWithUserState, 0, len(cachedFeed.Videos))
+		for _, video := range cachedFeed.Videos {
+			videosWithState = append(videosWithState, VideoWithUserState{
+				Video:   video,
+				IsLiked: likedMap[video.ID],
+				IsSaved: savedMap[video.ID],
+			})
+		}
+		ctx.JSON(iris.Map{
+			"success":    true,
+			"videos":     videosWithState,
+			"page":       page,
+			"hasMore":    cachedFeed.NextCursor != "",
+			"source":     "cache",
+		})
+		return
+	}
+
 	// Cursor-based pagination (preferred) or fallback to page-based
 	cursor := ctx.URLParam("cursor")
-	page := ctx.URLParamIntDefault("page", 0) // 0 means use cursor
+	page = ctx.URLParamIntDefault("page", 0) // 0 means use cursor
 	limit := ctx.URLParamIntDefault("limit", 10)
 	if limit < 1 {
 		limit = 10
@@ -139,24 +222,48 @@ func GetVideoFeed(ctx iris.Context) {
 		sortOrder = "DESC"
 	}
 
+	// ⚠️ DEBUG: Check if ANY videos exist at all
+	if !hasAuth {
+		var totalVideoCount int64
+		var activePropertyVideoCount int64
+		var rejectedVideoCount int64
+		
+		storage.DB.Model(&models.Video{}).Count(&totalVideoCount)
+		storage.DB.Model(&models.Video{}).
+			Joins("LEFT JOIN properties ON videos.property_id = properties.id").
+			Where("properties.id IS NOT NULL AND COALESCE(properties.is_active, true) = true").
+			Count(&activePropertyVideoCount)
+		storage.DB.Model(&models.Video{}).
+			Where("COALESCE(videos.is_flagged, false) = true OR LOWER(videos.status) = 'rejected'").
+			Count(&rejectedVideoCount)
+		
+		fmt.Printf("📊 DEBUG Video Availability:\n")
+		fmt.Printf("   Total videos in DB: %d\n", totalVideoCount)
+		fmt.Printf("   Videos with active properties: %d\n", activePropertyVideoCount)
+		fmt.Printf("   Flagged/rejected videos: %d\n", rejectedVideoCount)
+	}
+
 	// Base query (non-promotional videos only; promotional handled separately)
 	baseQuery := storage.DB.Model(&models.Video{}).
 		Where("COALESCE(videos.is_promotional, ?) = ?", false, false).
 		Joins("LEFT JOIN properties ON videos.property_id = properties.id").
-		Where("properties.id IS NOT NULL AND COALESCE(properties.is_active, ?) = ? AND properties.status IN (?)", true, true, []string{"approved", "live"}).
-		Where("(videos.status IS NULL OR LOWER(videos.status) <> ?)", "rejected").
+		Where("properties.id IS NOT NULL AND COALESCE(properties.is_active, ?) = ?", true, true).
+		Where("LOWER(COALESCE(videos.status, 'pending')) = ?", "approved").
 		Where("COALESCE(videos.is_flagged, ?) = ?", false, false).
 		Preload("Property").
 		Preload("User")
 
 	if hasAuth {
 		fmt.Printf("🔍 Applying personalised filters for user %d\n", userID)
-		baseQuery = baseQuery.
+		// For authenticated users: stricter property status filter
+		baseQuery = baseQuery.Where("LOWER(properties.status) IN (?)", []string{"approved", "live"}).
 			Where("videos.id NOT IN (SELECT video_id FROM hidden_videos WHERE user_id = ? AND deleted_at IS NULL)", userID).
 			Where("videos.id NOT IN (SELECT video_id FROM video_reports WHERE reporter_id = ? AND deleted_at IS NULL)", userID).
 			Where("videos.user_id NOT IN (SELECT flagged_user_id FROM user_flags WHERE flagger_id = ? AND status = 'active')", userID)
 	} else {
-		fmt.Printf("⚠️ No user authentication - serving public feed\n")
+		fmt.Printf("⚠️ No user authentication - serving public feed (relaxed filters)\n")
+		// For anonymous users: more permissive property status (includes pending, draft, etc.)
+		// This matches property sale videos behavior which only requires videos to exist
 	}
 
 	// Apply property-based filters
@@ -238,7 +345,12 @@ func GetVideoFeed(ctx iris.Context) {
 	case "rating":
 		orderClause = "properties.rating " + sortOrder + ", videos.created_at DESC"
 	case "recent":
-		orderClause = "videos.created_at " + sortOrder
+		// Hybrid ranking: ~40% recent, ~40% trending, ~20% random (fair feed, not strict chronological)
+		orderClause = fmt.Sprintf(`(
+			0.4 * GREATEST(0, 1.0 - EXTRACT(EPOCH FROM (NOW() - videos.created_at)) / 86400.0 / 30.0) +
+			0.4 * LEAST(1.0, (COALESCE(videos.likes_count, 0) * 2 + COALESCE(videos.comments_count, 0) * 3 + COALESCE(videos.saves_count, 0) + COALESCE(videos.view_count, 0)) / 100.0) +
+			0.2 * (random() + 0.5)
+		) DESC`)
 	default:
 		// Default: Smart rotation with better variety
 		// Mix of:
@@ -316,7 +428,7 @@ func GetVideoFeed(ctx iris.Context) {
 	var promotionalVideos []models.Video
 	promoQuery := storage.DB.Model(&models.Video{}).
 		Where("is_promotional = ?", true).
-		Where("(status IS NULL OR LOWER(status) <> ?)", "rejected").
+		Where("LOWER(COALESCE(status, 'pending')) = ?", "approved").
 		Where("COALESCE(is_flagged, ?) = ?", false, false).
 		Preload("Property").
 		Preload("User").
@@ -360,6 +472,88 @@ func GetVideoFeed(ctx iris.Context) {
 	}
 
 	fmt.Printf("📹 Returning %d videos for user %d (page %d)\n", len(finalVideos), userID, page)
+
+	// 🔄 FALLBACK for anonymous users: If no rental videos, use property sale videos
+	if !hasAuth && len(finalVideos) == 0 {
+		fmt.Printf("⚠️ [FALLBACK TRIGGERED] No rental videos found for anonymous user, fetching property sale videos as fallback...\n")
+		
+		var fallbackPropertySales []models.PropertySale
+		// ENGINEERED SORTING: Use composite score with randomness (same as main feed)
+		// This ensures variety and prevents same-video-first problem
+		fallbackQuery := storage.DB.Model(&models.PropertySale{}).
+			Where("(status = 'published' OR is_published = true OR status IS NULL) AND videos IS NOT NULL AND COALESCE(is_deactivated, false) = false").
+			Order(`(
+				0.4 * GREATEST(0, 1.0 - EXTRACT(EPOCH FROM (NOW() - property_sales.created_at)) / 86400.0 / 30.0) +
+				0.4 * 0.5 +
+				0.2 * (random() + 0.5)
+			) DESC`).
+			Limit(limit)
+		
+		if err := fallbackQuery.Find(&fallbackPropertySales).Error; err == nil && len(fallbackPropertySales) > 0 {
+			fmt.Printf("✅ Using %d property sale videos as fallback (randomized order)\n", len(fallbackPropertySales))
+			// Log first 3 for verification
+			for i := 0; i < len(fallbackPropertySales) && i < 3; i++ {
+				fmt.Printf("   [%d] ID=%d, Title=%s\n", i, fallbackPropertySales[i].ID, fallbackPropertySales[i].Title)
+			}
+			// Convert property sales to video responses
+			type VideoResponse struct {
+				ID            uint     `json:"id"`
+				Title         string   `json:"title"`
+				Description   string   `json:"description"`
+				VideoURL      string   `json:"videoUrl"`
+				Videos        []string `json:"videos"`
+				Images        []string `json:"images"`
+				ThumbnailURL  string   `json:"thumbnailUrl"`
+				LikesCount    int      `json:"likesCount"`
+				CommentsCount int      `json:"commentsCount"`
+				SavesCount    int      `json:"savesCount"`
+				ViewCount     int      `json:"viewCount"`
+				Source        string   `json:"source"`
+			}
+			videosResponse := make([]VideoResponse, 0, len(fallbackPropertySales))
+			for idx, ps := range fallbackPropertySales {
+				videoURL := ""
+				if len(ps.Videos) > 0 {
+					videoURL = ps.Videos[0]
+				}
+				thumbURL := ""
+				if len(ps.Images) > 0 {
+					thumbURL = ps.Images[0]
+				}
+				
+				// DEBUG: Log each video being added
+				fmt.Printf("🎥 [FALLBACK VIDEO %d] ID=%d, videoURL=%s, title=%s, hasVideos=%v\n", 
+					idx, ps.ID, videoURL, ps.Title, len(ps.Videos) > 0)
+				
+				videosResponse = append(videosResponse, VideoResponse{
+					ID:            ps.ID,
+					Title:         ps.Title,
+					Description:   ps.Description,
+					VideoURL:      videoURL,
+					Videos:        ps.Videos,
+					Images:        ps.Images,
+					ThumbnailURL:  thumbURL,
+					LikesCount:    0,
+					CommentsCount: 0,
+					SavesCount:    0,
+					ViewCount:     0,
+					Source:        "property_sale",
+				})
+				if idx >= limit-1 {
+					break
+				}
+			}
+			ctx.JSON(iris.Map{
+				"success":  true,
+				"videos":   videosResponse,
+				"page":     page,
+				"hasMore":  false,
+				"source":   "property_sale_fallback",
+			})
+			fmt.Printf("🚀 [API RESPONSE] Returning %d property sale videos in fallback. First video ID=%d, hasVideoURL=%v\n", len(videosResponse), videosResponse[0].ID, videosResponse[0].VideoURL != "")
+			return
+		}
+	}
 
 	// Update feed history asynchronously (don't block response)
 	if hasAuth && len(finalVideos) > 0 {
@@ -431,9 +625,92 @@ func GetVideoFeed(ctx iris.Context) {
 		})
 	}
 
+	// Apply video scoring and diversity (if authenticated)
+	videoScores := make(map[uint]float64)
+	if hasAuth && len(videosWithState) > 0 {
+		fmt.Printf("📊 Applying video scoring & diversity for user %d\n", userID)
+		
+		// Compute scores for diversity and engagement
+		for _, vs := range videosWithState {
+			score := 0.7 // Base score
+			
+			// Freshness factor: newer videos score higher (35% weight)
+			ageHours := time.Since(vs.CreatedAt).Hours()
+			freshnessFactor := 1.0 / (1.0 + ageHours/48.0) // 48-hour half-life
+			
+			// Engagement factor: liked videos boost score (25% weight)
+			engagementFactor := 0.8
+			if vs.IsLiked {
+				engagementFactor = 1.2
+			}
+			
+			// View frequency factor (15% weight)
+			viewFactor := 1.0
+			if lastSeen, ok := recentlySeenMap[vs.ID]; ok {
+				hoursSinceSeen := time.Since(lastSeen).Hours()
+				if hoursSinceSeen < 1.0 {
+					viewFactor = 0.2 // Penalize very recent views
+				} else if hoursSinceSeen < 6.0 {
+					viewFactor = 0.5 // Reduce score for recent views
+				}
+			}
+			
+			// Relevance factor: property type/location match (25% weight)
+			relevanceFactor := 1.0
+			if vs.Property != nil {
+				// Basic relevance: give bonus to properties with better engagement metrics
+				if vs.Property.Rating > 4.5 {
+					relevanceFactor = 1.3
+				} else if vs.Property.Rating > 4.0 {
+					relevanceFactor = 1.1
+				}
+			}
+			
+			// Composite score: freshness(35%) + engagement(25%) + relevance(25%) + penalty(15%)
+			score = score * (0.35*freshnessFactor + 0.25*engagementFactor + 0.25*relevanceFactor + 0.15*viewFactor)
+			videoScores[vs.ID] = score
+			
+			fmt.Printf("  📹 Video %d: score=%.3f (age=%.1fh, fresh=%.2f, engage=%.2f, rel=%.2f, view=%.2f)\n", 
+				vs.ID, score, ageHours, freshnessFactor, engagementFactor, relevanceFactor, viewFactor)
+		}
+		
+		// SORT videos by score (descending) for better ranking
+		// Use stable sort to maintain secondary order
+		type VideoScore struct {
+			video VideoWithUserState
+			score float64
+		}
+		
+		videosWithScores := make([]VideoScore, 0, len(videosWithState))
+		for _, v := range videosWithState {
+			videosWithScores = append(videosWithScores, VideoScore{
+				video: v,
+				score: videoScores[v.ID],
+			})
+		}
+		
+		// Sort by score (descending)
+		for i := 0; i < len(videosWithScores); i++ {
+			for j := i + 1; j < len(videosWithScores); j++ {
+				if videosWithScores[j].score > videosWithScores[i].score {
+					videosWithScores[i], videosWithScores[j] = videosWithScores[j], videosWithScores[i]
+				}
+			}
+		}
+		
+		// Rebuild videosWithState in sorted order
+		videosWithState = make([]VideoWithUserState, 0, len(videosWithScores))
+		for _, vs := range videosWithScores {
+			videosWithState = append(videosWithState, vs.video)
+		}
+		
+		fmt.Printf("✅ Scoring complete: %d videos processed and sorted by score\n", len(videoScores))
+	}
+
 	response := iris.Map{
 		"success": true,
 		"videos":  videosWithState,
+		"scores":  videoScores,  // Include scores for frontend debugging
 	}
 
 	// Include cursor information for cursor-based pagination
@@ -445,6 +722,21 @@ func GetVideoFeed(ctx iris.Context) {
 		response["page"] = page
 		response["hasMore"] = hasMore
 	}
+
+	// 🔴 CACHE VIDEOS FOR NEXT REQUEST (async, don't block response)
+	go func(videos []models.Video, userID uint, pageNum int) {
+		bgCtx := context.Background()
+		cacheConfig := services.DefaultCacheConfig()
+		cacheService := services.NewCacheService(storage.Redis)
+		videoFeedCache := services.NewVideoFeedCacheService(cacheService, cacheConfig)
+		nextCur := ""
+		if useCursor {
+			nextCur = nextCursor
+		}
+		if err := videoFeedCache.SetVideoFeedCache(bgCtx, userID, pageNum, videos, nextCur); err != nil {
+			fmt.Printf("⚠️ Failed to cache video feed: %v\n", err)
+		}
+	}(finalVideos, userID, page)
 
 	ctx.JSON(response)
 }
@@ -663,13 +955,7 @@ func CreateVideoComment(ctx iris.Context) {
 }
 
 func GetVideoComments(ctx iris.Context) {
-	// Safely get user ID if authenticated (optional)
-	var userID uint = 0
-	if claims := jsonWT.Get(ctx); claims != nil {
-		if accessToken, ok := claims.(*utils.AccessToken); ok {
-			userID = accessToken.ID
-		}
-	}
+	userID := OptionalAuthUserID(ctx)
 
 	videoID := ctx.Params().Get("videoID")
 

@@ -7,6 +7,18 @@ import (
 	"gorm.io/gorm"
 )
 
+// PropertyListingVideo is attached by APIs when a rent-linked tour exists in `videos` (not stored on properties row).
+// Prefer approved rows; pending may appear until admins approve (see location-discovery attachment logic).
+type PropertyListingVideo struct {
+	VideoID      uint    `json:"videoID"`
+	PropertyID   uint    `json:"propertyID"`
+	VideoURL     string  `json:"videoURL"`
+	ThumbnailURL string  `json:"thumbnailURL,omitempty"`
+	Caption      string  `json:"caption,omitempty"`
+	DurationSec  float64 `json:"durationSec,omitempty"`
+	Status       string  `json:"status,omitempty"` // approved | pending (normalized lowercase)
+}
+
 type Property struct {
 	gorm.Model
 	HostID             uint          `json:"hostID"`
@@ -18,6 +30,8 @@ type Property struct {
 	City               string        `json:"city"`
 	CityID             *uint         `json:"city_id" gorm:"column:city_id"`
 	ZoneID             *uint         `json:"zone_id" gorm:"column:zone_id"`
+	QuartierID         *uint         `json:"quartier_id" gorm:"column:quartier_id"`
+	CountryID          *uint         `json:"country_id" gorm:"column:country_id;index"`
 	State              string        `json:"state"`
 	Zip                string        `json:"zip"`
 	Country            string        `json:"country"`
@@ -40,6 +54,7 @@ type Property struct {
 	Reviews            []Review      `json:"reviews"`
 	Reservations       []Reservation `json:"reservations"`
 	Host               User          `json:"host" gorm:"foreignKey:HostID;references:ID"`
+	CountryRef         *Country      `json:"countryRef" gorm:"foreignKey:CountryID;references:ID"`
 	CityRef            *City         `json:"cityRef" gorm:"foreignKey:CityID;references:ID"`
 	ZoneRef            *Zone         `json:"zoneRef" gorm:"foreignKey:ZoneID;references:ID"`
 
@@ -62,26 +77,34 @@ type Property struct {
 	UserSafetyPolicyAccepted         bool   `json:"userSafetyPolicyAccepted" gorm:"default:false"`
 	PropertyPolicyAccepted           bool   `json:"propertyPolicyAccepted" gorm:"default:false"`
 
+	// Host-only private note (never show to guests; redact on public API responses)
+	HostPrivateNote string `json:"hostPrivateNote,omitempty" gorm:"type:text;column:host_private_note"`
+
 	// Admin moderation fields
 	Status      string `json:"status" gorm:"type:varchar(20);default:'pending';index"` // pending, approved, rejected
 	ReviewNotes string `json:"reviewNotes" gorm:"type:text"`
 	IsFlagged   bool   `json:"isFlagged" gorm:"default:false;index"`
 	FlagReason  string `json:"flagReason" gorm:"type:text"`
+
+	// ListingVideo is set by discovery/list endpoints when a matching approved video exists (not a DB column).
+	ListingVideo *PropertyListingVideo `json:"-" gorm:"-"`
 }
 
 // Custom JSON marshaling to convert Images and Amenities strings to arrays
 func (p *Property) MarshalJSON() ([]byte, error) {
 	type Alias Property
 	aux := &struct {
-		Images    []string `json:"images"`
-		Amenities []string `json:"amenities"`
-		Host      *User    `json:"host,omitempty"`
+		Images       []string              `json:"images"`
+		Amenities    []string              `json:"amenities"`
+		Host         *User                 `json:"host,omitempty"`
+		ListingVideo *PropertyListingVideo `json:"listingVideo,omitempty"`
 		*Alias
 	}{
-		Images:    []string{},
-		Amenities: []string{},
-		Host:      nil,
-		Alias:     (*Alias)(p),
+		Images:       []string{},
+		Amenities:    []string{},
+		Host:         nil,
+		ListingVideo: p.ListingVideo,
+		Alias:        (*Alias)(p),
 	}
 
 	// Parse the JSON string to array for Images

@@ -1,15 +1,19 @@
 package routes
 
 import (
-	"apartments-clone-server/models"
-	pushsvc "apartments-clone-server/services/push"
-	"apartments-clone-server/storage"
+	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 	"sort"
 	"strings"
 	"time"
+
+	"apartments-clone-server/models"
+	"apartments-clone-server/realtime"
+	pushsvc "apartments-clone-server/services/push"
+	"apartments-clone-server/storage"
 
 	"github.com/kataras/iris/v12"
 )
@@ -238,6 +242,18 @@ func SendDirectMessage(ctx iris.Context) {
 		}
 	}
 
+	// If user is sending a new message, they have already seen prior incoming messages
+	// in this thread. Clear unread-from-partner to prevent sender-side unread badge.
+	now := time.Now()
+	if err := storage.DB.Model(&models.DirectMessage{}).
+		Where("sender_id = ? AND receiver_id = ? AND is_read = false AND deleted_at IS NULL", body.ReceiverID, uid).
+		Updates(map[string]interface{}{
+			"is_read": true,
+			"read_at": &now,
+		}).Error; err != nil {
+		log.Printf("⚠️ SendDirectMessage: failed clearing unread state for sender %d in thread with %d: %v", uid, body.ReceiverID, err)
+	}
+
 	// Create direct message
 	message := models.DirectMessage{
 		SenderID:   uid,
@@ -257,6 +273,20 @@ func SendDirectMessage(ctx iris.Context) {
 
 	log.Printf("✅ SendDirectMessage: Message %d created successfully from user %d to user %d",
 		message.ID, uid, body.ReceiverID)
+
+	// Realtime: deliver to both users (multi-device) and update inbox instantly.
+	func() {
+		out := map[string]any{
+			"type": "dm:new_message",
+			"data": message,
+		}
+		b, err := json.Marshal(out)
+		if err != nil {
+			return
+		}
+		realtime.UserHubInstance().BroadcastToUsers([]uint{uid, body.ReceiverID}, b)
+		realtime.PublishUserEvent(context.Background(), []uint{uid, body.ReceiverID}, out)
+	}()
 
 	// Send push notification to receiver with sender's avatar
 	var sender models.User
@@ -428,7 +458,87 @@ func MarkDirectMessageRead(ctx iris.Context) {
 		return
 	}
 
+	// Realtime: notify sender (read receipt) and refresh inbox.
+	func() {
+		var msg models.DirectMessage
+		if err := storage.DB.First(&msg, messageID).Error; err != nil {
+			return
+		}
+		out := map[string]any{
+			"type": "dm:read",
+			"data": map[string]any{
+				"messageId":  messageID,
+				"readerId":   uid,
+				"senderId":   msg.SenderID,
+				"receiverId": msg.ReceiverID,
+				"readAt":     now,
+			},
+		}
+		b, err := json.Marshal(out)
+		if err != nil {
+			return
+		}
+		realtime.UserHubInstance().BroadcastToUsers([]uint{uid, msg.SenderID}, b)
+		realtime.PublishUserEvent(context.Background(), []uint{uid, msg.SenderID}, out)
+	}()
+
 	ctx.JSON(iris.Map{"message": "Message marked as read"})
+}
+
+// MarkDirectMessageThreadRead marks every unread message from a partner as read (opening a thread).
+func MarkDirectMessageThreadRead(ctx iris.Context) {
+	uid, ok := ctx.Values().Get("userID").(uint)
+	if !ok || uid == 0 {
+		ctx.StatusCode(http.StatusUnauthorized)
+		return
+	}
+
+	partnerID, err := ctx.Params().GetUint("userID")
+	if err != nil || partnerID == 0 {
+		ctx.StatusCode(http.StatusBadRequest)
+		ctx.JSON(iris.Map{"error": "invalid user id"})
+		return
+	}
+
+	now := time.Now()
+	result := storage.DB.Model(&models.DirectMessage{}).
+		Where(
+			"receiver_id = ? AND sender_id = ? AND is_read = false AND deleted_at IS NULL",
+			uid, partnerID,
+		).
+		Updates(map[string]interface{}{
+			"is_read": true,
+			"read_at": &now,
+		})
+	if result.Error != nil {
+		ctx.StatusCode(http.StatusInternalServerError)
+		ctx.JSON(iris.Map{"error": "failed to mark thread read"})
+		return
+	}
+
+	func() {
+		out := map[string]any{
+			"type": "dm:read",
+			"data": map[string]any{
+				"readerId":   uid,
+				"senderId":   partnerID,
+				"receiverId": uid,
+				"readAt":     now,
+				"thread":     true,
+			},
+		}
+		b, err := json.Marshal(out)
+		if err != nil {
+			return
+		}
+		realtime.UserHubInstance().BroadcastToUsers([]uint{uid, partnerID}, b)
+		realtime.PublishUserEvent(context.Background(), []uint{uid, partnerID}, out)
+	}()
+
+	ctx.JSON(iris.Map{
+		"message": "Thread marked as read",
+		"updated": result.RowsAffected,
+	})
 }
 
 // ListDirectMessageConversations - Server-first, SOLID-compliant conversation feed
@@ -471,14 +581,6 @@ func ListDirectMessageConversations(ctx iris.Context) {
 			"serverTimestamp": time.Now().Unix(),
 			"total":           0,
 		})
-		return
-	}
-
-	// SECURITY: Validate user exists and is active
-	var currentUser models.User
-	if err := storage.DB.First(&currentUser, uid).Error; err != nil {
-		log.Printf("❌ ListDirectMessageConversations: User %d not found", uid)
-		sendEmptyResponse()
 		return
 	}
 
@@ -647,60 +749,99 @@ func ListDirectMessageConversations(ctx iris.Context) {
 
 	// BUILD SUMMARIES with all conversation data
 	var summaries []ConversationSummary
-	for _, partner := range paginatedPartners {
-		var otherUser models.User
-		if err := storage.DB.Where("id = ? AND deleted_at IS NULL", partner.OtherUserID).First(&otherUser).Error; err != nil {
-			log.Printf("⚠️ ListDirectMessageConversations: User %d not found, skipping", partner.OtherUserID)
-			continue
-		}
-
-		var lastMessage models.DirectMessage
-		err := storage.DB.Where(
-			"((sender_id = ? AND receiver_id = ?) OR (sender_id = ? AND receiver_id = ?)) AND deleted_at IS NULL",
-			uid, partner.OtherUserID, partner.OtherUserID, uid,
-		).Order("created_at DESC").First(&lastMessage).Error
-
-		if err != nil {
-			log.Printf("⚠️ ListDirectMessageConversations: No message found for partner %d, skipping", partner.OtherUserID)
-			continue
-		}
-
-		var unreadCount int64
-		storage.DB.Model(&models.DirectMessage{}).
-			Where("sender_id = ? AND receiver_id = ? AND is_read = false AND deleted_at IS NULL",
-				partner.OtherUserID, uid).
-			Count(&unreadCount)
-
-		otherUserName := fmt.Sprintf("%s %s", otherUser.FirstName, otherUser.LastName)
-		if strings.TrimSpace(otherUserName) == "" {
-			otherUserName = otherUser.Email
-		}
-
-		// Get organization image if user owns an organization
-		avatarURL := otherUser.AvatarURL
-		var organization models.Organization
-		// Suppress "record not found" errors - not all users have organizations (expected)
-		if err := storage.DB.Where("owner_id = ? AND deleted_at IS NULL", partner.OtherUserID).First(&organization).Error; err == nil {
-			// User owns an organization - prefer organization banner/logo
-			if organization.BannerImage != "" {
-				avatarURL = organization.BannerImage
-			} else if organization.Logo != "" {
-				avatarURL = organization.Logo
-			}
-			// Update name to show organization name if available
-			if organization.Name != "" {
-				otherUserName = organization.Name
+	if len(paginatedPartners) > 0 {
+		partnerIDs := make([]uint, 0, len(paginatedPartners))
+		lastMessageIDs := make([]uint, 0, len(paginatedPartners))
+		for _, p := range paginatedPartners {
+			partnerIDs = append(partnerIDs, p.OtherUserID)
+			if p.LastMessageID != 0 {
+				lastMessageIDs = append(lastMessageIDs, p.LastMessageID)
 			}
 		}
-		// Note: "record not found" is expected for users without organizations - no error logging needed
 
-		summaries = append(summaries, ConversationSummary{
-			OtherUserID:     partner.OtherUserID,
-			OtherUserName:   otherUserName,
-			OtherUserAvatar: avatarURL,
-			LastMessage:     &lastMessage,
-			UnreadCount:     int(unreadCount),
-		})
+		// Batch load users
+		var users []models.User
+		_ = storage.DB.Where("id IN ? AND deleted_at IS NULL", partnerIDs).Find(&users).Error
+		userByID := make(map[uint]models.User, len(users))
+		for _, u := range users {
+			userByID[u.ID] = u
+		}
+
+		// Batch load last messages by IDs from partner query (avoid per-partner scan)
+		var lastMessages []models.DirectMessage
+		if len(lastMessageIDs) > 0 {
+			_ = storage.DB.Where("id IN ? AND deleted_at IS NULL", lastMessageIDs).Find(&lastMessages).Error
+		}
+		lastMessageByID := make(map[uint]models.DirectMessage, len(lastMessages))
+		for _, m := range lastMessages {
+			lastMessageByID[m.ID] = m
+		}
+
+		// Batch load unread counts grouped by sender (partner)
+		type unreadRow struct {
+			SenderID uint  `gorm:"column:sender_id"`
+			Count    int64 `gorm:"column:cnt"`
+		}
+		var unreadRows []unreadRow
+		_ = storage.DB.Model(&models.DirectMessage{}).
+			Select("sender_id, COUNT(*) as cnt").
+			Where("receiver_id = ? AND sender_id IN ? AND is_read = false AND deleted_at IS NULL", uid, partnerIDs).
+			Group("sender_id").
+			Scan(&unreadRows).Error
+		unreadBySender := make(map[uint]int64, len(unreadRows))
+		for _, r := range unreadRows {
+			unreadBySender[r.SenderID] = r.Count
+		}
+
+		// Batch load organizations for partner owners
+		var orgs []models.Organization
+		_ = storage.DB.Where("owner_id IN ? AND deleted_at IS NULL", partnerIDs).Find(&orgs).Error
+		orgByOwner := make(map[uint]models.Organization, len(orgs))
+		for _, o := range orgs {
+			// keep first record only to avoid nondeterministic override
+			if _, exists := orgByOwner[o.OwnerID]; !exists {
+				orgByOwner[o.OwnerID] = o
+			}
+		}
+
+		for _, partner := range paginatedPartners {
+			otherUser, ok := userByID[partner.OtherUserID]
+			if !ok {
+				log.Printf("⚠️ ListDirectMessageConversations: User %d not found, skipping", partner.OtherUserID)
+				continue
+			}
+
+			lastMessage, ok := lastMessageByID[partner.LastMessageID]
+			if !ok {
+				log.Printf("⚠️ ListDirectMessageConversations: Last message %d not found for partner %d, skipping", partner.LastMessageID, partner.OtherUserID)
+				continue
+			}
+
+			otherUserName := fmt.Sprintf("%s %s", otherUser.FirstName, otherUser.LastName)
+			if strings.TrimSpace(otherUserName) == "" {
+				otherUserName = otherUser.Email
+			}
+
+			avatarURL := otherUser.AvatarURL
+			if organization, exists := orgByOwner[partner.OtherUserID]; exists {
+				if organization.BannerImage != "" {
+					avatarURL = organization.BannerImage
+				} else if organization.Logo != "" {
+					avatarURL = organization.Logo
+				}
+				if organization.Name != "" {
+					otherUserName = organization.Name
+				}
+			}
+
+			summaries = append(summaries, ConversationSummary{
+				OtherUserID:     partner.OtherUserID,
+				OtherUserName:   otherUserName,
+				OtherUserAvatar: avatarURL,
+				LastMessage:     &lastMessage,
+				UnreadCount:     int(unreadBySender[partner.OtherUserID]),
+			})
+		}
 	}
 
 	log.Printf("✅ ListDirectMessageConversations: Returning %d conversations for user %d", len(summaries), uid)

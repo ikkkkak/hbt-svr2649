@@ -15,6 +15,60 @@ import (
 	"gorm.io/gorm"
 )
 
+// propertySaleFeedLite trims nested listing JSON for scroll feed (full detail on open).
+func propertySaleFeedLite(ps models.PropertySale) map[string]interface{} {
+	images := ps.Images
+	if len(images) > 1 {
+		images = []string{images[0]}
+	}
+	out := map[string]interface{}{
+		"id":            ps.ID,
+		"title":         ps.Title,
+		"city":          ps.City,
+		"bedrooms":      ps.Bedrooms,
+		"bathrooms":     ps.Bathrooms,
+		"listing_price": ps.ListingPrice,
+		"images":        images,
+	}
+	if ps.Organization != nil && ps.Organization.ID > 0 {
+		out["organization"] = map[string]interface{}{
+			"id":   ps.Organization.ID,
+			"name": ps.Organization.Name,
+			"logo": ps.Organization.Logo,
+		}
+	}
+	return out
+}
+
+// SyncPropertySaleVideoRows replaces rows in property_sale_videos for this listing so the video feed
+// serves the exact URLs uploaded by the host (same order as property_sales.videos / create payload).
+// Call after property_sales.videos JSON is saved. Idempotent per full replace.
+func SyncPropertySaleVideoRows(propertySaleID uint, userID uint, urls []string) error {
+	if propertySaleID == 0 || userID == 0 {
+		return nil
+	}
+	// Hard-delete previous rows for this listing so we never show stale duplicate URLs.
+	if err := storage.DB.Unscoped().Where("property_sale_id = ?", propertySaleID).Delete(&models.PropertySaleVideo{}).Error; err != nil {
+		return err
+	}
+	for _, raw := range urls {
+		u := strings.TrimSpace(raw)
+		if u == "" {
+			continue
+		}
+		row := models.PropertySaleVideo{
+			PropertySaleID: propertySaleID,
+			UserID:         userID,
+			VideoURL:       u,
+			Status:         "approved",
+		}
+		if err := storage.DB.Create(&row).Error; err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // RecordPropertySaleVideoView records a view for a property sale video (supports both authenticated and anonymous users)
 func RecordPropertySaleVideoView(ctx iris.Context) {
 	propertySaleID, err := ctx.Params().GetUint("id")
@@ -55,6 +109,28 @@ func RecordPropertySaleVideoView(ctx iris.Context) {
 		UserID:           userID,
 		DeviceID:         deviceID,
 	})
+
+	// Persist visibility for hosts (org tab + studio) — interactions alone are not enough for display counts.
+	storage.DB.Model(&models.PropertySale{}).
+		Where("id = ?", propertySaleID).
+		UpdateColumn("view_count", gorm.Expr("view_count + ?", 1))
+
+	var canonicalRows int64
+	storage.DB.Model(&models.PropertySaleVideo{}).
+		Where("property_sale_id = ? AND deleted_at IS NULL", propertySaleID).
+		Count(&canonicalRows)
+	if canonicalRows == 1 {
+		storage.DB.Model(&models.PropertySaleVideo{}).
+			Where("property_sale_id = ? AND deleted_at IS NULL", propertySaleID).
+			UpdateColumn("view_count", gorm.Expr("view_count + ?", 1))
+	} else if canonicalRows > 1 {
+		// Multiple clips on one listing: bump the row with the highest view_count (best-effort attribution).
+		storage.DB.Model(&models.PropertySaleVideo{}).
+			Where("property_sale_id = ? AND deleted_at IS NULL", propertySaleID).
+			Order("view_count DESC, id ASC").
+			Limit(1).
+			UpdateColumn("view_count", gorm.Expr("view_count + ?", 1))
+	}
 
 	log.Printf("📹 Property Sale Video View: propertySaleID=%d, userID=%v, deviceID=%v",
 		propertySaleID, userID, deviceID)
@@ -164,14 +240,23 @@ func GetPropertySaleVideoFeed(ctx iris.Context) {
 	if limit < 1 || limit > 50 {
 		limit = 10
 	}
+	feedLite := ctx.URLParamDefault("lite", "") == "1" ||
+		strings.EqualFold(strings.TrimSpace(ctx.URLParam("quality")), "low")
+	if feedLite && limit > 8 {
+		limit = 8
+	}
 	offset := (page - 1) * limit
 
-	// Get property sales that have videos
-	// More lenient filter: show property sales that are published OR have videos
+	// Get property sales that have videos (JSON array and/or property_sale_videos rows)
+	// Exclude deactivated properties - their videos must NOT appear in the feed
 	query := storage.DB.
 		Model(&models.PropertySale{}).
 		Preload("Organization").
-		Where("(status = ? OR is_published = ? OR status IS NULL) AND videos IS NOT NULL", "published", true)
+		Where("(status = ? OR is_published = ? OR status IS NULL) AND COALESCE(is_deactivated, false) = ?", "published", true, false).
+		Where(`(
+			(property_sales.videos IS NOT NULL AND property_sales.videos::text NOT IN ('[]','null',''))
+			OR EXISTS (SELECT 1 FROM property_sale_videos psv WHERE psv.property_sale_id = property_sales.id AND psv.deleted_at IS NULL)
+		)`)
 
 	if userID > 0 {
 		fmt.Printf("🔍 Property Sale Video Feed - Filtering for user ID: %d\n", userID)
@@ -182,8 +267,55 @@ func GetPropertySaleVideoFeed(ctx iris.Context) {
 		fmt.Printf("⚠️ No user authentication - showing all property sale videos\n")
 	}
 
+	// Safe filter params (sanitized, no SQL injection)
+	if city := strings.TrimSpace(ctx.URLParam("city")); city != "" {
+		query = query.Where("LOWER(property_sales.city) = LOWER(?)", city)
+	}
+	if countryID := ctx.URLParamIntDefault("country_id", 0); countryID > 0 {
+		query = query.Where("property_sales.country_id = ?", countryID)
+	}
+	if cityID := ctx.URLParamIntDefault("city_id", 0); cityID > 0 {
+		query = query.Where("property_sales.city_id = ?", cityID)
+	}
+	if quartierID := ctx.URLParamIntDefault("quartier_id", 0); quartierID > 0 {
+		query = query.Where("property_sales.quartier_id = ?", quartierID)
+	}
+	if minArea := ctx.URLParamIntDefault("min_area", 0); minArea > 0 {
+		query = query.Where("property_sales.square_footage >= ?", minArea)
+	}
+	if maxArea := ctx.URLParamIntDefault("max_area", 0); maxArea > 0 {
+		query = query.Where("property_sales.square_footage <= ?", maxArea)
+	}
+	if minPrice := ctx.URLParamFloat64Default("min_price", 0); minPrice > 0 {
+		query = query.Where("property_sales.listing_price >= ?", minPrice)
+	}
+	if maxPrice := ctx.URLParamFloat64Default("max_price", 0); maxPrice > 0 {
+		query = query.Where("property_sales.listing_price <= ?", maxPrice)
+	}
+
+	// Hybrid ranking: ~40% recent, ~40% trending, ~20% random
+	// Trending = likes + saves + comments (property_sale_video_id = property_sale.id for synthetic videos)
+	query = query.Select("property_sales.*").
+		Joins(`LEFT JOIN (
+			SELECT property_sale_video_id AS ps_id, COALESCE(COUNT(*), 0)::float AS like_cnt
+			FROM property_sale_video_likes WHERE deleted_at IS NULL GROUP BY property_sale_video_id
+		) likes ON likes.ps_id = property_sales.id`).
+		Joins(`LEFT JOIN (
+			SELECT property_sale_video_id AS ps_id, COALESCE(COUNT(*), 0)::float AS save_cnt
+			FROM property_sale_video_saves WHERE deleted_at IS NULL GROUP BY property_sale_video_id
+		) saves ON saves.ps_id = property_sales.id`).
+		Joins(`LEFT JOIN (
+			SELECT property_sale_video_id AS ps_id, COALESCE(COUNT(*), 0)::float AS comment_cnt
+			FROM property_sale_video_comments WHERE deleted_at IS NULL AND parent_id IS NULL GROUP BY property_sale_video_id
+		) comments ON comments.ps_id = property_sales.id`).
+		Order(`(
+			0.4 * GREATEST(0, 1.0 - EXTRACT(EPOCH FROM (NOW() - property_sales.created_at)) / 86400.0 / 30.0) +
+			0.4 * LEAST(1.0, (COALESCE(likes.like_cnt, 0) * 2 + COALESCE(comments.comment_cnt, 0) * 3 + COALESCE(saves.save_cnt, 0)) / 100.0) +
+			0.2 * (random() + 0.5)
+		) DESC`)
+
 	var propertySales []models.PropertySale
-	if err := query.Order("property_sales.created_at DESC").Limit(limit).Offset(offset).Find(&propertySales).Error; err != nil {
+	if err := query.Limit(limit).Offset(offset).Find(&propertySales).Error; err != nil {
 		fmt.Printf("❌ Error fetching property sales: %v\n", err)
 		ctx.StatusCode(http.StatusInternalServerError)
 		ctx.JSON(iris.Map{"error": "Failed to fetch property sales with videos"})
@@ -192,11 +324,102 @@ func GetPropertySaleVideoFeed(ctx iris.Context) {
 
 	fmt.Printf("📹 Found %d property sales with videos (before filtering empty videos)\n", len(propertySales))
 
+	propertyIDs := make([]uint, 0, len(propertySales))
+	for _, ps := range propertySales {
+		propertyIDs = append(propertyIDs, ps.ID)
+	}
+
+	// Preload canonical property_sale_videos rows in one query (avoids N+1).
+	tableVideosByProperty := map[uint][]models.PropertySaleVideo{}
+	if len(propertyIDs) > 0 {
+		var allTableVideos []models.PropertySaleVideo
+		_ = storage.DB.Where("property_sale_id IN ?", propertyIDs).Order("property_sale_id ASC, id ASC").Find(&allTableVideos).Error
+		for _, tv := range allTableVideos {
+			tableVideosByProperty[tv.PropertySaleID] = append(tableVideosByProperty[tv.PropertySaleID], tv)
+		}
+	}
+
+	type countRow struct {
+		PropertySaleVideoID uint
+		Cnt                 int64
+	}
+	likesCountByProperty := map[uint]int64{}
+	savesCountByProperty := map[uint]int64{}
+	commentsCountByProperty := map[uint]int64{}
+	if len(propertyIDs) > 0 {
+		var likeRows []countRow
+		_ = storage.DB.Model(&models.PropertySaleVideoLike{}).
+			Select("property_sale_video_id, COUNT(*) as cnt").
+			Where("property_sale_video_id IN ?", propertyIDs).
+			Group("property_sale_video_id").
+			Scan(&likeRows).Error
+		for _, r := range likeRows {
+			likesCountByProperty[r.PropertySaleVideoID] = r.Cnt
+		}
+
+		var saveRows []countRow
+		_ = storage.DB.Model(&models.PropertySaleVideoSave{}).
+			Select("property_sale_video_id, COUNT(*) as cnt").
+			Where("property_sale_video_id IN ?", propertyIDs).
+			Group("property_sale_video_id").
+			Scan(&saveRows).Error
+		for _, r := range saveRows {
+			savesCountByProperty[r.PropertySaleVideoID] = r.Cnt
+		}
+
+		var commentRows []countRow
+		_ = storage.DB.Model(&models.PropertySaleVideoComment{}).
+			Select("property_sale_video_id, COUNT(*) as cnt").
+			Where("property_sale_video_id IN ? AND parent_id IS NULL", propertyIDs).
+			Group("property_sale_video_id").
+			Scan(&commentRows).Error
+		for _, r := range commentRows {
+			commentsCountByProperty[r.PropertySaleVideoID] = r.Cnt
+		}
+	}
+
+	userLikedByProperty := map[uint]bool{}
+	userSavedByProperty := map[uint]bool{}
+	if userID > 0 && len(propertyIDs) > 0 {
+		var myLikes []models.PropertySaleVideoLike
+		_ = storage.DB.Select("property_sale_video_id").
+			Where("property_sale_video_id IN ? AND user_id = ?", propertyIDs, userID).
+			Find(&myLikes).Error
+		for _, l := range myLikes {
+			userLikedByProperty[l.PropertySaleVideoID] = true
+		}
+
+		var mySaves []models.PropertySaleVideoSave
+		_ = storage.DB.Select("property_sale_video_id").
+			Where("property_sale_video_id IN ? AND user_id = ?", propertyIDs, userID).
+			Find(&mySaves).Error
+		for _, s := range mySaves {
+			userSavedByProperty[s.PropertySaleVideoID] = true
+		}
+	}
+
 	// Convert property sales to video format
 	var videos []map[string]interface{}
 	for _, ps := range propertySales {
-		// Videos is already a []string array
-		videoURLs := ps.Videos
+		// Prefer canonical rows from property_sale_videos (exact upload URLs + thumbnails);
+		// fall back to property_sales.videos JSON for older listings.
+		tableVideos := tableVideosByProperty[ps.ID]
+
+		var videoURLs []string
+		var tableThumbs []string
+		if len(tableVideos) > 0 {
+			for _, tv := range tableVideos {
+				u := strings.TrimSpace(tv.VideoURL)
+				if u == "" {
+					continue
+				}
+				videoURLs = append(videoURLs, u)
+				tableThumbs = append(tableThumbs, strings.TrimSpace(tv.ThumbnailURL))
+			}
+		}
+		if len(videoURLs) == 0 {
+			videoURLs = ps.Videos
+		}
 
 		// Skip if no videos
 		if len(videoURLs) == 0 {
@@ -207,63 +430,11 @@ func GetPropertySaleVideoFeed(ctx iris.Context) {
 		for i, videoURL := range videoURLs {
 			videoID := fmt.Sprintf("%d_%d", ps.ID, i)
 
-			// Get counts from like/save/comment tables (synthetic videos - using propertySaleID)
-			var likesCount, savesCount, commentsCount int64
-			storage.DB.Model(&models.PropertySaleVideoLike{}).Where("property_sale_video_id = ?", ps.ID).Count(&likesCount)
-			storage.DB.Model(&models.PropertySaleVideoSave{}).Where("property_sale_video_id = ?", ps.ID).Count(&savesCount)
-			storage.DB.Model(&models.PropertySaleVideoComment{}).Where("property_sale_video_id = ? AND parent_id IS NULL", ps.ID).Count(&commentsCount)
-
-			// Get list of user IDs who liked this video (for debugging)
-			var likedByUserIDs []uint
-			if likesCount > 0 {
-				var likes []models.PropertySaleVideoLike
-				storage.DB.Where("property_sale_video_id = ?", ps.ID).Find(&likes)
-				for _, like := range likes {
-					likedByUserIDs = append(likedByUserIDs, like.UserID)
-				}
-			}
-
-			// Check if user has liked/saved this video (if authenticated)
-			var liked, saved bool
-			if userID > 0 {
-				// For synthetic videos, we'll check against the property sale ID
-				// Use First() to check existence (more reliable than Count for soft-deleted records)
-				var userLike models.PropertySaleVideoLike
-				var userSave models.PropertySaleVideoSave
-				likeErr := storage.DB.Where("property_sale_video_id = ? AND user_id = ?", ps.ID, userID).First(&userLike).Error
-				saveErr := storage.DB.Where("property_sale_video_id = ? AND user_id = ?", ps.ID, userID).First(&userSave).Error
-				liked = likeErr == nil
-				saved = saveErr == nil
-
-				// Debug logging - especially for property sale ID 10
-				if ps.ID == 10 {
-					fmt.Printf("🔍 Video %s (PropertySaleID: %d) - Checking User %d:\n", videoID, ps.ID, userID)
-					fmt.Printf("   Likes Count: %d\n", likesCount)
-					fmt.Printf("   Liked By User IDs: %v\n", likedByUserIDs)
-					fmt.Printf("   Current User ID: %d\n", userID)
-					fmt.Printf("   User Liked: %v (error: %v)\n", liked, likeErr)
-					fmt.Printf("   User Saved: %v (error: %v)\n", saved, saveErr)
-
-					// Check if current user ID is in the liked by list
-					userInLikedList := false
-					for _, likedByID := range likedByUserIDs {
-						if likedByID == userID {
-							userInLikedList = true
-							break
-						}
-					}
-					fmt.Printf("   User ID in liked list: %v\n", userInLikedList)
-					if !userInLikedList && likesCount > 0 {
-						fmt.Printf("   ⚠️ MISMATCH: User %d is NOT in liked list but count is %d!\n", userID, likesCount)
-					}
-				}
-			} else {
-				// No user authentication
-				if ps.ID == 10 && likesCount > 0 {
-					fmt.Printf("🔍 Video %s (PropertySaleID: %d) - No authenticated user, but has %d likes from users: %v\n",
-						videoID, ps.ID, likesCount, likedByUserIDs)
-				}
-			}
+			likesCount := likesCountByProperty[ps.ID]
+			savesCount := savesCountByProperty[ps.ID]
+			commentsCount := commentsCountByProperty[ps.ID]
+			liked := userLikedByProperty[ps.ID]
+			saved := userSavedByProperty[ps.ID]
 
 			// Get organization branding (handle empty organization gracefully)
 			orgLogo := ""
@@ -279,14 +450,24 @@ func GetPropertySaleVideoFeed(ctx iris.Context) {
 				orgID = ps.Organization.ID
 			}
 
+			thumb := ""
+			if i < len(tableThumbs) && tableThumbs[i] != "" {
+				thumb = tableThumbs[i]
+			}
+
+			psPayload := any(ps)
+			if feedLite {
+				psPayload = propertySaleFeedLite(ps)
+			}
+
 			video := map[string]interface{}{
 				"ID":             videoID, // Unique ID for each video
 				"propertySaleID": ps.ID,
-				"propertySale":   ps,
+				"propertySale":   psPayload,
 				"userID":         orgOwnerID,
 				"videoURL":       videoURL,
-				"thumbnailURL":   "", // Will be generated from video
-				"durationSec":    0,  // Will be calculated
+				"thumbnailURL":   thumb,
+				"durationSec":    0, // Will be calculated
 				"caption":        ps.Title,
 				"likesCount":     likesCount,
 				"commentsCount":  commentsCount,
@@ -303,12 +484,6 @@ func GetPropertySaleVideoFeed(ctx iris.Context) {
 				},
 				"CreatedAt": ps.CreatedAt,
 				"UpdatedAt": ps.UpdatedAt,
-			}
-
-			// Add debug info for property sale ID 10 (include likedByUserIDs in response for debugging)
-			if ps.ID == 10 {
-				video["debugLikedByUserIDs"] = likedByUserIDs
-				video["debugCurrentUserID"] = userID
 			}
 
 			videos = append(videos, video)
@@ -500,13 +675,7 @@ func UnsavePropertySaleVideo(ctx iris.Context) {
 
 // GetPropertySaleVideoComments gets comments for a property sale video with nested replies
 func GetPropertySaleVideoComments(ctx iris.Context) {
-	// Get user ID if authenticated (optional)
-	var userID uint = 0
-	if claims := jsonWT.Get(ctx); claims != nil {
-		if accessToken, ok := claims.(*utils.AccessToken); ok {
-			userID = accessToken.ID
-		}
-	}
+	userID := OptionalAuthUserID(ctx)
 
 	videoID, err := ctx.Params().GetUint("id")
 	if err != nil {
@@ -821,6 +990,17 @@ func UnlikePropertySaleVideoComment(ctx iris.Context) {
 	}
 }
 
+// hostSaleVideoDisplayViews picks the best available stored view count (avoid double-counting).
+func hostSaleVideoDisplayViews(counts ...int64) int64 {
+	var max int64
+	for _, c := range counts {
+		if c > max {
+			max = c
+		}
+	}
+	return max
+}
+
 // GetPropertySaleVideosByOrganizationOrHost returns property sale videos with stats for admin interface
 // Supports filtering by organization_id or owner_id (for individual hosts)
 func GetPropertySaleVideosByOrganizationOrHost(ctx iris.Context) {
@@ -876,7 +1056,7 @@ func GetPropertySaleVideosByOrganizationOrHost(ctx iris.Context) {
 		return
 	}
 
-	// Extract videos with stats
+	// Extract videos with stats (batched — same keys as the public video feed)
 	type VideoStats struct {
 		PropertySaleID   uint   `json:"propertySaleID"`
 		PropertyTitle    string `json:"propertyTitle"`
@@ -891,48 +1071,117 @@ func GetPropertySaleVideosByOrganizationOrHost(ctx iris.Context) {
 		CreatedAt        string `json:"createdAt"`
 	}
 
+	propertyIDs := make([]uint, 0, len(propertySales))
+	for _, ps := range propertySales {
+		propertyIDs = append(propertyIDs, ps.ID)
+	}
+
+	type countRow struct {
+		PropertySaleVideoID uint
+		Cnt                 int64
+	}
+	likesByProperty := map[uint]int64{}
+	savesByProperty := map[uint]int64{}
+	commentsByProperty := map[uint]int64{}
+	videoViewsByProperty := map[uint]int64{}
+
+	if len(propertyIDs) > 0 {
+		var likeRows []countRow
+		_ = storage.DB.Model(&models.PropertySaleVideoLike{}).
+			Select("property_sale_video_id, COUNT(*) as cnt").
+			Where("property_sale_video_id IN ?", propertyIDs).
+			Group("property_sale_video_id").
+			Scan(&likeRows).Error
+		for _, r := range likeRows {
+			likesByProperty[r.PropertySaleVideoID] = r.Cnt
+		}
+
+		var saveRows []countRow
+		_ = storage.DB.Model(&models.PropertySaleVideoSave{}).
+			Select("property_sale_video_id, COUNT(*) as cnt").
+			Where("property_sale_video_id IN ?", propertyIDs).
+			Group("property_sale_video_id").
+			Scan(&saveRows).Error
+		for _, r := range saveRows {
+			savesByProperty[r.PropertySaleVideoID] = r.Cnt
+		}
+
+		var commentRows []countRow
+		_ = storage.DB.Model(&models.PropertySaleVideoComment{}).
+			Select("property_sale_video_id, COUNT(*) as cnt").
+			Where("property_sale_video_id IN ? AND parent_id IS NULL", propertyIDs).
+			Group("property_sale_video_id").
+			Scan(&commentRows).Error
+		for _, r := range commentRows {
+			commentsByProperty[r.PropertySaleVideoID] = r.Cnt
+		}
+
+		var interactionViewRows []countRow
+		_ = storage.DB.Model(&models.Interaction{}).
+			Select("property_sale_id as property_sale_video_id, COUNT(*) as cnt").
+			Where("property_sale_id IN ? AND event_type = ?", propertyIDs, models.EventVideoView).
+			Group("property_sale_id").
+			Scan(&interactionViewRows).Error
+		for _, r := range interactionViewRows {
+			videoViewsByProperty[r.PropertySaleVideoID] = r.Cnt
+		}
+	}
+
+	tableVideosByProperty := map[uint][]models.PropertySaleVideo{}
+	if len(propertyIDs) > 0 {
+		var allTableVideos []models.PropertySaleVideo
+		_ = storage.DB.Where("property_sale_id IN ?", propertyIDs).
+			Order("property_sale_id ASC, id ASC").
+			Find(&allTableVideos).Error
+		for _, tv := range allTableVideos {
+			tableVideosByProperty[tv.PropertySaleID] = append(tableVideosByProperty[tv.PropertySaleID], tv)
+		}
+	}
+
 	var videos []VideoStats
 
 	for _, ps := range propertySales {
-		// Videos is already a []string array (not JSON)
-		videoURLs := ps.Videos
-
-		// Skip if no videos
+		tableVideos := tableVideosByProperty[ps.ID]
+		var videoURLs []string
+		var tableThumbs []string
+		if len(tableVideos) > 0 {
+			for _, tv := range tableVideos {
+				u := strings.TrimSpace(tv.VideoURL)
+				if u == "" {
+					continue
+				}
+				videoURLs = append(videoURLs, u)
+				tableThumbs = append(tableThumbs, strings.TrimSpace(tv.ThumbnailURL))
+			}
+		}
+		if len(videoURLs) == 0 {
+			videoURLs = ps.Videos
+		}
 		if len(videoURLs) == 0 {
 			continue
 		}
 
-		// Get actual counts from database using property sale ID
-		// Note: PropertySaleVideoLike uses PropertySaleVideoID which is the property sale ID
-		var likesCount int64
-		storage.DB.Model(&models.PropertySaleVideoLike{}).
-			Where("property_sale_video_id = ?", ps.ID).
-			Count(&likesCount)
+		likesCount := likesByProperty[ps.ID]
+		commentsCount := commentsByProperty[ps.ID]
+		savesCount := savesByProperty[ps.ID]
+		listingViews := hostSaleVideoDisplayViews(ps.ViewCount, videoViewsByProperty[ps.ID])
 
-		var commentsCount int64
-		storage.DB.Model(&models.PropertySaleVideoComment{}).
-			Where("property_sale_video_id = ?", ps.ID).
-			Count(&commentsCount)
-
-		var savesCount int64
-		storage.DB.Model(&models.PropertySaleVideoSave{}).
-			Where("property_sale_video_id = ?", ps.ID).
-			Count(&savesCount)
-
-		// Get view count - views are not tracked in a separate table yet
-		// For now, we'll set it to 0 (can be extended later when view tracking is implemented)
-		var viewCount int64 = 0
-
-		// Create a video entry for each video URL
-		for _, videoURL := range videoURLs {
-			// Try to extract thumbnail from video URL or use a placeholder
-			thumbnailURL := videoURL // For now, use video URL as thumbnail (can be enhanced later)
+		for i, videoURL := range videoURLs {
+			thumb := videoURL
+			if i < len(tableThumbs) && tableThumbs[i] != "" {
+				thumb = tableThumbs[i]
+			}
+			rowViews := int64(0)
+			if i < len(tableVideos) {
+				rowViews = tableVideos[i].ViewCount
+			}
+			viewCount := hostSaleVideoDisplayViews(listingViews, rowViews)
 
 			video := VideoStats{
 				PropertySaleID: ps.ID,
 				PropertyTitle:  ps.Title,
 				VideoURL:       videoURL,
-				ThumbnailURL:   thumbnailURL,
+				ThumbnailURL:   thumb,
 				LikesCount:     likesCount,
 				CommentsCount:  commentsCount,
 				SavesCount:     savesCount,
@@ -944,10 +1193,9 @@ func GetPropertySaleVideosByOrganizationOrHost(ctx iris.Context) {
 				video.OrganizationName = ps.Organization.Name
 			}
 			if ps.Owner != nil {
-				// Combine FirstName and LastName
 				ownerName := strings.TrimSpace(fmt.Sprintf("%s %s", ps.Owner.FirstName, ps.Owner.LastName))
 				if ownerName == "" {
-					ownerName = ps.Owner.Email // Fallback to email if no name
+					ownerName = ps.Owner.Email
 				}
 				video.OwnerName = ownerName
 			}

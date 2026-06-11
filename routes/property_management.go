@@ -194,10 +194,10 @@ func MarkPropertySaleAsSold(ctx iris.Context) {
 		return
 	}
 
-	// Mark as sold and deactivate
+	// Mark as sold (do NOT auto-deactivate).
+	// This allows sold listings to remain visible for social-proof/traction UI.
 	storage.DB.Model(&property).Updates(map[string]interface{}{
 		"is_sold":        true,
-		"is_deactivated": true,
 		"status":         "sold",
 	})
 	log.Printf("✅ Property %d marked as sold by user %d", propertyID, userID)

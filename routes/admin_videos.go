@@ -2,9 +2,13 @@ package routes
 
 import (
 	"apartments-clone-server/models"
+	"apartments-clone-server/services"
 	"apartments-clone-server/storage"
 	"apartments-clone-server/utils"
+	"context"
 	"net/http"
+	"net/url"
+	"strings"
 
 	"github.com/kataras/iris/v12"
 	jsonWT "github.com/kataras/iris/v12/middleware/jwt"
@@ -19,6 +23,7 @@ func AdminListVideos(ctx iris.Context) {
 	}
 	status := ctx.URLParamDefault("status", "")
 	isFlagged := ctx.URLParamDefault("is_flagged", "")
+	isPromotional := ctx.URLParamDefault("is_promotional", "")
 	propertyID := ctx.URLParamDefault("property_id", "")
 	uploaderID := ctx.URLParamDefault("uploader_id", "")
 	sort := ctx.URLParamDefault("sort", "newest")
@@ -26,6 +31,11 @@ func AdminListVideos(ctx iris.Context) {
 	q := storage.DB.Model(&models.Video{})
 	if status != "" {
 		q = q.Where("status = ?", status)
+	}
+	if isPromotional == "true" {
+		q = q.Where("COALESCE(is_promotional, false) = ?", true)
+	} else if isPromotional == "false" {
+		q = q.Where("COALESCE(is_promotional, false) = ?", false)
 	}
 	if isFlagged == "true" {
 		q = q.Where("is_flagged = true")
@@ -51,7 +61,7 @@ func AdminListVideos(ctx iris.Context) {
 	var total int64
 	q.Count(&total)
 	var items []models.Video
-	if err := q.Offset((page - 1) * perPage).Limit(perPage).Find(&items).Error; err != nil {
+	if err := q.Preload("Property").Preload("User").Offset((page - 1) * perPage).Limit(perPage).Find(&items).Error; err != nil {
 		utils.JSONError(ctx, http.StatusInternalServerError, "server_error", err.Error())
 		return
 	}
@@ -98,6 +108,13 @@ func AdminUpdateVideoStatus(ctx iris.Context) {
 		utils.JSONError(ctx, http.StatusInternalServerError, "server_error", err.Error())
 		return
 	}
+	go func() {
+		bgCtx := context.Background()
+		cacheConfig := services.DefaultCacheConfig()
+		cacheService := services.NewCacheService(storage.Redis)
+		videoFeedCache := services.NewVideoFeedCacheService(cacheService, cacheConfig)
+		_ = videoFeedCache.InvalidateVideoFeed(bgCtx)
+	}()
 	utils.Audit(ctx, "video.status_update", "video", v.ID, before, v)
 	ctx.JSON(iris.Map{"data": v})
 }
@@ -128,6 +145,13 @@ func AdminForceUnpublishVideo(ctx iris.Context) {
 		utils.JSONError(ctx, http.StatusInternalServerError, "server_error", err.Error())
 		return
 	}
+	go func() {
+		bgCtx := context.Background()
+		cacheConfig := services.DefaultCacheConfig()
+		cacheService := services.NewCacheService(storage.Redis)
+		videoFeedCache := services.NewVideoFeedCacheService(cacheService, cacheConfig)
+		_ = videoFeedCache.InvalidateVideoFeed(bgCtx)
+	}()
 	utils.Audit(ctx, "video.force_unpublish", "video", v.ID, before, v)
 	ctx.JSON(iris.Map{"data": v})
 }
@@ -179,34 +203,55 @@ func AdminDeleteVideoComment(ctx iris.Context) {
 
 // POST /admin/videos/promotional - Create promotional video (app demo, tutorial, etc.)
 func AdminCreatePromotionalVideo(ctx iris.Context) {
-	claims := jsonWT.Get(ctx)
-	if claims == nil {
-		utils.JSONError(ctx, http.StatusUnauthorized, "unauthorized", "authentication required")
-		return
-	}
-	
 	var input struct {
-		VideoURL     string  `json:"videoURL" validate:"required,url"`
-		ThumbnailURL string  `json:"thumbnailURL"`
-		DurationSec  float64 `json:"durationSec"`
+		VideoURL      string  `json:"videoURL"`
+		VideoURLSnake string  `json:"video_url"`
+		ThumbnailURL  string  `json:"thumbnailURL"`
+		DurationSec   float64 `json:"durationSec"`
 		Title         string  `json:"title" validate:"required"`
 		Description   string  `json:"description"`
 		Caption       string  `json:"caption"`
 		PropertyID    *uint   `json:"propertyID"` // Optional - can be null for promotional videos
 	}
-	
+
 	if err := ctx.ReadJSON(&input); err != nil {
 		utils.JSONError(ctx, http.StatusBadRequest, "invalid_payload", err.Error())
 		return
 	}
-	
-	// Get admin user ID from token
-	accessToken, ok := claims.(*utils.AccessToken)
-	if !ok {
-		utils.JSONError(ctx, http.StatusUnauthorized, "unauthorized", "invalid token")
+
+	videoURL := strings.TrimSpace(input.VideoURL)
+	if videoURL == "" {
+		videoURL = strings.TrimSpace(input.VideoURLSnake)
+	}
+	if videoURL == "" {
+		utils.JSONError(ctx, http.StatusBadRequest, "invalid_payload", "videoURL is required")
 		return
 	}
-	adminUserID := accessToken.ID
+	parsed, err := url.ParseRequestURI(videoURL)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+		utils.JSONError(ctx, http.StatusBadRequest, "invalid_payload", "videoURL must be a valid http(s) URL")
+		return
+	}
+	input.Title = strings.TrimSpace(input.Title)
+	if input.Title == "" {
+		utils.JSONError(ctx, http.StatusBadRequest, "invalid_payload", "title is required")
+		return
+	}
+	
+	// Read user id from middleware context (set by accessTokenVerifierMiddleware/AdminOnlyMiddleware).
+	adminUserID, ok := ctx.Values().Get("userID").(uint)
+	if !ok || adminUserID == 0 {
+		// Backward-compatible fallback for routes wired with JWT middleware.
+		if claims := jsonWT.Get(ctx); claims != nil {
+			if accessToken, tokenOK := claims.(*utils.AccessToken); tokenOK && accessToken.ID > 0 {
+				adminUserID = accessToken.ID
+			}
+		}
+	}
+	if adminUserID == 0 {
+		utils.JSONError(ctx, http.StatusUnauthorized, "unauthorized", "authentication required")
+		return
+	}
 	
 	// If PropertyID is provided, verify it exists
 	if input.PropertyID != nil && *input.PropertyID > 0 {
@@ -227,7 +272,7 @@ func AdminCreatePromotionalVideo(ctx iris.Context) {
 	video := models.Video{
 		UserID:        adminUserID,
 		PropertyID:    propertyID, // nil for promotional videos
-		VideoURL:      input.VideoURL,
+		VideoURL:      videoURL,
 		ThumbnailURL:  input.ThumbnailURL,
 		DurationSec:   input.DurationSec,
 		Caption:       input.Caption,
@@ -291,22 +336,34 @@ func AdminUpdatePromotionalVideo(ctx iris.Context) {
 	}
 	
 	var body struct {
-		VideoURL     *string `json:"videoURL"`
-		ThumbnailURL *string `json:"thumbnailURL"`
-		Title        *string `json:"title"`
-		Description  *string `json:"description"`
-		Caption      *string `json:"caption"`
-		Status       *string `json:"status"`
+		VideoURL      *string `json:"videoURL"`
+		VideoURLSnake *string `json:"video_url"`
+		ThumbnailURL  *string `json:"thumbnailURL"`
+		Title         *string `json:"title"`
+		Description   *string `json:"description"`
+		Caption       *string `json:"caption"`
+		Status        *string `json:"status"`
 	}
-	
+
 	if err := ctx.ReadJSON(&body); err != nil {
 		utils.JSONError(ctx, http.StatusUnprocessableEntity, "invalid_payload", err.Error())
 		return
 	}
-	
+
 	before := v
-	if body.VideoURL != nil {
-		v.VideoURL = *body.VideoURL
+	nextURL := ""
+	if body.VideoURL != nil && strings.TrimSpace(*body.VideoURL) != "" {
+		nextURL = strings.TrimSpace(*body.VideoURL)
+	} else if body.VideoURLSnake != nil && strings.TrimSpace(*body.VideoURLSnake) != "" {
+		nextURL = strings.TrimSpace(*body.VideoURLSnake)
+	}
+	if nextURL != "" {
+		parsed, err := url.ParseRequestURI(nextURL)
+		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+			utils.JSONError(ctx, http.StatusBadRequest, "invalid_payload", "videoURL must be a valid http(s) URL")
+			return
+		}
+		v.VideoURL = nextURL
 	}
 	if body.ThumbnailURL != nil {
 		v.ThumbnailURL = *body.ThumbnailURL
@@ -328,7 +385,15 @@ func AdminUpdatePromotionalVideo(ctx iris.Context) {
 		utils.JSONError(ctx, http.StatusInternalServerError, "server_error", err.Error())
 		return
 	}
-	
+
+	go func() {
+		bgCtx := context.Background()
+		cacheConfig := services.DefaultCacheConfig()
+		cacheService := services.NewCacheService(storage.Redis)
+		videoFeedCache := services.NewVideoFeedCacheService(cacheService, cacheConfig)
+		_ = videoFeedCache.InvalidateVideoFeed(bgCtx)
+	}()
+
 	utils.Audit(ctx, "promotional_video.update", "video", v.ID, before, v)
 	ctx.JSON(iris.Map{"success": true, "data": v})
 }
@@ -357,7 +422,15 @@ func AdminDeletePromotionalVideo(ctx iris.Context) {
 		utils.JSONError(ctx, http.StatusInternalServerError, "server_error", err.Error())
 		return
 	}
-	
+
+	go func() {
+		bgCtx := context.Background()
+		cacheConfig := services.DefaultCacheConfig()
+		cacheService := services.NewCacheService(storage.Redis)
+		videoFeedCache := services.NewVideoFeedCacheService(cacheService, cacheConfig)
+		_ = videoFeedCache.InvalidateVideoFeed(bgCtx)
+	}()
+
 	utils.Audit(ctx, "promotional_video.delete", "video", before.ID, before, nil)
 	ctx.StatusCode(http.StatusNoContent)
 }
