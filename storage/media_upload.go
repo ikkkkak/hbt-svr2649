@@ -2,7 +2,6 @@ package storage
 
 import (
 	"context"
-	"strings"
 	"time"
 
 	"apartments-clone-server/services/mediaoptimize"
@@ -10,10 +9,11 @@ import (
 
 // UploadLocalFileOptimized compresses then uploads. Videos use the fast upload profile.
 func UploadLocalFileOptimized(localPath, publicID, contentType string) map[string]string {
-	if strings.HasPrefix(strings.ToLower(contentType), "video/") {
-		return uploadLocalVideoFast(localPath, publicID, contentType)
+	mime := ResolveContentType(localPath, contentType)
+	if IsVideoMedia(localPath, mime) {
+		return uploadLocalVideoFast(localPath, publicID, mime)
 	}
-	return uploadLocalImageOptimized(localPath, publicID, contentType)
+	return uploadLocalImageOptimized(localPath, publicID, mime)
 }
 
 func uploadLocalImageOptimized(localPath, publicID, contentType string) map[string]string {

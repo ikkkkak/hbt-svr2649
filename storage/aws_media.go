@@ -167,7 +167,7 @@ func uploadBase64ToAWS(base64Src, publicID, contentType, folderHint string) map[
 		return emptyURL()
 	}
 	key := mediaObjectKey(publicID, folderHint)
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), UploadTimeoutForBytes(int64(len(data))))
 	defer cancel()
 	cc := MediaCacheControl(contentType)
 	putInput := &s3.PutObjectInput{
@@ -258,6 +258,10 @@ func awsObjectKeyFromURL(mediaURL, bucket string) string {
 		doPrefix := fmt.Sprintf("https://%s.%s.digitaloceanspaces.com/", bucket, region)
 		if strings.HasPrefix(u, doPrefix) {
 			return strings.TrimPrefix(u, doPrefix)
+		}
+		cdnPrefix := fmt.Sprintf("https://%s.%s.cdn.digitaloceanspaces.com/", bucket, region)
+		if strings.HasPrefix(u, cdnPrefix) {
+			return strings.TrimPrefix(u, cdnPrefix)
 		}
 	}
 

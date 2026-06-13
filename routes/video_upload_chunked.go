@@ -23,8 +23,10 @@ type chunkSession struct {
 	ID          string
 	UserID      uint
 	Mime        string
+	TotalSize   int64
 	TotalChunks int
 	Received    map[int]bool
+	ChunkSizes  map[int]int
 	TempDir     string
 	CreatedAt   time.Time
 }
@@ -47,9 +49,22 @@ func InitChunkUpload(ctx iris.Context) {
 		TotalChunks int    `json:"totalChunks"`
 	}
 	if err := ctx.ReadJSON(&in); err != nil || in.TotalChunks < 1 || in.TotalChunks > 5000 {
-		ctx.StopWithStatus(http.StatusBadRequest)
+		ctx.StopWithJSON(http.StatusBadRequest, iris.Map{"error": "invalid upload metadata"})
 		return
 	}
+	if in.TotalSize <= 0 {
+		ctx.StopWithJSON(http.StatusBadRequest, iris.Map{"error": "totalSize required"})
+		return
+	}
+	mime := strings.TrimSpace(in.Mime)
+	if mime == "" {
+		mime = "video/mp4"
+	}
+	if !strings.HasPrefix(strings.ToLower(mime), "video/") {
+		ctx.StopWithJSON(http.StatusBadRequest, iris.Map{"error": "only video uploads are supported via chunked endpoint"})
+		return
+	}
+
 	b := make([]byte, 8)
 	_, _ = rand.Read(b)
 	id := hex.EncodeToString(b)
@@ -60,12 +75,13 @@ func InitChunkUpload(ctx iris.Context) {
 	}
 	chunkMu.Lock()
 	chunkSess[id] = &chunkSession{
-		ID: id, UserID: userID, Mime: in.Mime,
-		TotalChunks: in.TotalChunks, Received: make(map[int]bool),
+		ID: id, UserID: userID, Mime: mime,
+		TotalSize: in.TotalSize, TotalChunks: in.TotalChunks,
+		Received: make(map[int]bool), ChunkSizes: make(map[int]int),
 		TempDir: dir, CreatedAt: time.Now(),
 	}
 	chunkMu.Unlock()
-	log.Printf("📦 chunk upload init user=%d id=%s chunks=%d size=%d", userID, id, in.TotalChunks, in.TotalSize)
+	log.Printf("📦 chunk upload init user=%d id=%s chunks=%d size=%d mime=%s", userID, id, in.TotalChunks, in.TotalSize, mime)
 	ctx.JSON(iris.Map{
 		"success":     true,
 		"uploadId":    id,
@@ -93,11 +109,52 @@ func UploadVideoChunk(ctx iris.Context) {
 		ctx.StopWithStatus(http.StatusNotFound)
 		return
 	}
-	body, err := io.ReadAll(io.LimitReader(ctx.Request().Body, maxChunkBytes+1))
-	if err != nil || len(body) > maxChunkBytes {
-		ctx.StopWithStatus(http.StatusBadRequest)
+	if index >= sess.TotalChunks {
+		ctx.StopWithJSON(http.StatusBadRequest, iris.Map{"error": "chunk index out of range"})
 		return
 	}
+
+	body, err := io.ReadAll(io.LimitReader(ctx.Request().Body, maxChunkBytes+1))
+	if err != nil {
+		ctx.StopWithJSON(http.StatusBadRequest, iris.Map{"error": "failed to read chunk"})
+		return
+	}
+	if len(body) == 0 {
+		ctx.StopWithJSON(http.StatusBadRequest, iris.Map{"error": "empty chunk"})
+		return
+	}
+	if len(body) > maxChunkBytes {
+		ctx.StopWithJSON(http.StatusBadRequest, iris.Map{"error": "chunk too large"})
+		return
+	}
+
+	// Last chunk may be smaller; others must be full size when file is large enough.
+	expected := maxChunkBytes
+	if index == sess.TotalChunks-1 {
+		remainder := int(sess.TotalSize % int64(maxChunkBytes))
+		if remainder > 0 {
+			expected = remainder
+		}
+	}
+	if sess.TotalSize >= int64(maxChunkBytes) && index < sess.TotalChunks-1 && len(body) != maxChunkBytes {
+		ctx.StopWithJSON(http.StatusBadRequest, iris.Map{
+			"error":    "incomplete chunk payload",
+			"expected": maxChunkBytes,
+			"got":      len(body),
+			"index":    index,
+		})
+		return
+	}
+	if index == sess.TotalChunks-1 && len(body) != expected {
+		ctx.StopWithJSON(http.StatusBadRequest, iris.Map{
+			"error":    "final chunk size mismatch",
+			"expected": expected,
+			"got":      len(body),
+			"index":    index,
+		})
+		return
+	}
+
 	path := filepath.Join(sess.TempDir, fmt.Sprintf("part_%05d", index))
 	if err := os.WriteFile(path, body, 0644); err != nil {
 		ctx.StopWithStatus(http.StatusInternalServerError)
@@ -105,10 +162,11 @@ func UploadVideoChunk(ctx iris.Context) {
 	}
 	chunkMu.Lock()
 	sess.Received[index] = true
+	sess.ChunkSizes[index] = len(body)
 	received := len(sess.Received)
 	total := sess.TotalChunks
 	chunkMu.Unlock()
-	ctx.JSON(iris.Map{"success": true, "index": index, "received": received, "total": total})
+	ctx.JSON(iris.Map{"success": true, "index": index, "received": received, "total": total, "bytes": len(body)})
 }
 
 func CompleteChunkUpload(ctx iris.Context) {
@@ -131,9 +189,18 @@ func CompleteChunkUpload(ctx iris.Context) {
 	defer os.RemoveAll(sess.TempDir)
 
 	if len(sess.Received) != sess.TotalChunks {
-		ctx.StopWithStatus(http.StatusBadRequest)
-		ctx.JSON(iris.Map{"error": "missing chunks"})
+		ctx.StopWithJSON(http.StatusBadRequest, iris.Map{
+			"error":     "missing chunks",
+			"received":  len(sess.Received),
+			"expected":  sess.TotalChunks,
+		})
 		return
+	}
+	for i := 0; i < sess.TotalChunks; i++ {
+		if !sess.Received[i] {
+			ctx.StopWithJSON(http.StatusBadRequest, iris.Map{"error": "missing chunk", "index": i})
+			return
+		}
 	}
 
 	merged := filepath.Join(sess.TempDir, "merged.mp4")
@@ -142,29 +209,52 @@ func CompleteChunkUpload(ctx iris.Context) {
 		ctx.StopWithStatus(http.StatusInternalServerError)
 		return
 	}
+	var mergedBytes int64
 	for i := 0; i < sess.TotalChunks; i++ {
 		part := filepath.Join(sess.TempDir, fmt.Sprintf("part_%05d", i))
 		f, err := os.Open(part)
 		if err != nil {
 			out.Close()
-			ctx.StopWithStatus(http.StatusBadRequest)
+			ctx.StopWithJSON(http.StatusBadRequest, iris.Map{"error": "missing chunk file", "index": i})
 			return
 		}
-		_, _ = io.Copy(out, f)
+		n, err := io.Copy(out, f)
 		f.Close()
+		if err != nil {
+			out.Close()
+			ctx.StopWithStatus(http.StatusInternalServerError)
+			return
+		}
+		mergedBytes += n
 	}
 	out.Close()
+
+	if sess.TotalSize > 0 && mergedBytes != sess.TotalSize {
+		log.Printf("⚠️ chunk merge size mismatch id=%s expected=%d merged=%d", uploadID, sess.TotalSize, mergedBytes)
+		ctx.StopWithJSON(http.StatusBadRequest, iris.Map{
+			"error":    "merged file size mismatch",
+			"expected": sess.TotalSize,
+			"merged":   mergedBytes,
+		})
+		return
+	}
 
 	mime := sess.Mime
 	if mime == "" {
 		mime = "video/mp4"
 	}
-	res := storage.UploadLocalFileOptimized(merged, fmt.Sprintf("chunk_upload_%s", uploadID), mime)
+	publicID := fmt.Sprintf("chunk_upload_%s", uploadID)
+	res := storage.UploadLocalFileOptimized(merged, publicID, mime)
 	url := res["url"]
 	if url == "" {
-		ctx.StopWithJSON(http.StatusBadRequest, iris.Map{"error": res["error"]})
+		msg := res["error"]
+		if msg == "" {
+			msg = "cdn upload failed"
+		}
+		log.Printf("❌ chunk upload CDN failed user=%d id=%s: %s", userID, uploadID, msg)
+		ctx.StopWithJSON(http.StatusBadRequest, iris.Map{"error": msg})
 		return
 	}
-	log.Printf("✅ chunk upload complete user=%d id=%s → %s", userID, uploadID, url)
-	ctx.JSON(iris.Map{"success": true, "url": url})
+	log.Printf("✅ chunk upload complete user=%d id=%s bytes=%d → %s", userID, uploadID, mergedBytes, url)
+	ctx.JSON(iris.Map{"success": true, "url": url, "bytes": mergedBytes})
 }
