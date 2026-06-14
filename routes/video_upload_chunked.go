@@ -25,6 +25,7 @@ type chunkSession struct {
 	Mime        string
 	TotalSize   int64
 	TotalChunks int
+	ChunkSize   int
 	Received    map[int]bool
 	ChunkSizes  map[int]int
 	TempDir     string
@@ -47,6 +48,7 @@ func InitChunkUpload(ctx iris.Context) {
 		Mime        string `json:"mime"`
 		TotalSize   int64  `json:"totalSize"`
 		TotalChunks int    `json:"totalChunks"`
+		ChunkSize   int    `json:"chunkSize"`
 	}
 	if err := ctx.ReadJSON(&in); err != nil || in.TotalChunks < 1 || in.TotalChunks > 5000 {
 		ctx.StopWithJSON(http.StatusBadRequest, iris.Map{"error": "invalid upload metadata"})
@@ -65,6 +67,20 @@ func InitChunkUpload(ctx iris.Context) {
 		return
 	}
 
+	chunkSize := in.ChunkSize
+	if chunkSize <= 0 || chunkSize > maxChunkBytes {
+		chunkSize = maxChunkBytes
+	}
+	expectedChunks := int((in.TotalSize + int64(chunkSize) - 1) / int64(chunkSize))
+	if in.TotalChunks != expectedChunks {
+		ctx.StopWithJSON(http.StatusBadRequest, iris.Map{
+			"error":           "totalChunks does not match totalSize/chunkSize",
+			"expectedChunks":  expectedChunks,
+			"receivedChunks":  in.TotalChunks,
+		})
+		return
+	}
+
 	b := make([]byte, 8)
 	_, _ = rand.Read(b)
 	id := hex.EncodeToString(b)
@@ -76,18 +92,32 @@ func InitChunkUpload(ctx iris.Context) {
 	chunkMu.Lock()
 	chunkSess[id] = &chunkSession{
 		ID: id, UserID: userID, Mime: mime,
-		TotalSize: in.TotalSize, TotalChunks: in.TotalChunks,
+		TotalSize: in.TotalSize, TotalChunks: in.TotalChunks, ChunkSize: chunkSize,
 		Received: make(map[int]bool), ChunkSizes: make(map[int]int),
 		TempDir: dir, CreatedAt: time.Now(),
 	}
 	chunkMu.Unlock()
-	log.Printf("📦 chunk upload init user=%d id=%s chunks=%d size=%d mime=%s", userID, id, in.TotalChunks, in.TotalSize, mime)
+	log.Printf("📦 chunk upload init user=%d id=%s chunks=%d chunkSize=%d size=%d mime=%s", userID, id, in.TotalChunks, chunkSize, in.TotalSize, mime)
 	ctx.JSON(iris.Map{
 		"success":     true,
 		"uploadId":    id,
-		"chunkSize":   maxChunkBytes,
+		"chunkSize":   chunkSize,
 		"totalChunks": in.TotalChunks,
 	})
+}
+
+func expectedChunkPayloadSize(sess *chunkSession, index int) int {
+	if index < 0 || index >= sess.TotalChunks {
+		return 0
+	}
+	if index == sess.TotalChunks-1 {
+		remainder := int(sess.TotalSize % int64(sess.ChunkSize))
+		if remainder > 0 {
+			return remainder
+		}
+		return sess.ChunkSize
+	}
+	return sess.ChunkSize
 }
 
 func UploadVideoChunk(ctx iris.Context) {
@@ -128,26 +158,14 @@ func UploadVideoChunk(ctx iris.Context) {
 		return
 	}
 
-	// Last chunk may be smaller; others must be full size when file is large enough.
-	expected := maxChunkBytes
-	if index == sess.TotalChunks-1 {
-		remainder := int(sess.TotalSize % int64(maxChunkBytes))
-		if remainder > 0 {
-			expected = remainder
-		}
-	}
-	if sess.TotalSize >= int64(maxChunkBytes) && index < sess.TotalChunks-1 && len(body) != maxChunkBytes {
-		ctx.StopWithJSON(http.StatusBadRequest, iris.Map{
-			"error":    "incomplete chunk payload",
-			"expected": maxChunkBytes,
-			"got":      len(body),
-			"index":    index,
-		})
+	expected := expectedChunkPayloadSize(sess, index)
+	if expected <= 0 {
+		ctx.StopWithJSON(http.StatusBadRequest, iris.Map{"error": "invalid chunk index"})
 		return
 	}
-	if index == sess.TotalChunks-1 && len(body) != expected {
+	if len(body) != expected {
 		ctx.StopWithJSON(http.StatusBadRequest, iris.Map{
-			"error":    "final chunk size mismatch",
+			"error":    "chunk size mismatch",
 			"expected": expected,
 			"got":      len(body),
 			"index":    index,
@@ -239,12 +257,18 @@ func CompleteChunkUpload(ctx iris.Context) {
 		return
 	}
 
+	if err := storage.ValidateMP4Container(merged); err != nil {
+		log.Printf("❌ chunk upload invalid container id=%s: %v", uploadID, err)
+		ctx.StopWithJSON(http.StatusBadRequest, iris.Map{"error": "invalid or corrupted video file"})
+		return
+	}
+
 	mime := sess.Mime
 	if mime == "" {
 		mime = "video/mp4"
 	}
-	publicID := fmt.Sprintf("chunk_upload_%s", uploadID)
-	res := storage.UploadLocalFileOptimized(merged, publicID, mime)
+	publicID := fmt.Sprintf("chunk_upload_%s.mp4", uploadID)
+	res := storage.UploadLocalVideoPreserve(merged, publicID, mime)
 	url := res["url"]
 	if url == "" {
 		msg := res["error"]

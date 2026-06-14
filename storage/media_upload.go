@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"apartments-clone-server/services/mediaoptimize"
@@ -68,4 +69,17 @@ func UploadBase64VideoOptimized(base64VideoSrc, publicID, mime string) map[strin
 		mime = "video/mp4"
 	}
 	return uploadLocalVideoFast(path, publicID, mime)
+}
+
+// UploadLocalVideoPreserve streams a merged upload to CDN without FFmpeg re-encoding (byte-perfect).
+func UploadLocalVideoPreserve(localPath, publicID, contentType string) map[string]string {
+	mime := ResolveContentType(localPath, contentType)
+	if mime == "" {
+		mime = "video/mp4"
+	}
+	pid := strings.TrimSpace(publicID)
+	if pid != "" && !strings.HasSuffix(strings.ToLower(pid), ".mp4") {
+		pid = pid + ".mp4"
+	}
+	return UploadLocalFile(localPath, pid, mime)
 }
