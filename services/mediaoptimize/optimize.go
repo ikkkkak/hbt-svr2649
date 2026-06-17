@@ -3,6 +3,7 @@ package mediaoptimize
 import (
 	"context"
 	"encoding/base64"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -29,18 +30,20 @@ func OptimizeLocalFile(ctx context.Context, inputPath, contentType string) (Resu
 func WriteBase64ToTemp(dataURL, hintExt string) (path string, cleanup func(), err error) {
 	raw := dataURL
 	mime := ""
-	if i := strings.Index(dataURL, ","); i >= 0 && strings.HasPrefix(dataURL, "data:") {
-		mime = strings.TrimPrefix(dataURL[:i], "data:")
-		mime = strings.Split(mime, ";")[0]
-		raw = dataURL[i+1:]
+	if strings.HasPrefix(dataURL, "data:") {
+		if i := strings.Index(dataURL, ","); i >= 0 {
+			mime = strings.TrimPrefix(dataURL[:i], "data:")
+			mime = strings.Split(mime, ";")[0]
+			raw = dataURL[i+1:]
+		}
 	}
-	b, err := base64.StdEncoding.DecodeString(raw)
+	b, err := decodeBase64Payload(raw)
 	if err != nil {
 		return "", nil, err
 	}
 	ext := hintExt
 	if ext == "" {
-		ext = extFromMIME(mime)
+		ext = extFromBytes(b, mime)
 	}
 	dir, err := os.MkdirTemp("", "b64in_")
 	if err != nil {
@@ -52,6 +55,33 @@ func WriteBase64ToTemp(dataURL, hintExt string) (path string, cleanup func(), er
 		return "", nil, err
 	}
 	return path, func() { _ = os.RemoveAll(dir) }, nil
+}
+
+func decodeBase64Payload(raw string) ([]byte, error) {
+	payload := strings.TrimSpace(raw)
+	if payload == "" {
+		return nil, fmt.Errorf("empty base64 payload")
+	}
+	payload = strings.ReplaceAll(payload, "\n", "")
+	payload = strings.ReplaceAll(payload, "\r", "")
+	payload = strings.ReplaceAll(payload, " ", "")
+	if pad := len(payload) % 4; pad != 0 {
+		payload += strings.Repeat("=", 4-pad)
+	}
+	if b, err := base64.StdEncoding.DecodeString(payload); err == nil {
+		if len(b) == 0 {
+			return nil, fmt.Errorf("empty decoded payload")
+		}
+		return b, nil
+	}
+	b, err := base64.URLEncoding.DecodeString(payload)
+	if err != nil {
+		return nil, fmt.Errorf("invalid base64 payload")
+	}
+	if len(b) == 0 {
+		return nil, fmt.Errorf("empty decoded payload")
+	}
+	return b, nil
 }
 
 func isVideoMIME(m string) bool {
@@ -75,9 +105,31 @@ func extFromMIME(mime string) string {
 		return ".png"
 	case "image/webp":
 		return ".webp"
+	case "image/heic", "image/heif":
+		return ".heic"
 	default:
 		return ".jpg"
 	}
+}
+
+func extFromBytes(b []byte, mime string) string {
+	if len(b) >= 12 && string(b[4:8]) == "ftyp" {
+		brand := string(b[8:12])
+		switch brand {
+		case "heic", "heif", "mif1", "msf1":
+			return ".heic"
+		}
+	}
+	if len(b) >= 8 && string(b[:8]) == "\x89PNG\r\n\x1a\n" {
+		return ".png"
+	}
+	if len(b) >= 12 && string(b[0:4]) == "RIFF" && string(b[8:12]) == "WEBP" {
+		return ".webp"
+	}
+	if len(b) >= 2 && b[0] == 0xFF && b[1] == 0xD8 {
+		return ".jpg"
+	}
+	return extFromMIME(mime)
 }
 
 // CleanupResult removes temp dirs when optimization produced a new file.

@@ -8,7 +8,8 @@ import (
 
 // Config tunes mobile-first compression (CRF + caps). Override via env in production.
 type Config struct {
-	Enabled          bool
+	Enabled           bool
+	UploadFastPath    bool // skip FFmpeg on broker upload path — stream to CDN (default on)
 	VideoCRF         int    // mezzanine / master normalize (23–28; 26 default)
 	VideoMobileCRF   int    // progressive mobile MP4
 	VideoPreset      string // veryfast on upload path (host-facing latency)
@@ -25,7 +26,8 @@ type Config struct {
 
 func LoadConfig() Config {
 	return Config{
-		Enabled:          envBool("MEDIA_OPTIMIZE_ENABLED", true),
+		Enabled:           envBool("MEDIA_OPTIMIZE_ENABLED", true),
+		UploadFastPath:    envBool("MEDIA_UPLOAD_FAST_PATH", true),
 		VideoCRF:         envInt("MEDIA_VIDEO_CRF", 26),
 		VideoMobileCRF:   envInt("MEDIA_VIDEO_MOBILE_CRF", 28),
 		VideoPreset:      envStr("MEDIA_VIDEO_PRESET", "veryfast"),

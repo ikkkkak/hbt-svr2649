@@ -3,6 +3,7 @@ package listing_ai
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"regexp"
 	"strings"
 
@@ -43,9 +44,20 @@ func (g *Generator) Generate(in GenerateInput) (*Draft, error) {
 		maxLines = 32
 	}
 
-	llm, err := g.callLLM(in, BuildCatalogSummary(filtered, maxLines))
+	userStory := extractUserStory(in.Details)
+
+	llm, err := g.callLLM(in, userStory, BuildCatalogSummary(filtered, maxLines), false)
 	if err != nil {
-		llm = fallbackLLMDraft(in)
+		log.Printf("listing_ai: LLM error (%v) — using template draft", err)
+		llm = buildTemplateDraft(in)
+	} else if isEchoOfUserInput(llm, userStory) {
+		log.Printf("listing_ai: LLM echoed user input — retrying rewrite")
+		if retry, err2 := g.callLLM(in, userStory, BuildCatalogSummary(filtered, maxLines), true); err2 == nil && !isEchoOfUserInput(retry, userStory) {
+			llm = retry
+		} else {
+			log.Printf("listing_ai: rewrite failed or still echoed — using template draft")
+			llm = buildTemplateDraft(in)
+		}
 	}
 
 	// Match using form fields + description + LLM-extracted names (quartier-first).
@@ -122,6 +134,10 @@ func (g *Generator) Generate(in GenerateInput) (*Draft, error) {
 	if draft.Description == "" {
 		draft.Description = fallbackDescription(in, draft)
 	}
+	draft.Description = mergeNeighborhoodIntoDescription(
+		draft.Description,
+		draft.NeighborhoodDescription,
+	)
 	draft.Description = sanitizeListingDescription(draft.Description)
 
 	if len(in.AmenityIDs) > 0 {
@@ -133,10 +149,9 @@ func (g *Generator) Generate(in GenerateInput) (*Draft, error) {
 	return draft, nil
 }
 
-func (g *Generator) callLLM(in GenerateInput, catalogSummary string) (llmDraft, error) {
-	lang := resolveListingLanguage(in)
+func (g *Generator) callLLM(in GenerateInput, userStory, catalogSummary string, rewrite bool) (llmDraft, error) {
+	lang := ResolveListingLanguage(in)
 
-	kindLabel := string(in.Kind)
 	schema := `{"title":"","description":"","city_name":"","zone_name":"","quartier_name":"","neighborhood_description":"","indoor_features":[],"outdoor_features":[]}`
 	plotRules := ""
 	if in.Kind == KindLand {
@@ -144,59 +159,17 @@ func (g *Generator) callLLM(in GenerateInput, catalogSummary string) (llmDraft, 
 		plotRules = `
 - plot_number: cadastre parcel number ONLY (digits/alphanumeric as on title deed). Copy exactly from user text when mentioned. Leave empty if not stated — never invent.`
 	}
-	system := `You are Meskeny Listing Agent — a professional real-estate copywriter for Mauritania (Meskeny app).
-Return ONLY valid JSON (no markdown fences) matching this schema:
-` + schema + `
 
-Rules:
-- title: max 90 chars, clear, no ALL CAPS
-- description: 2-4 short paragraphs, professional, honest, no fake claims
-- NEVER mention numeric amenity IDs, internal codes, or "amenity IDs selected" in description
-- If amenities are provided, weave them naturally by name (e.g. Wi‑Fi, parking) — do not list raw IDs
-- city_name, zone_name, quartier_name: MUST copy EXACT catalog spellings from the list below when the user mentioned that place (including quartier in their description). Never invent a quartier name.
-- neighborhood_description: 1-2 sentences about the area vibe
-- indoor_features / outdoor_features: only for sale listings, short tags` + plotRules + `
+	system := buildListingSystemPrompt(in.Kind, lang, schema, plotRules)
+	if rewrite {
+		system += `
 
-` + languagePromptBlock(lang)
-
-	amenityLine := "not specified"
-	if len(in.AmenityNames) > 0 {
-		amenityLine = strings.Join(in.AmenityNames, ", ")
-	} else if len(in.AmenityIDs) > 0 {
-		amenityLine = "selected (use generic phrasing only — never numeric IDs in copy)"
+REWRITE MODE (critical):
+- The previous attempt copied the user's notes. You MUST write completely NEW professional copy.
+- Do NOT reuse sentences from the user notes. Rephrase every idea.
+- Title must be a polished marketplace headline, not the user's first sentence.`
 	}
-
-	user := fmt.Sprintf(`OUTPUT_LANGUAGE_CODE: %s (derived from the user's own words — NOT the app settings)
-
-Listing type: %s
-User details (match this language for title/description): %s
-Price: %.0f %s
-Bedrooms: %v
-Bathrooms: %v
-Area: %.0f %s
-Property type: %s
-Land type: %s
-Amenities (mention by name in description if relevant, never as IDs): %s
-Plot number hint (from form): %q
-Location hints — city: %q, zone: %q, quartier: %q
-Media: %d photos, %d videos
-Catalog (city > zone > quartier):
-%s`,
-		lang,
-		kindLabel,
-		in.Details,
-		in.Price, in.Currency,
-		ptrInt(in.Bedrooms),
-		ptrInt(in.Bathrooms),
-		in.Area, in.AreaUnit,
-		in.PropertyType,
-		in.LandType,
-		amenityLine,
-		strings.TrimSpace(in.PlotNumber),
-		in.CityHint, in.ZoneHint, in.QuartierHint,
-		len(in.ImageURLs), len(in.VideoURLs),
-		catalogSummary,
-	)
+	user := buildListingUserPrompt(in, userStory, lang, catalogSummary)
 
 	raw, err := g.AI.CompleteListingJSON(system, user)
 	if err != nil {
@@ -223,82 +196,15 @@ func ptrInt(p *int) any {
 }
 
 func fallbackLLMDraft(in GenerateInput) llmDraft {
-	return llmDraft{
-		Title:        fallbackTitle(in),
-		Description:  fallbackDescription(in, nil),
-		CityName:     in.CityHint,
-		ZoneName:     in.ZoneHint,
-		QuartierName: in.QuartierHint,
-	}
+	return buildTemplateDraft(in)
 }
 
 func fallbackTitle(in GenerateInput) string {
-	lang := resolveListingLanguage(in)
-	place := strings.TrimSpace(strings.Join([]string{in.QuartierHint, in.ZoneHint, in.CityHint}, ", "))
-	if d := strings.TrimSpace(in.Details); d != "" {
-		first := d
-		if idx := strings.IndexAny(first, "\n"); idx > 0 {
-			first = first[:idx]
-		}
-		runes := []rune(first)
-		if len(runes) > 90 {
-			first = string(runes[:90])
-		}
-		return first
-	}
-	switch lang {
-	case "ar":
-		switch in.Kind {
-		case KindLand:
-			return "أرض للبيع — " + place
-		case KindSale:
-			return "عقار للبيع — " + place
-		default:
-			return "إيجار — " + place
-		}
-	case "en":
-		switch in.Kind {
-		case KindLand:
-			return "Land for sale — " + place
-		case KindSale:
-			return "Property for sale — " + place
-		default:
-			return "Rental — " + place
-		}
-	default:
-		switch in.Kind {
-		case KindLand:
-			if in.Area > 0 {
-				return fmt.Sprintf("Terrain %.0f %s — %s", in.Area, in.AreaUnit, place)
-			}
-			return "Terrain à vendre — " + place
-		case KindSale:
-			return fmt.Sprintf("Bien à vendre — %s", place)
-		default:
-			return fmt.Sprintf("Location — %s", place)
-		}
-	}
+	return buildTemplateDraft(in).Title
 }
 
 func fallbackDescription(in GenerateInput, d *Draft) string {
-	// Preserve user wording as the description body when LLM fails.
-	body := strings.TrimSpace(in.Details)
-	if body != "" {
-		return body
-	}
-	lang := resolveListingLanguage(in)
-	var b strings.Builder
-	if in.Price > 0 {
-		switch lang {
-		case "ar":
-			b.WriteString(fmt.Sprintf("السعر: %.0f %s.\n", in.Price, in.Currency))
-		case "en":
-			b.WriteString(fmt.Sprintf("Price: %.0f %s.\n", in.Price, in.Currency))
-		default:
-			b.WriteString(fmt.Sprintf("Prix: %.0f %s.\n", in.Price, in.Currency))
-		}
-	}
-	return strings.TrimSpace(b.String())
+	return buildTemplateDraft(in).Description
 }
 
 func min(a, b int) int {
@@ -313,11 +219,6 @@ func intOrZero(p *int) int {
 		return 0
 	}
 	return *p
-}
-
-// resolveListingLanguage uses only user-written text — never app UI locale.
-func resolveListingLanguage(in GenerateInput) string {
-	return DetectOutputLanguage(in.Details, in.CityHint, in.ZoneHint, in.QuartierHint)
 }
 
 var plotNumberPatterns = []*regexp.Regexp{
@@ -367,6 +268,22 @@ func sanitizeListingDescription(s string) string {
 		out = append(out, line)
 	}
 	return strings.TrimSpace(strings.Join(out, "\n"))
+}
+
+// mergeNeighborhoodIntoDescription appends area context when the LLM returned it separately.
+func mergeNeighborhoodIntoDescription(description, neighborhood string) string {
+	desc := strings.TrimSpace(description)
+	hood := strings.TrimSpace(neighborhood)
+	if hood == "" {
+		return desc
+	}
+	if desc == "" {
+		return hood
+	}
+	if strings.Contains(strings.ToLower(desc), strings.ToLower(hood)) {
+		return desc
+	}
+	return desc + "\n\n" + hood
 }
 
 func resolvePlotNumber(in GenerateInput, llm llmDraft) string {

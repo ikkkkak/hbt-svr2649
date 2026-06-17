@@ -804,9 +804,16 @@ func GetLandmarkVideosFeed(ctx iris.Context) {
 			}
 			orgID = lmForClient.Owner.ID
 		}
+		profileUserID := uint(0)
+		if lmForClient.Organization != nil && lmForClient.Organization.ID > 0 {
+			profileUserID = lmForClient.Organization.OwnerID
+		} else if lmForClient.Owner != nil && lmForClient.Owner.ID > 0 {
+			profileUserID = lmForClient.Owner.ID
+		}
 		video := map[string]interface{}{
 			"ID":            lmForClient.ID,
 			"landmarkID":    lmForClient.ID,
+			"userID":        profileUserID,
 			"landmark":      lmForClient,
 			"videoURL":      *lmForClient.VideoURL,
 			"thumbnailURL":  thumbnailURL,

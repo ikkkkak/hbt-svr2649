@@ -74,12 +74,15 @@ func MediaFolderForMIME(contentType string) string {
 // UploadTimeoutForBytes scales HTTP/object-store deadlines with payload size.
 func UploadTimeoutForBytes(size int64) time.Duration {
 	if size <= 0 {
-		return 2 * time.Minute
+		return 90 * time.Second
 	}
 	mb := size / (1024 * 1024)
-	timeout := 2*time.Minute + time.Duration(mb)*45*time.Second
-	if timeout > 30*time.Minute {
-		return 30 * time.Minute
+	if mb <= 25 {
+		return 90 * time.Second
+	}
+	timeout := 2*time.Minute + time.Duration(mb)*30*time.Second
+	if timeout > 15*time.Minute {
+		return 15 * time.Minute
 	}
 	return timeout
 }

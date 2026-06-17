@@ -94,11 +94,11 @@ func ProcessVideo(ctx context.Context, db *gorm.DB, videoID, userID uint) error 
 	assetWg.Add(2)
 	go func() {
 		defer assetWg.Done()
-		spriteURL = generateSpriteSheet(ctx, ffmpeg, sourcePath, workDir, videoID)
+		spriteURL = generateSpriteSheet(ctx, ffmpeg, sourcePath, workDir, fmt.Sprintf("videos/%d/sprite", videoID))
 	}()
 	go func() {
 		defer assetWg.Done()
-		blurURL = generateBlurPreview(ctx, ffmpeg, sourcePath, workDir, videoID)
+		blurURL = generateBlurPreview(ctx, ffmpeg, sourcePath, workDir, fmt.Sprintf("videos/%d/preview_blur", videoID))
 	}()
 
 	type ladderResult struct {
@@ -197,7 +197,7 @@ func ProcessVideo(ctx context.Context, db *gorm.DB, videoID, userID uint) error 
 	if err := os.WriteFile(masterLocal, []byte(strings.Join(masterLines, "\n")+"\n"), 0644); err != nil {
 		return failJob(db, videoID, userID, err)
 	}
-	masterRes := storage.UploadLocalFile(masterLocal, fmt.Sprintf("hls/videos/%d/master", videoID), "application/vnd.apple.mpegurl")
+	masterRes := storage.UploadLocalFileObjectKey(masterLocal, fmt.Sprintf("hls/videos/%d/master.m3u8", videoID), "application/vnd.apple.mpegurl")
 	masterURL := masterRes["url"]
 	if masterURL == "" {
 		return failJob(db, videoID, userID, fmt.Errorf("master upload: %s", masterRes["error"]))
@@ -217,7 +217,7 @@ func ProcessVideo(ctx context.Context, db *gorm.DB, videoID, userID uint) error 
 		mobilePath,
 	}
 	if _, err := exec.CommandContext(ctx, ffmpeg, mobileArgs...).CombinedOutput(); err == nil {
-		mobileRes := storage.UploadLocalFile(mobilePath, fmt.Sprintf("videos/%d/mobile", videoID), "video/mp4")
+		mobileRes := storage.UploadLocalFile(mobilePath, fmt.Sprintf("videos/%d/mobile.mp4", videoID), "video/mp4")
 		mobileURL = mobileRes["url"]
 	}
 
@@ -241,7 +241,7 @@ func ProcessVideo(ctx context.Context, db *gorm.DB, videoID, userID uint) error 
 }
 
 // generateBlurPreview builds a tiny blurred first-frame JPEG for feed placeholders.
-func generateBlurPreview(ctx context.Context, ffmpeg, sourcePath, workDir string, videoID uint) string {
+func generateBlurPreview(ctx context.Context, ffmpeg, sourcePath, workDir, uploadKey string) string {
 	outPath := filepath.Join(workDir, "preview_blur.jpg")
 	args := []string{
 		"-y", "-ss", "0", "-i", sourcePath,
@@ -250,14 +250,14 @@ func generateBlurPreview(ctx context.Context, ffmpeg, sourcePath, workDir string
 		outPath,
 	}
 	if out, err := exec.CommandContext(ctx, ffmpeg, args...).CombinedOutput(); err != nil {
-		log.Printf("⚠️ blur preview video %d: %v %s", videoID, err, string(out))
+		log.Printf("⚠️ blur preview %s: %v %s", uploadKey, err, string(out))
 		return ""
 	}
-	res := storage.UploadLocalFile(outPath, fmt.Sprintf("videos/%d/preview_blur", videoID), "image/jpeg")
+	res := storage.UploadLocalFile(outPath, uploadKey, "image/jpeg")
 	return res["url"]
 }
 
-func generateSpriteSheet(ctx context.Context, ffmpeg, sourcePath, workDir string, videoID uint) string {
+func generateSpriteSheet(ctx context.Context, ffmpeg, sourcePath, workDir, uploadKey string) string {
 	outDir := filepath.Join(workDir, "sprites")
 	_ = os.MkdirAll(outDir, 0755)
 	// Single tiled sprite image (5x5 grid, 1 frame every 2s)
@@ -268,11 +268,11 @@ func generateSpriteSheet(ctx context.Context, ffmpeg, sourcePath, workDir string
 		filepath.Join(outDir, "sheet.jpg"),
 	}
 	if out, err := exec.CommandContext(ctx, ffmpeg, args...).CombinedOutput(); err != nil {
-		log.Printf("⚠️ sprite sheet video %d: %v %s", videoID, err, string(out))
+		log.Printf("⚠️ sprite sheet %s: %v %s", uploadKey, err, string(out))
 		return ""
 	}
 	sheetPath := filepath.Join(outDir, "sheet.jpg")
-	res := storage.UploadLocalFile(sheetPath, fmt.Sprintf("videos/%d/sprite", videoID), "image/jpeg")
+	res := storage.UploadLocalFile(sheetPath, uploadKey, "image/jpeg")
 	return res["url"]
 }
 
@@ -356,11 +356,8 @@ func uploadDirectory(dir, cdnPrefix string) (playlistURL string, err error) {
 		}
 		rel, _ := filepath.Rel(dir, path)
 		rel = strings.ReplaceAll(rel, "\\", "/")
-		pid := cdnPrefix + "/" + strings.TrimSuffix(rel, filepath.Ext(rel))
-		if strings.HasSuffix(path, ".ts") {
-			pid = cdnPrefix + "/" + strings.TrimSuffix(rel, ".ts")
-		}
-		res := storage.UploadLocalFile(path, pid, "")
+		objectKey := cdnPrefix + "/" + rel
+		res := storage.UploadLocalFileObjectKey(path, objectKey, "")
 		if res["error"] != "" {
 			return fmt.Errorf("%s: %s", rel, res["error"])
 		}

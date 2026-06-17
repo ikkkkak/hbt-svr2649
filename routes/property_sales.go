@@ -376,6 +376,8 @@ func GetPropertySale(ctx iris.Context) {
 
 	redactPropertySaleHostNote(&property, optionalAuthUserID(ctx))
 
+	expandPropertySaleVideoRows([]models.PropertySale{property})
+
 	ctx.JSON(iris.Map{"property": property})
 }
 
@@ -1006,10 +1008,22 @@ func UpdatePropertySale(ctx iris.Context) {
 		property.HOA = input.HOA
 	}
 	if input.Images != nil {
-		property.Images = input.Images
+		sanitized, err := storage.SanitizeHTTPMediaURLs("images", input.Images)
+		if err != nil {
+			ctx.StatusCode(http.StatusBadRequest)
+			ctx.JSON(iris.Map{"error": err.Error()})
+			return
+		}
+		property.Images = sanitized
 	}
 	if input.Videos != nil {
-		property.Videos = input.Videos
+		sanitized, err := storage.SanitizeHTTPMediaURLs("videos", input.Videos)
+		if err != nil {
+			ctx.StatusCode(http.StatusBadRequest)
+			ctx.JSON(iris.Map{"error": err.Error()})
+			return
+		}
+		property.Videos = sanitized
 	}
 	if input.VirtualTour != "" {
 		property.VirtualTour = input.VirtualTour
@@ -1670,10 +1684,22 @@ func AdminUpdatePropertySale(ctx iris.Context) {
 		property.HOA = *input.HOA
 	}
 	if input.Images != nil {
-		property.Images = input.Images
+		sanitized, err := storage.SanitizeHTTPMediaURLs("images", input.Images)
+		if err != nil {
+			ctx.StatusCode(http.StatusBadRequest)
+			ctx.JSON(iris.Map{"error": err.Error()})
+			return
+		}
+		property.Images = sanitized
 	}
 	if input.Videos != nil {
-		property.Videos = input.Videos
+		sanitized, err := storage.SanitizeHTTPMediaURLs("videos", input.Videos)
+		if err != nil {
+			ctx.StatusCode(http.StatusBadRequest)
+			ctx.JSON(iris.Map{"error": err.Error()})
+			return
+		}
+		property.Videos = sanitized
 	}
 	if input.VirtualTour != "" {
 		property.VirtualTour = input.VirtualTour
@@ -1908,17 +1934,45 @@ func AdminPublishProperty(ctx iris.Context) {
 	ctx.JSON(iris.Map{"message": "Property published successfully", "property": property})
 }
 
-// applyCardFeedTrim limits images/videos per row for ?fields=card (slow / 3G clients).
-func applyCardFeedTrim(properties []models.PropertySale) {
-	const maxImages, maxVideos = 2, 1
-	for i := range properties {
-		if len(properties[i].Images) > maxImages {
-			properties[i].Images = append([]string(nil), properties[i].Images[:maxImages]...)
-		}
-		if len(properties[i].Videos) > maxVideos {
-			properties[i].Videos = append([]string(nil), properties[i].Videos[:maxVideos]...)
+// applyCardFeedTrim reserved for future payload shaping — images/videos are URL strings only;
+// full galleries are returned so carousel/detail can show every photo (client prefetches progressively).
+func applyCardFeedTrim(_ []models.PropertySale) {}
+
+// propertySaleGalleryURLs merges main images + classified room photos (deduped, stable order).
+func propertySaleGalleryURLs(ps *models.PropertySale) []string {
+	if ps == nil {
+		return nil
+	}
+	seen := make(map[string]struct{})
+	out := make([]string, 0, len(ps.Images)+8)
+	add := func(urls []string) {
+		for _, raw := range urls {
+			u := strings.TrimSpace(raw)
+			if u == "" {
+				continue
+			}
+			if _, ok := seen[u]; ok {
+				continue
+			}
+			seen[u] = struct{}{}
+			out = append(out, u)
 		}
 	}
+	add(ps.Images)
+	for _, cp := range ps.ClassifiedPhotos {
+		add(cp.Photos)
+	}
+	return out
+}
+
+func expandPropertySaleGalleries(properties []models.PropertySale) {
+	for i := range properties {
+		merged := propertySaleGalleryURLs(&properties[i])
+		if len(merged) > 0 {
+			properties[i].Images = merged
+		}
+	}
+	expandPropertySaleVideoRows(properties)
 }
 
 // GetPublishedProperties gets all published properties for public viewing
@@ -2034,10 +2088,10 @@ func GetPublishedProperties(ctx iris.Context) {
 		Where("(property_sales.is_deactivated = ? OR property_sales.is_sold = ?)", false, true).
 		Where("property_sales.deleted_at IS NULL")
 	if cardFields {
-		// Low-bandwidth feed: skip huge JSON/text columns and deep joins
+		// Low-bandwidth feed: skip huge text columns; keep classified_photos for full gallery URLs.
 		q = q.Omit(
 			"Description", "DescriptionTranslations",
-			"FloorPlans", "Neighborhood", "ClassifiedPhotos",
+			"FloorPlans", "Neighborhood",
 			"Features", "Amenities", "HostPrivateNote", "VerificationNotes", "VirtualTour",
 		)
 		q = q.Preload("Organization", func(db *gorm.DB) *gorm.DB {
@@ -2193,6 +2247,7 @@ func GetPublishedProperties(ctx iris.Context) {
 		}
 		redactPropertySaleSliceForViewer(properties, userID)
 		if cardFields {
+			expandPropertySaleGalleries(properties)
 			applyCardFeedTrim(properties)
 		}
 		ctx.JSON(iris.Map{
@@ -2237,6 +2292,7 @@ func GetPublishedProperties(ctx iris.Context) {
 	}
 	redactPropertySaleSliceForViewer(properties, userID)
 	if cardFields {
+		expandPropertySaleGalleries(properties)
 		applyCardFeedTrim(properties)
 	}
 
@@ -2853,6 +2909,10 @@ func GetPublishedProperty(ctx iris.Context) {
 
 	redactPropertySaleHostNote(&property, optionalAuthUserID(ctx))
 	redactPropertySaleBrokerProfile(&property)
+
+	if merged := propertySaleGalleryURLs(&property); len(merged) > 0 {
+		property.Images = merged
+	}
 
 	// Consistent schema: 200 with { data: property } for clients; also { property } for backward compat
 	ctx.Header("Cache-Control", "public, max-age=60, stale-while-revalidate=120")

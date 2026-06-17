@@ -220,6 +220,9 @@ func main() {
 	// Unified user-based realtime hub (direct messages + inbox updates)
 	realtime.StartUserHubRedisSubscriber()
 	videoprocessing.StartWorkers(storage.DB)
+	if os.Getenv("VIDEO_BACKFILL_ENABLED") == "true" {
+		go videoprocessing.BackfillPendingPropertySaleVideos(storage.DB, 50)
+	}
 	// Daily refresh token cleanup (keeps refresh_tokens table lean)
 	go func() {
 		// Run once on boot, then every 24h
@@ -294,12 +297,23 @@ func main() {
 		ctx.Next()
 	})
 
-	// Log every request (diagnose publish / create-jobs not reaching handlers).
+	// Log every request with duration (diagnose slow feeds / missing handlers).
 	app.Use(func(ctx iris.Context) {
-		if ctx.Method() != iris.MethodOptions {
-			log.Printf("→ %s %s cl=%s", ctx.Method(), ctx.Path(), ctx.GetHeader("Content-Length"))
+		if ctx.Method() == iris.MethodOptions {
+			ctx.Next()
+			return
 		}
+		start := time.Now()
+		path := ctx.Path()
+		method := ctx.Method()
 		ctx.Next()
+		ms := time.Since(start).Milliseconds()
+		status := ctx.GetStatusCode()
+		if ms >= 500 {
+			log.Printf("← %s %s %dms status=%d (slow)", method, path, ms, status)
+		} else {
+			log.Printf("← %s %s %dms status=%d", method, path, ms, status)
+		}
 	})
 
 	// Minimal middleware - compression only
@@ -556,8 +570,7 @@ func main() {
 			return
 		}
 
-		// Upload to storage (now Google Cloud Storage via storage.UploadBase64Image)
-		urlMap := storage.UploadBase64Image(req.Image, req.PublicID)
+		urlMap := storage.UploadBase64ImageOptimized(req.Image, req.PublicID)
 		if urlMap == nil || urlMap["url"] == "" {
 			msg := "Failed to upload image"
 			if urlMap != nil && urlMap["error"] != "" {
@@ -703,13 +716,16 @@ func main() {
 	// Upload routes (CDN from MEDIA_CDN)
 	upload := app.Party("/api/upload")
 	{
-		upload.Post("/image", routes.UploadImage)
+		upload.Post("/image", accessTokenVerifierMiddleware, routes.UploadImage)
+		upload.Post("/image/binary", accessTokenVerifierMiddleware, routes.UploadImageBinary)
 		// Chunked video upload (register before /video — specific paths first)
 		upload.Post("/video/init", accessTokenVerifierMiddleware, routes.InitChunkUpload)
+		upload.Get("/video/{uploadId}/status", accessTokenVerifierMiddleware, routes.GetChunkUploadStatus)
 		upload.Put("/video/{uploadId}/chunk", accessTokenVerifierMiddleware, routes.UploadVideoChunk)
 		upload.Post("/video/{uploadId}/complete", accessTokenVerifierMiddleware, routes.CompleteChunkUpload)
+		upload.Post("/video/stream", accessTokenVerifierMiddleware, routes.UploadVideoStream)
 		// Legacy base64 video upload (small files / admin only; large bodies rejected)
-		upload.Post("/video", routes.UploadVideo)
+		upload.Post("/video", accessTokenVerifierMiddleware, routes.UploadVideo)
 	}
 	{
 		notifications.Post("/marketing/device", routes.RegisterMarketingDevice)
@@ -1030,6 +1046,8 @@ func main() {
 		propertySaleVideos.Post("/comments/{id:uint}/like", accessTokenVerifierMiddleware, routes.LikePropertySaleVideoComment)
 		propertySaleVideos.Post("/comments/{id:uint}/unlike", accessTokenVerifierMiddleware, routes.UnlikePropertySaleVideoComment)
 		propertySaleVideos.Get("/admin/stats", accessTokenVerifierMiddleware, routes.GetPropertySaleVideosByOrganizationOrHost)
+		propertySaleVideos.Get("/{id:uint}/streaming", accessTokenVerifierMiddleware, routes.GetPropertySaleVideoStreamingStatus)
+		propertySaleVideos.Get("/{id:uint}/streaming/events", accessTokenVerifierMiddleware, routes.PropertySaleVideoProcessingSSE)
 	}
 
 	// Device Registration routes (public endpoint for silent registration)
@@ -1263,15 +1281,21 @@ func main() {
 		organization.Get("/check-personal-content", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.CheckUserCanCreatePersonalContent)
 	}
 
-	// ProfileSheet public endpoints
+	// ProfileSheet public endpoints — organizations
 	profileSheet := app.Party("/api/organizations/{orgID:uint}")
 	{
-		// Public endpoints (no auth required)
 		profileSheet.Get("/profile-sheet", routes.GetOrganizationProfileSheet)
 		profileSheet.Get("/properties-sheet", routes.GetOrganizationPropertiesForSheet)
 		profileSheet.Get("/landmarks-sheet", routes.GetOrganizationLandmarksForSheet)
-		// Authenticated endpoints
 		profileSheet.Post("/follow", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.ToggleOrganizationFollow)
+	}
+
+	// ProfileSheet public endpoints — individual users
+	userProfileSheet := app.Party("/api/users/{userID:uint}")
+	{
+		userProfileSheet.Get("/profile-sheet", routes.GetUserProfileSheet)
+		userProfileSheet.Get("/properties-sheet", routes.GetUserPropertiesForSheet)
+		userProfileSheet.Get("/landmarks-sheet", routes.GetUserLandmarksForSheet)
 	}
 
 	// Property like endpoint

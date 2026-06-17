@@ -12,10 +12,10 @@ import (
 	"time"
 )
 
-// ProgressReporter receives overall publish percent (58–100) during server-side create.
-type ProgressReporter func(percent int)
+// ProgressReporter receives overall publish percent (58–100) and step key during server-side create.
+type ProgressReporter func(percent int, step string)
 
-func noopProgress(int) {}
+func noopProgress(int, string) {}
 
 // ExecuteCreatePropertySale runs validation, insert, and schedules background work.
 // Percent values align with the mobile app publishProgress bands (58–100 = server work).
@@ -28,14 +28,14 @@ func ExecuteCreatePropertySale(
 		report = noopProgress
 	}
 	start := time.Now()
-	report(58)
+	report(58, "validate")
 
 	input.Images = filterHTTPMediaURLs(input.Images)
 	input.Videos = filterHTTPMediaURLs(input.Videos)
 	if len(input.Description) > 12000 {
 		input.Description = input.Description[:12000]
 	}
-	report(62)
+	report(62, "normalize")
 
 	if msg := validateCreatePropertySaleInput(&struct {
 		Title        string
@@ -54,7 +54,7 @@ func ExecuteCreatePropertySale(
 	}); msg != "" {
 		return 0, errors.New(msg)
 	}
-	report(65)
+	report(65, "ready")
 
 	areaSq := int(input.Area + 0.5)
 	if areaSq <= 0 {
@@ -125,7 +125,7 @@ func ExecuteCreatePropertySale(
 		Neighborhood:     input.Neighborhood,
 	}
 
-	report(72)
+	report(72, "inserting")
 	propertyID, err = fastInsertPropertySale(userID, &property)
 	if err != nil {
 		log.Printf("❌ ExecuteCreatePropertySale insert failed after %s: %v", time.Since(start), err)
@@ -143,7 +143,7 @@ func ExecuteCreatePropertySale(
 		HostUserID:   userID,
 		Status:       property.Status,
 	})
-	report(88)
+	report(88, "row_created")
 
 	videoURLs := append([]string(nil), input.Videos...)
 	amenityIDs := append([]uint(nil), input.AmenityIDs...)
@@ -151,7 +151,7 @@ func ExecuteCreatePropertySale(
 	descCopy := property.Description
 	propCopy := property
 
-	report(92)
+	report(92, "setup")
 
 	go func(uid, pid uint) {
 		if sqlDB, err := storage.SQLDB(); err == nil {
@@ -208,6 +208,6 @@ func ExecuteCreatePropertySale(
 		go places.DefaultService.FetchAndSaveNearby(propertyID, property.Latitude, property.Longitude)
 	}
 
-	report(100)
+	report(100, "complete")
 	return propertyID, nil
 }

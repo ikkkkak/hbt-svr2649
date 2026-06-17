@@ -35,7 +35,7 @@ func GetCitiesByCountry(ctx iris.Context) {
 	}
 
 	var cities []models.City
-	db := storage.DB.Where("country_id = ? AND is_active = ?", uint(countryID), true)
+	db := applyCityCountryFilter(storage.DB.Where("is_active = ?", true), uint(countryID))
 	if q := strings.TrimSpace(ctx.URLParam("q")); q != "" {
 		like := "%" + q + "%"
 		db = db.Where("name ILIKE ? OR name_ar ILIKE ?", like, like)

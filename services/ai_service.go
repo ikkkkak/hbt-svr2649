@@ -1264,9 +1264,9 @@ func (s *AIService) SendMessage(
 func (s *AIService) CompleteListingJSON(systemPrompt, userPrompt string) (string, error) {
 	model := os.Getenv("LISTING_AI_MODEL")
 	if model == "" {
-		model = "google/gemini-2.0-flash-001"
+		model = "nex-agi/nex-n2-pro:free"
 	}
-	return s.completeJSONWithModel(systemPrompt, userPrompt, model, 800, 0.3)
+	return s.completeJSONWithModel(systemPrompt, userPrompt, model, 1400, 0.52)
 }
 
 // CompleteJSON calls OpenRouter with a fixed system + user prompt and returns raw assistant text (expected JSON).

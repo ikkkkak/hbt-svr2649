@@ -8,6 +8,31 @@ import (
 	"strings"
 )
 
+// UploadLocalFileObjectKey uploads to an exact CDN object key (no images/ or videos/ prefix).
+// Use for HLS manifests and segments under hls/…
+func UploadLocalFileObjectKey(localPath, objectKey, contentType string) map[string]string {
+	objectKey = strings.TrimPrefix(strings.TrimSpace(objectKey), "/")
+	if objectKey == "" {
+		return map[string]string{"error": "empty object key"}
+	}
+	mime := ResolveContentType(localPath, contentType)
+
+	switch ActiveCDN() {
+	case CDNAWS, CDNDigitalOcean:
+		if s3Client != nil {
+			return uploadLocalFileS3ExactKey(localPath, objectKey, mime)
+		}
+	case CDNGoogle:
+		return uploadLocalFileGCSExactKey(localPath, objectKey, mime)
+	}
+
+	data, err := os.ReadFile(localPath)
+	if err != nil {
+		return map[string]string{"error": err.Error()}
+	}
+	return UploadBytes(objectKey, data, mime)
+}
+
 // UploadLocalFile uploads a file from disk to the active CDN (GCS / S3 / Cloudinary).
 // For user-facing uploads prefer UploadLocalFileOptimized (CRF/WebP pipeline).
 func UploadLocalFile(localPath, publicID, contentType string) map[string]string {

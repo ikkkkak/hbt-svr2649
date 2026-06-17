@@ -19,6 +19,11 @@ func ffmpegBin() string {
 	return p
 }
 
+// FFmpegAvailable reports whether ffmpeg is on PATH or FFMPEG_PATH is set.
+func FFmpegAvailable() bool {
+	return ffmpegBin() != ""
+}
+
 func runFFmpeg(ctx context.Context, args ...string) error {
 	bin := ffmpegBin()
 	if bin == "" {

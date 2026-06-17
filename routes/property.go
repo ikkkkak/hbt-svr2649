@@ -19,6 +19,17 @@ import (
 	"gorm.io/datatypes"
 )
 
+func authenticatedHostID(ctx iris.Context) (uint, bool) {
+	if v := ctx.Values().Get("userID"); v != nil {
+		if id, ok := v.(uint); ok && id > 0 {
+			return id, true
+		}
+	}
+	ctx.StatusCode(iris.StatusUnauthorized)
+	ctx.JSON(iris.Map{"error": "unauthorized", "code": "NO_TOKEN"})
+	return 0, false
+}
+
 func CreateProperty(ctx iris.Context) {
 	var input CreateListingInput
 
@@ -442,9 +453,12 @@ func DeleteProperty(ctx iris.Context) {
 		return
 	}
 
-	claims := jwt.Get(ctx).(*utils.AccessToken)
+	hostID, ok := authenticatedHostID(ctx)
+	if !ok {
+		return
+	}
 
-	if property.HostID != claims.ID {
+	if property.HostID != hostID {
 		ctx.StatusCode(iris.StatusForbidden)
 		return
 	}
@@ -471,9 +485,12 @@ func UpdateProperty(ctx iris.Context) {
 		return
 	}
 
-	claims := jwt.Get(ctx).(*utils.AccessToken)
+	hostID, ok := authenticatedHostID(ctx)
+	if !ok {
+		return
+	}
 
-	if property.HostID != claims.ID {
+	if property.HostID != hostID {
 		ctx.StatusCode(iris.StatusForbidden)
 		return
 	}
@@ -727,7 +744,7 @@ func insertImages(arg InsertImages) []string {
 			}
 
 			fmt.Printf("Uploading image with publicID: %s\n", publicID)
-			urlMap := storage.UploadBase64Image(trimmed, publicID)
+			urlMap := storage.UploadBase64ImageOptimized(trimmed, publicID)
 			if urlMap != nil && urlMap["url"] != "" {
 				imagesArr = append(imagesArr, urlMap["url"])
 				fmt.Printf("Successfully uploaded image: %s\n", urlMap["url"])
@@ -742,7 +759,10 @@ func insertImages(arg InsertImages) []string {
 
 // DeletePropertyImage deletes a single image from a property
 func DeletePropertyImage(ctx iris.Context) {
-	userID := ctx.Values().Get("userID").(uint)
+	userID, ok := authenticatedHostID(ctx)
+	if !ok {
+		return
+	}
 
 	// Get parameters from query string instead of body
 	propertyIDStr := ctx.URLParam("propertyID")

@@ -75,14 +75,36 @@ func ActiveCDN() CDNProvider {
 }
 
 func decodeBase64Media(base64Src string) ([]byte, error) {
-	if strings.TrimSpace(base64Src) == "" {
+	payload := strings.TrimSpace(base64Src)
+	if payload == "" {
 		return nil, fmt.Errorf("empty base64 payload")
 	}
-	payload := base64Src
-	if i := strings.Index(base64Src, ","); i != -1 {
-		payload = base64Src[i+1:]
+	if strings.HasPrefix(payload, "data:") {
+		if i := strings.Index(payload, ","); i >= 0 {
+			payload = payload[i+1:]
+		}
 	}
-	return base64.StdEncoding.DecodeString(payload)
+	payload = strings.TrimSpace(payload)
+	payload = strings.ReplaceAll(payload, "\n", "")
+	payload = strings.ReplaceAll(payload, "\r", "")
+	payload = strings.ReplaceAll(payload, " ", "")
+	if pad := len(payload) % 4; pad != 0 {
+		payload += strings.Repeat("=", 4-pad)
+	}
+	if b, err := base64.StdEncoding.DecodeString(payload); err == nil {
+		if len(b) == 0 {
+			return nil, fmt.Errorf("empty decoded payload")
+		}
+		return b, nil
+	}
+	b, err := base64.URLEncoding.DecodeString(payload)
+	if err != nil {
+		return nil, fmt.Errorf("invalid base64 payload")
+	}
+	if len(b) == 0 {
+		return nil, fmt.Errorf("empty decoded payload")
+	}
+	return b, nil
 }
 
 func mediaObjectKey(publicID, folderHint string) string {

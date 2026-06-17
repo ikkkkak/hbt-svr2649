@@ -495,49 +495,92 @@ func GetVideoFeed(ctx iris.Context) {
 			for i := 0; i < len(fallbackPropertySales) && i < 3; i++ {
 				fmt.Printf("   [%d] ID=%d, Title=%s\n", i, fallbackPropertySales[i].ID, fallbackPropertySales[i].Title)
 			}
-			// Convert property sales to video responses
+			// Convert property sales to video responses (prefer processed mobile/HLS tiers)
 			type VideoResponse struct {
-				ID            uint     `json:"id"`
-				Title         string   `json:"title"`
-				Description   string   `json:"description"`
-				VideoURL      string   `json:"videoUrl"`
-				Videos        []string `json:"videos"`
-				Images        []string `json:"images"`
-				ThumbnailURL  string   `json:"thumbnailUrl"`
-				LikesCount    int      `json:"likesCount"`
-				CommentsCount int      `json:"commentsCount"`
-				SavesCount    int      `json:"savesCount"`
-				ViewCount     int      `json:"viewCount"`
-				Source        string   `json:"source"`
+				ID             uint     `json:"id"`
+				Title          string   `json:"title"`
+				Description    string   `json:"description"`
+				VideoURL       string   `json:"videoUrl"`
+				Videos         []string `json:"videos"`
+				Images         []string `json:"images"`
+				ThumbnailURL   string   `json:"thumbnailUrl"`
+				MobileVideoURL string   `json:"mobile_video_url"`
+				HlsURL         string   `json:"hlsURL"`
+				PreviewBlurURL string   `json:"preview_blur_url"`
+				LikesCount     int      `json:"likesCount"`
+				CommentsCount  int      `json:"commentsCount"`
+				SavesCount     int      `json:"savesCount"`
+				ViewCount      int      `json:"viewCount"`
+				Source         string   `json:"source"`
+			}
+			psIDs := make([]uint, 0, len(fallbackPropertySales))
+			for _, ps := range fallbackPropertySales {
+				if ps.ID > 0 {
+					psIDs = append(psIDs, ps.ID)
+				}
+			}
+			saleVideosByProperty := map[uint][]models.PropertySaleVideo{}
+			if len(psIDs) > 0 {
+				var saleRows []models.PropertySaleVideo
+				_ = storage.DB.Where("property_sale_id IN ? AND deleted_at IS NULL", psIDs).
+					Order("property_sale_id ASC, id ASC").
+					Find(&saleRows).Error
+				for _, row := range saleRows {
+					saleVideosByProperty[row.PropertySaleID] = append(saleVideosByProperty[row.PropertySaleID], row)
+				}
 			}
 			videosResponse := make([]VideoResponse, 0, len(fallbackPropertySales))
 			for idx, ps := range fallbackPropertySales {
 				videoURL := ""
-				if len(ps.Videos) > 0 {
-					videoURL = ps.Videos[0]
+				mobileURL := ""
+				hlsURL := ""
+				blurURL := ""
+				for _, sv := range saleVideosByProperty[ps.ID] {
+					if mobileURL == "" && strings.TrimSpace(sv.MobileVideoURL) != "" {
+						mobileURL = storage.NormalizePlaybackMediaURL(sv.MobileVideoURL)
+					}
+					if hlsURL == "" && strings.TrimSpace(sv.HlsURL) != "" {
+						hlsURL = storage.NormalizePlaybackMediaURL(sv.HlsURL)
+					}
+					if blurURL == "" && strings.TrimSpace(sv.PreviewBlurURL) != "" {
+						blurURL = storage.NormalizePlaybackMediaURL(sv.PreviewBlurURL)
+					}
+				}
+				switch {
+				case mobileURL != "":
+					videoURL = mobileURL
+				case len(saleVideosByProperty[ps.ID]) > 0:
+					videoURL = storage.NormalizePlaybackMediaURL(saleVideosByProperty[ps.ID][0].VideoURL)
+				case len(ps.Videos) > 0:
+					videoURL = storage.NormalizePlaybackMediaURL(ps.Videos[0])
 				}
 				thumbURL := ""
 				if len(ps.Images) > 0 {
-					thumbURL = ps.Images[0]
+					thumbURL = storage.NormalizePublicMediaURL(ps.Images[0])
 				}
-				
-				// DEBUG: Log each video being added
-				fmt.Printf("🎥 [FALLBACK VIDEO %d] ID=%d, videoURL=%s, title=%s, hasVideos=%v\n", 
-					idx, ps.ID, videoURL, ps.Title, len(ps.Videos) > 0)
-				
+				if thumbURL == "" && blurURL != "" {
+					thumbURL = blurURL
+				}
+
+				fmt.Printf("🎥 [FALLBACK VIDEO %d] ID=%d, videoURL=%s, mobile=%s, title=%s\n",
+					idx, ps.ID, videoURL, mobileURL, ps.Title)
+
 				videosResponse = append(videosResponse, VideoResponse{
-					ID:            ps.ID,
-					Title:         ps.Title,
-					Description:   ps.Description,
-					VideoURL:      videoURL,
-					Videos:        ps.Videos,
-					Images:        ps.Images,
-					ThumbnailURL:  thumbURL,
-					LikesCount:    0,
-					CommentsCount: 0,
-					SavesCount:    0,
-					ViewCount:     0,
-					Source:        "property_sale",
+					ID:             ps.ID,
+					Title:          ps.Title,
+					Description:    ps.Description,
+					VideoURL:       videoURL,
+					Videos:         ps.Videos,
+					Images:         ps.Images,
+					ThumbnailURL:   thumbURL,
+					MobileVideoURL: mobileURL,
+					HlsURL:         hlsURL,
+					PreviewBlurURL: blurURL,
+					LikesCount:     0,
+					CommentsCount:  0,
+					SavesCount:     0,
+					ViewCount:      0,
+					Source:         "property_sale",
 				})
 				if idx >= limit-1 {
 					break

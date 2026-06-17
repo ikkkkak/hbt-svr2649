@@ -17,6 +17,7 @@ type PropertySaleCreateJob struct {
 	ID         string `json:"id"`
 	Status     string `json:"status"` // pending | processing | completed | failed
 	Percent    int    `json:"percent"`
+	Step       string `json:"step,omitempty"` // validate | normalize | ready | inserting | row_created | setup | complete
 	PropertyID uint   `json:"property_id,omitempty"`
 	Message    string `json:"message,omitempty"`
 	Error      string `json:"error,omitempty"`
@@ -44,15 +45,22 @@ func (s *propertySaleCreateJobStore) register(job *PropertySaleCreateJob) {
 	s.mu.Unlock()
 }
 
-func (s *propertySaleCreateJobStore) setPercent(id string, pct int) {
+func (s *propertySaleCreateJobStore) setProgress(id string, pct int, step string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if j, ok := s.jobs[id]; ok {
 		if pct > j.Percent {
 			j.Percent = pct
 		}
+		if step != "" {
+			j.Step = step
+		}
 		j.Status = "processing"
 	}
+}
+
+func (s *propertySaleCreateJobStore) setPercent(id string, pct int) {
+	s.setProgress(id, pct, "")
 }
 
 func (s *propertySaleCreateJobStore) complete(id string, propertyID uint) {
@@ -61,6 +69,7 @@ func (s *propertySaleCreateJobStore) complete(id string, propertyID uint) {
 	if j, ok := s.jobs[id]; ok {
 		j.Status = "completed"
 		j.Percent = 100
+		j.Step = "complete"
 		j.PropertyID = propertyID
 		j.Message = "Property created successfully"
 	}
@@ -85,9 +94,9 @@ func runPropertySaleCreateJob(jobID string, userID uint, body []byte) {
 		return
 	}
 
-	propertySaleCreateJobs.setPercent(jobID, 58)
-	pid, err := ExecuteCreatePropertySale(userID, &payload, func(p int) {
-		propertySaleCreateJobs.setPercent(jobID, p)
+	propertySaleCreateJobs.setProgress(jobID, 58, "validate")
+	pid, err := ExecuteCreatePropertySale(userID, &payload, func(p int, step string) {
+		propertySaleCreateJobs.setProgress(jobID, p, step)
 	})
 	if err != nil {
 		propertySaleCreateJobs.fail(jobID, err.Error())
@@ -144,6 +153,7 @@ func PostPropertySaleCreateJob(ctx iris.Context) {
 		UserID:  userID,
 		Status:  "pending",
 		Percent: 58,
+		Step:    "validate",
 	}
 	propertySaleCreateJobs.register(job)
 

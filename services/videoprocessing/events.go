@@ -18,6 +18,7 @@ type ProcessingEvent struct {
 	MobileVideoURL   string `json:"mobileVideoURL,omitempty"`
 	SpriteSheetURL   string `json:"spriteSheetURL,omitempty"`
 	PreviewBlurURL   string `json:"previewBlurURL,omitempty"`
+	EntityType       string `json:"entityType,omitempty"` // rent | sale
 	Ready            bool   `json:"ready"`
 }
 

@@ -22,6 +22,7 @@ type uploadInput struct {
 func UploadImage(ctx iris.Context) {
 	var in uploadInput
 	if err := ctx.ReadJSON(&in); err != nil {
+		log.Printf("❌ POST /upload/image invalid JSON: %v", err)
 		ctx.StopWithJSON(http.StatusBadRequest, iris.Map{"error": "invalid payload"})
 		return
 	}
@@ -32,6 +33,7 @@ func UploadImage(ctx iris.Context) {
 		if msg == "" {
 			msg = "upload failed"
 		}
+		log.Printf("❌ POST /upload/image failed: %s", msg)
 		ctx.StopWithJSON(http.StatusBadRequest, iris.Map{"error": msg})
 		return
 	}

@@ -6,16 +6,22 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/aws/retry"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 )
 
 var s3Client *s3.Client
+var (
+	s3ProbeClient     *s3.Client
+	s3ProbeClientOnce sync.Once
+)
 
 func s3AccessKeyID() string {
 	return envFirst(
@@ -68,21 +74,36 @@ func s3APIEndpoint() string {
 
 func s3PublicBaseURL() string {
 	if base := envFirst(
-		"DO_SPACES_PUBLIC_BASE_URL",
 		"DO_SPACES_CDN_URL",
+		"DO_SPACES_PUBLIC_BASE_URL",
 		"DO_SPACES_ORIGIN_URL",
 		"AWS_S3_PUBLIC_BASE_URL",
 	); base != "" {
-		return strings.TrimRight(base, "/")
+		return normalizeSpacesCDNBase(strings.TrimRight(base, "/"))
 	}
 	bucket := s3Bucket()
 	if bucket == "" {
 		return ""
 	}
 	if ActiveCDN() == CDNDigitalOcean {
-		return fmt.Sprintf("https://%s.%s.digitaloceanspaces.com", bucket, s3Region())
+		return fmt.Sprintf("https://%s.%s.cdn.digitaloceanspaces.com", bucket, s3Region())
 	}
 	return ""
+}
+
+// normalizeSpacesCDNBase upgrades origin Spaces URLs to the CDN edge hostname.
+func normalizeSpacesCDNBase(base string) string {
+	b := strings.TrimRight(strings.TrimSpace(base), "/")
+	if b == "" {
+		return ""
+	}
+	if strings.Contains(b, ".cdn.digitaloceanspaces.com") {
+		return b
+	}
+	if strings.Contains(b, ".digitaloceanspaces.com") {
+		return strings.Replace(b, ".digitaloceanspaces.com", ".cdn.digitaloceanspaces.com", 1)
+	}
+	return b
 }
 
 func initS3CompatibleCDN() {
@@ -125,6 +146,40 @@ func initS3CompatibleCDN() {
 	default:
 		fmt.Printf("✅ AWS S3 CDN ready (bucket: %s, region: %s)\n", bucket, region)
 	}
+}
+
+// S3ProbeClient is a single-attempt S3 client for fast direct-multipart probes (fail fast → relay).
+func S3ProbeClient() *s3.Client {
+	s3ProbeClientOnce.Do(func() {
+		bucket := s3Bucket()
+		accessKey := s3AccessKeyID()
+		secretKey := s3SecretAccessKey()
+		if bucket == "" || accessKey == "" || secretKey == "" {
+			return
+		}
+		region := s3Region()
+		cfg, err := awsconfig.LoadDefaultConfig(context.Background(),
+			awsconfig.WithRegion(region),
+			awsconfig.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(accessKey, secretKey, "")),
+			awsconfig.WithRetryer(func() aws.Retryer {
+				return retry.AddWithMaxAttempts(retry.NewStandard(), 1)
+			}),
+		)
+		if err != nil {
+			fmt.Printf("⚠️  S3 probe client config failed: %v\n", err)
+			return
+		}
+		clientOpts := []func(*s3.Options){}
+		if ep := s3APIEndpoint(); ep != "" {
+			endpoint := ep
+			clientOpts = append(clientOpts, func(o *s3.Options) {
+				o.BaseEndpoint = aws.String(endpoint)
+				o.UsePathStyle = false
+			})
+		}
+		s3ProbeClient = s3.NewFromConfig(cfg, clientOpts...)
+	})
+	return s3ProbeClient
 }
 
 // initAWSCDN is kept for any legacy callers.

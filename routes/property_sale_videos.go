@@ -3,12 +3,14 @@ package routes
 import (
 	"apartments-clone-server/models"
 	"apartments-clone-server/services"
+	"apartments-clone-server/services/videoprocessing"
 	"apartments-clone-server/storage"
 	"apartments-clone-server/utils"
 	"fmt"
 	"log"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/kataras/iris/v12"
 	jsonWT "github.com/kataras/iris/v12/middleware/jwt"
@@ -16,10 +18,11 @@ import (
 )
 
 // propertySaleFeedLite trims nested listing JSON for scroll feed (full detail on open).
+// Images: keep full gallery URLs — they are lightweight strings; client prefetches progressively.
 func propertySaleFeedLite(ps models.PropertySale) map[string]interface{} {
-	images := ps.Images
-	if len(images) > 1 {
-		images = []string{images[0]}
+	images := propertySaleGalleryURLs(&ps)
+	if len(images) == 0 {
+		images = ps.Images
 	}
 	out := map[string]interface{}{
 		"id":            ps.ID,
@@ -30,6 +33,9 @@ func propertySaleFeedLite(ps models.PropertySale) map[string]interface{} {
 		"listing_price": ps.ListingPrice,
 		"images":        images,
 	}
+	if len(ps.Videos) > 0 {
+		out["videos"] = ps.Videos
+	}
 	if ps.Organization != nil && ps.Organization.ID > 0 {
 		out["organization"] = map[string]interface{}{
 			"id":   ps.Organization.ID,
@@ -37,7 +43,20 @@ func propertySaleFeedLite(ps models.PropertySale) map[string]interface{} {
 			"logo": ps.Organization.Logo,
 		}
 	}
+	if ps.Owner != nil && ps.Owner.ID > 0 {
+		out["owner"] = map[string]interface{}{
+			"id":        ps.Owner.ID,
+			"firstName": ps.Owner.FirstName,
+			"lastName":  ps.Owner.LastName,
+			"avatarURL": ps.Owner.AvatarURL,
+		}
+	}
 	return out
+}
+
+// chunkUploadPreviewBlurURL derives the CDN URL for a blur preview generated during chunked upload.
+func chunkUploadPreviewBlurURL(videoURL string) string {
+	return storage.ChunkUploadPreviewBlurURL(videoURL)
 }
 
 // SyncPropertySaleVideoRows replaces rows in property_sale_videos for this listing so the video feed
@@ -56,15 +75,20 @@ func SyncPropertySaleVideoRows(propertySaleID uint, userID uint, urls []string) 
 		if u == "" {
 			continue
 		}
+		thumb := chunkUploadPreviewBlurURL(u)
 		row := models.PropertySaleVideo{
-			PropertySaleID: propertySaleID,
-			UserID:         userID,
-			VideoURL:       u,
-			Status:         "approved",
+			PropertySaleID:   propertySaleID,
+			UserID:           userID,
+			VideoURL:         u,
+			ThumbnailURL:     thumb,
+			PreviewBlurURL:   thumb,
+			Status:           "approved",
+			ProcessingStatus: "pending",
 		}
 		if err := storage.DB.Create(&row).Error; err != nil {
 			return err
 		}
+		videoprocessing.EnqueuePropertySaleVideo(storage.DB, row.ID, userID)
 	}
 	return nil
 }
@@ -174,12 +198,13 @@ func CreatePropertySaleVideo(ctx iris.Context) {
 	}
 
 	video := models.PropertySaleVideo{
-		PropertySaleID: input.PropertySaleID,
-		UserID:         userID,
-		VideoURL:       input.VideoURL,
-		ThumbnailURL:   input.ThumbnailURL,
-		DurationSec:    input.DurationSec,
-		Caption:        input.Caption,
+		PropertySaleID:   input.PropertySaleID,
+		UserID:           userID,
+		VideoURL:         input.VideoURL,
+		ThumbnailURL:     input.ThumbnailURL,
+		DurationSec:      input.DurationSec,
+		Caption:          input.Caption,
+		ProcessingStatus: "pending",
 	}
 
 	if err := storage.DB.Create(&video).Error; err != nil {
@@ -187,6 +212,8 @@ func CreatePropertySaleVideo(ctx iris.Context) {
 		utils.CreateInternalServerError(ctx)
 		return
 	}
+
+	videoprocessing.EnqueuePropertySaleVideo(storage.DB, video.ID, userID)
 
 	// Notify users who viewed this property or its videos (TikTok-style, dedup/cooldown)
 	psID := video.PropertySaleID
@@ -199,6 +226,10 @@ func CreatePropertySaleVideo(ctx iris.Context) {
 
 // GetPropertySaleVideoFeed returns paginated property sale videos extracted from property sales table
 func GetPropertySaleVideoFeed(ctx iris.Context) {
+	start := time.Now()
+	defer func() {
+		log.Printf("📹 Property Sale Video Feed done in %v", time.Since(start))
+	}()
 	// Get user ID if authenticated, otherwise use 0 for public access
 	// Try context values first (set by optionalAuthMiddleware), then JWT claims
 	var userID uint = 0
@@ -247,11 +278,21 @@ func GetPropertySaleVideoFeed(ctx iris.Context) {
 	}
 	offset := (page - 1) * limit
 
-	// Get property sales that have videos (JSON array and/or property_sale_videos rows)
-	// Exclude deactivated properties - their videos must NOT appear in the feed
+	hasGeoFilters := strings.TrimSpace(ctx.URLParam("city")) != "" ||
+		ctx.URLParamIntDefault("country_id", 0) > 0 ||
+		ctx.URLParamIntDefault("city_id", 0) > 0 ||
+		ctx.URLParamIntDefault("quartier_id", 0) > 0 ||
+		ctx.URLParamIntDefault("min_area", 0) > 0 ||
+		ctx.URLParamIntDefault("max_area", 0) > 0 ||
+		ctx.URLParamFloat64Default("min_price", 0) > 0 ||
+		ctx.URLParamFloat64Default("max_price", 0) > 0
+	fastFirstPage := page == 1 && !hasGeoFilters
+
+	// Base: property sales that have videos
 	query := storage.DB.
 		Model(&models.PropertySale{}).
 		Preload("Organization").
+		Preload("Owner").
 		Where("(status = ? OR is_published = ? OR status IS NULL) AND COALESCE(is_deactivated, false) = ?", "published", true, false).
 		Where(`(
 			(property_sales.videos IS NOT NULL AND property_sales.videos::text NOT IN ('[]','null',''))
@@ -259,12 +300,7 @@ func GetPropertySaleVideoFeed(ctx iris.Context) {
 		)`)
 
 	if userID > 0 {
-		fmt.Printf("🔍 Property Sale Video Feed - Filtering for user ID: %d\n", userID)
-		// Exclude hidden property sales
 		query = query.Where("NOT EXISTS (SELECT 1 FROM hidden_property_sales hps WHERE hps.property_sale_id = property_sales.id AND hps.user_id = ? AND hps.deleted_at IS NULL)", userID)
-		fmt.Printf("✅ Applied user-specific filters (hidden property sales)\n")
-	} else {
-		fmt.Printf("⚠️ No user authentication - showing all property sale videos\n")
 	}
 
 	// Safe filter params (sanitized, no SQL injection)
@@ -293,36 +329,38 @@ func GetPropertySaleVideoFeed(ctx iris.Context) {
 		query = query.Where("property_sales.listing_price <= ?", maxPrice)
 	}
 
-	// Hybrid ranking: ~40% recent, ~40% trending, ~20% random
-	// Trending = likes + saves + comments (property_sale_video_id = property_sale.id for synthetic videos)
-	query = query.Select("property_sales.*").
-		Joins(`LEFT JOIN (
+	if fastFirstPage {
+		// Fast path: recent listings first — no heavy aggregate joins on scroll open.
+		query = query.Order("property_sales.created_at DESC, property_sales.id DESC")
+	} else {
+		// Hybrid ranking for pagination / filtered feeds
+		query = query.Select("property_sales.*").
+			Joins(`LEFT JOIN (
 			SELECT property_sale_video_id AS ps_id, COALESCE(COUNT(*), 0)::float AS like_cnt
 			FROM property_sale_video_likes WHERE deleted_at IS NULL GROUP BY property_sale_video_id
 		) likes ON likes.ps_id = property_sales.id`).
-		Joins(`LEFT JOIN (
+			Joins(`LEFT JOIN (
 			SELECT property_sale_video_id AS ps_id, COALESCE(COUNT(*), 0)::float AS save_cnt
 			FROM property_sale_video_saves WHERE deleted_at IS NULL GROUP BY property_sale_video_id
 		) saves ON saves.ps_id = property_sales.id`).
-		Joins(`LEFT JOIN (
+			Joins(`LEFT JOIN (
 			SELECT property_sale_video_id AS ps_id, COALESCE(COUNT(*), 0)::float AS comment_cnt
 			FROM property_sale_video_comments WHERE deleted_at IS NULL AND parent_id IS NULL GROUP BY property_sale_video_id
 		) comments ON comments.ps_id = property_sales.id`).
-		Order(`(
+			Order(`(
 			0.4 * GREATEST(0, 1.0 - EXTRACT(EPOCH FROM (NOW() - property_sales.created_at)) / 86400.0 / 30.0) +
 			0.4 * LEAST(1.0, (COALESCE(likes.like_cnt, 0) * 2 + COALESCE(comments.comment_cnt, 0) * 3 + COALESCE(saves.save_cnt, 0)) / 100.0) +
 			0.2 * (random() + 0.5)
 		) DESC`)
+	}
 
 	var propertySales []models.PropertySale
 	if err := query.Limit(limit).Offset(offset).Find(&propertySales).Error; err != nil {
-		fmt.Printf("❌ Error fetching property sales: %v\n", err)
+		log.Printf("❌ property-sale-videos/feed query error: %v", err)
 		ctx.StatusCode(http.StatusInternalServerError)
 		ctx.JSON(iris.Map{"error": "Failed to fetch property sales with videos"})
 		return
 	}
-
-	fmt.Printf("📹 Found %d property sales with videos (before filtering empty videos)\n", len(propertySales))
 
 	propertyIDs := make([]uint, 0, len(propertySales))
 	for _, ps := range propertySales {
@@ -450,9 +488,28 @@ func GetPropertySaleVideoFeed(ctx iris.Context) {
 				orgID = ps.Organization.ID
 			}
 
+			profileUserID := orgOwnerID
+			if profileUserID == 0 && ps.OwnerID != nil && *ps.OwnerID > 0 {
+				profileUserID = *ps.OwnerID
+			}
+			if profileUserID == 0 && ps.Owner != nil && ps.Owner.ID > 0 {
+				profileUserID = ps.Owner.ID
+			}
+
 			thumb := ""
 			if i < len(tableThumbs) && tableThumbs[i] != "" {
 				thumb = tableThumbs[i]
+			}
+
+			var tv *models.PropertySaleVideo
+			if i < len(tableVideos) {
+				tv = &tableVideos[i]
+				if thumb == "" && tv.ThumbnailURL != "" {
+					thumb = strings.TrimSpace(tv.ThumbnailURL)
+				}
+				if thumb == "" && tv.PreviewBlurURL != "" {
+					thumb = strings.TrimSpace(tv.PreviewBlurURL)
+				}
 			}
 
 			psPayload := any(ps)
@@ -464,7 +521,7 @@ func GetPropertySaleVideoFeed(ctx iris.Context) {
 				"ID":             videoID, // Unique ID for each video
 				"propertySaleID": ps.ID,
 				"propertySale":   psPayload,
-				"userID":         orgOwnerID,
+				"userID":         profileUserID,
 				"videoURL":       videoURL,
 				"thumbnailURL":   thumb,
 				"durationSec":    0, // Will be calculated
@@ -485,15 +542,26 @@ func GetPropertySaleVideoFeed(ctx iris.Context) {
 				"CreatedAt": ps.CreatedAt,
 				"UpdatedAt": ps.UpdatedAt,
 			}
+			if tv != nil {
+				applyPropertySaleVideoStreamFields(video, tv)
+			}
 
 			videos = append(videos, video)
 		}
 	}
 
-	fmt.Printf("📹 Property Sale Video Feed - Returning %d videos for user ID: %d (page: %d, limit: %d)\n", len(videos), userID, page, limit)
+	fmt.Printf("📹 Property Sale Video Feed - Returning %d videos for user ID: %d (page: %d, limit: %d, fast=%v)\n", len(videos), userID, page, limit, fastFirstPage)
+
+	hasMore := len(propertySales) >= limit
+	nextCursor := ""
+	if hasMore {
+		nextCursor = fmt.Sprintf("%d", page+1)
+	}
 
 	ctx.JSON(iris.Map{
 		"videos": videos,
+		"nextCursor": nextCursor,
+		"hasMore":    hasMore,
 		"pagination": iris.Map{
 			"page":  page,
 			"limit": limit,
@@ -1209,4 +1277,62 @@ func GetPropertySaleVideosByOrganizationOrHost(ctx iris.Context) {
 		"videos":  videos,
 		"total":   len(videos),
 	})
+}
+
+// applyPropertySaleVideoStreamFields adds HLS playback fields to feed/API maps.
+func applyPropertySaleVideoStreamFields(out map[string]interface{}, tv *models.PropertySaleVideo) {
+	if out == nil || tv == nil {
+		return
+	}
+	out["propertySaleVideoID"] = tv.ID
+	if tv.HlsURL != "" {
+		out["hlsURL"] = storage.NormalizePlaybackMediaURL(tv.HlsURL)
+	}
+	if tv.MobileVideoURL != "" {
+		mobile := storage.NormalizePlaybackMediaURL(tv.MobileVideoURL)
+		out["mobileVideoURL"] = mobile
+		out["mobile_video_url"] = mobile
+	}
+	if tv.PreviewBlurURL != "" {
+		out["previewBlurURL"] = tv.PreviewBlurURL
+		out["preview_blur_url"] = tv.PreviewBlurURL
+	}
+	if tv.SpriteSheetURL != "" {
+		out["spriteSheetURL"] = tv.SpriteSheetURL
+	}
+	if tv.ProcessingStatus != "" {
+		out["processingStatus"] = tv.ProcessingStatus
+	}
+	if tv.DurationSec > 0 {
+		out["durationSec"] = tv.DurationSec
+	}
+}
+
+// expandPropertySaleVideoRows attaches canonical saleVideos (with HLS URLs) to listings.
+func expandPropertySaleVideoRows(properties []models.PropertySale) {
+	if len(properties) == 0 {
+		return
+	}
+	ids := make([]uint, 0, len(properties))
+	for _, ps := range properties {
+		if ps.ID > 0 {
+			ids = append(ids, ps.ID)
+		}
+	}
+	if len(ids) == 0 {
+		return
+	}
+	var rows []models.PropertySaleVideo
+	_ = storage.DB.Where("property_sale_id IN ? AND deleted_at IS NULL", ids).
+		Order("property_sale_id ASC, id ASC").
+		Find(&rows).Error
+	byProperty := map[uint][]models.PropertySaleVideo{}
+	for _, row := range rows {
+		byProperty[row.PropertySaleID] = append(byProperty[row.PropertySaleID], row)
+	}
+	for i := range properties {
+		if vids, ok := byProperty[properties[i].ID]; ok && len(vids) > 0 {
+			properties[i].SaleVideos = vids
+		}
+	}
 }

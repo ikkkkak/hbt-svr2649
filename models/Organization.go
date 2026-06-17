@@ -137,6 +137,8 @@ type PropertySale struct {
 	// Media
 	Images      []string `json:"images" gorm:"type:jsonb;serializer:json"`
 	Videos      []string `json:"videos" gorm:"type:jsonb;serializer:json"`
+	// Canonical video rows with HLS URLs (loaded on detail/list responses, not persisted here)
+	SaleVideos []PropertySaleVideo `json:"saleVideos,omitempty" gorm:"-"`
 	VirtualTour string   `json:"virtual_tour"`
 	// Classified photos by room type (separate from main images)
 	ClassifiedPhotos []ClassifiedPhoto `json:"classified_photos" gorm:"type:jsonb;serializer:json"`

@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/kataras/iris/v12"
+	"gorm.io/gorm"
 )
 
 // GetCities returns active cities (optional ?country_id= filter).
@@ -15,13 +16,17 @@ func GetCities(ctx iris.Context) {
 	db := storage.DB.Where("is_active = ?", true)
 	if v := strings.TrimSpace(ctx.URLParam("country_id")); v != "" {
 		if n, err := strconv.ParseUint(v, 10, 32); err == nil && n > 0 {
-			db = db.Where("country_id = ?", uint(n))
+			db = applyCityCountryFilter(db, uint(n))
 		}
 	}
-	if err := db.Preload("Zones", "is_active = ?", true).Order("name ASC").Find(&cities).Error; err != nil {
+
+	if err := db.Order("name ASC").Find(&cities).Error; err != nil {
 		ctx.StatusCode(500)
 		ctx.JSON(iris.Map{"error": "Failed to fetch cities"})
 		return
+	}
+	if cities == nil {
+		cities = []models.City{}
 	}
 
 	ctx.JSON(iris.Map{
@@ -30,7 +35,9 @@ func GetCities(ctx iris.Context) {
 	})
 }
 
-// GetZonesByCity returns all zones for a specific city
+
+// GetZonesByCity returns zones for a city. For Nouakchott, zones are sourced from
+// habitat_plans (cadastre districts) and synced to the listings zones table.
 func GetZonesByCity(ctx iris.Context) {
 	cityIDStr := ctx.Params().Get("cityId")
 	cityID, err := strconv.ParseUint(cityIDStr, 10, 32)
@@ -40,8 +47,27 @@ func GetZonesByCity(ctx iris.Context) {
 		return
 	}
 
+	var city models.City
+	if err := storage.DB.First(&city, uint(cityID)).Error; err != nil {
+		ctx.StatusCode(404)
+		ctx.JSON(iris.Map{"error": "City not found"})
+		return
+	}
+
 	q := strings.TrimSpace(ctx.URLParam("q"))
-	db := storage.DB.Where("city_id = ? AND is_active = ?", uint(cityID), true)
+
+	if isHabitatCatalogCity(&city) {
+		zones, err := ensureHabitatPlansAsZones(storage.DB, city.ID, q)
+		if err != nil {
+			ctx.StatusCode(500)
+			ctx.JSON(iris.Map{"error": "Failed to fetch habitat zones"})
+			return
+		}
+		ctx.JSON(iris.Map{"success": true, "data": zones, "source": "habitat_plans"})
+		return
+	}
+
+	db := storage.DB.Where("city_id = ? AND is_active = ?", city.ID, true)
 	if q != "" {
 		like := "%" + q + "%"
 		db = db.Where("name ILIKE ? OR name_ar ILIKE ?", like, like)
@@ -370,7 +396,8 @@ func AdminGetAllZones(ctx iris.Context) {
 	})
 }
 
-// GetQuartiersByZone returns all quartiers for a specific zone
+// GetQuartiersByZone returns quartiers for a zone. When the zone is linked to a
+// habitat_plan, quartiers are sourced from habitat_sectors and synced to listings.
 func GetQuartiersByZone(ctx iris.Context) {
 	zoneIDStr := ctx.Params().Get("zoneId")
 	zoneID, err := strconv.ParseUint(zoneIDStr, 10, 32)
@@ -380,8 +407,30 @@ func GetQuartiersByZone(ctx iris.Context) {
 		return
 	}
 
+	var zone models.Zone
+	if err := storage.DB.First(&zone, uint(zoneID)).Error; err != nil {
+		ctx.StatusCode(404)
+		ctx.JSON(iris.Map{"error": "Zone not found"})
+		return
+	}
+
 	q := strings.TrimSpace(ctx.URLParam("q"))
-	db := storage.DB.Where("zone_id = ? AND is_active = ? AND parent_quartier_id IS NULL", uint(zoneID), true)
+
+	planID := resolveZoneHabitatPlanID(storage.DB, &zone)
+	if planID > 0 {
+		pid := planID
+		zone.HabitatPlanID = &pid
+		quartiers, err := ensureHabitatSectorsAsQuartiers(storage.DB, &zone, q)
+		if err != nil {
+			ctx.StatusCode(500)
+			ctx.JSON(iris.Map{"error": "Failed to fetch habitat sectors"})
+			return
+		}
+		ctx.JSON(iris.Map{"success": true, "data": quartiers, "source": "habitat_sectors"})
+		return
+	}
+
+	db := storage.DB.Where("zone_id = ? AND is_active = ? AND parent_quartier_id IS NULL", zone.ID, true)
 	if q != "" {
 		like := "%" + q + "%"
 		db = db.Where("name ILIKE ? OR name_ar ILIKE ?", like, like)
@@ -587,4 +636,119 @@ func AdminGetAllQuartiers(ctx iris.Context) {
 		"success": true,
 		"data":    quartiers,
 	})
+}
+
+// applyCityCountryFilter matches cities by country_id and legacy rows where country_id was never set.
+func applyCityCountryFilter(db *gorm.DB, countryID uint) *gorm.DB {
+	if countryID == 0 {
+		return db
+	}
+	var country models.Country
+	if err := storage.DB.First(&country, countryID).Error; err != nil {
+		return db.Where("country_id = ?", countryID)
+	}
+	name := strings.TrimSpace(country.Name)
+	nameAr := strings.TrimSpace(country.NameAr)
+	if name == "" && nameAr == "" {
+		return db.Where("country_id = ?", countryID)
+	}
+	return db.Where(
+		"country_id = ? OR ((country_id IS NULL OR country_id = 0) AND (LOWER(TRIM(country)) = LOWER(?) OR TRIM(country_ar) = ?))",
+		countryID, name, nameAr,
+	)
+}
+
+// isHabitatCatalogCity is true for Nouakchott — zones/quartiers come from cadastre tables.
+func isHabitatCatalogCity(city *models.City) bool {
+	if city == nil {
+		return false
+	}
+	n := strings.ToLower(strings.TrimSpace(city.Name))
+	ar := strings.TrimSpace(city.NameAr)
+	return n == "nouakchott" ||
+		strings.Contains(n, "nouakchott") ||
+		ar == "نواكشوط" ||
+		strings.Contains(ar, "نواكشوط")
+}
+
+// ensureHabitatPlansAsZones maps habitat_plans → listings zones for a city.
+func ensureHabitatPlansAsZones(db *gorm.DB, cityID uint, searchQ string) ([]models.Zone, error) {
+	var plans []models.HabitatPlan
+	if err := db.Where("is_active = ?", true).Order("name ASC").Find(&plans).Error; err != nil {
+		return nil, err
+	}
+	syncResult := &habitatBulkResult{}
+	for _, p := range plans {
+		nameAr := strings.TrimSpace(p.NameAr)
+		if nameAr == "" {
+			nameAr = p.Name
+		}
+		syncPlanToListingZone(db, cityID, p.ID, p.Name, nameAr, syncResult)
+	}
+
+	dbq := db.Where("city_id = ? AND is_active = ? AND habitat_plan_id IS NOT NULL", cityID, true)
+	if searchQ != "" {
+		like := "%" + searchQ + "%"
+		dbq = dbq.Where("name ILIKE ? OR name_ar ILIKE ?", like, like)
+	}
+	var zones []models.Zone
+	if err := dbq.Order("name ASC").Find(&zones).Error; err != nil {
+		return nil, err
+	}
+	return zones, nil
+}
+
+// ensureHabitatSectorsAsQuartiers maps habitat_sectors → listings quartiers for a zone's plan.
+func ensureHabitatSectorsAsQuartiers(db *gorm.DB, zone *models.Zone, searchQ string) ([]models.Quartier, error) {
+	if zone == nil || zone.HabitatPlanID == nil || *zone.HabitatPlanID == 0 {
+		return nil, nil
+	}
+	planID := *zone.HabitatPlanID
+	var sectors []models.HabitatSector
+	if err := db.Where("plan_id = ?", planID).Order("name ASC").Find(&sectors).Error; err != nil {
+		return nil, err
+	}
+	syncResult := &habitatBulkResult{}
+	for _, s := range sectors {
+		nameAr := strings.TrimSpace(s.NameAr)
+		if nameAr == "" {
+			nameAr = s.Name
+		}
+		syncSectorToListingQuartier(db, zone.ID, s.ID, s.Name, nameAr, syncResult)
+	}
+
+	dbq := db.Where("zone_id = ? AND is_active = ? AND parent_quartier_id IS NULL", zone.ID, true)
+	if searchQ != "" {
+		like := "%" + searchQ + "%"
+		dbq = dbq.Where("name ILIKE ? OR name_ar ILIKE ?", like, like)
+	}
+	var quartiers []models.Quartier
+	if err := dbq.Preload("SubQuartiers", "is_active = ?", true).Order("name ASC").Find(&quartiers).Error; err != nil {
+		return nil, err
+	}
+	return quartiers, nil
+}
+
+// resolveZoneHabitatPlanID links a listings zone to habitat_plans when possible.
+func resolveZoneHabitatPlanID(db *gorm.DB, zone *models.Zone) uint {
+	if zone == nil {
+		return 0
+	}
+	if zone.HabitatPlanID != nil && *zone.HabitatPlanID > 0 {
+		return *zone.HabitatPlanID
+	}
+	var city models.City
+	if err := db.First(&city, zone.CityID).Error; err != nil || !isHabitatCatalogCity(&city) {
+		return 0
+	}
+	var plan models.HabitatPlan
+	err := db.Where(
+		"is_active = ? AND (LOWER(TRIM(name)) = LOWER(TRIM(?)) OR LOWER(TRIM(name_ar)) = LOWER(TRIM(?)) OR LOWER(TRIM(code)) = LOWER(TRIM(?)))",
+		true, zone.Name, zone.NameAr, zone.Name,
+	).First(&plan).Error
+	if err != nil {
+		return 0
+	}
+	persistZoneHabitatPlan(db, zone.ID, plan.ID)
+	return plan.ID
 }
