@@ -2026,8 +2026,9 @@ func GetPublishedProperties(ctx iris.Context) {
 		ctx.URLParam("investment_opportunity") != "" || ctx.URLParam("property_type") != ""
 	smartFeedMode := strings.ToLower(strings.TrimSpace(ctx.URLParamDefault("feed_mode", "smart"))) != "legacy"
 
-	// Card feed omits heavy columns — bypass list cache so we never serve fat payloads for ?fields=card
-	cardFields := strings.TrimSpace(ctx.URLParamDefault("fields", "")) == "card"
+	// Card feed omits heavy columns — default to card unless client asks for full payload.
+	fieldsParam := strings.TrimSpace(ctx.URLParamDefault("fields", "card"))
+	cardFields := fieldsParam != "full" && fieldsParam != "all"
 	if !hasFilters && !smartFeedMode && page <= 3 && !cardFields { // Only cache first 3 pages, rest go to DB
 		bgCtx := context.Background()
 		cacheConfig := services.DefaultCacheConfig()
@@ -2345,16 +2346,22 @@ func buildSmartPropertyFeedPage(q *gorm.DB, userID uint, deviceID string, page, 
 		return float64(x%1000) / 1e9
 	}
 
-	// poolTarget controls "infinite scroll length" for this feed query.
-	// We keep a large pool per page so the ranked feed doesn't stop quickly.
-	poolTarget := maxInt(300, limit*60)
-	if poolTarget > 2000 {
-		poolTarget = 2000
+	// poolTarget controls candidate pool size for ranking (smaller = faster on weak networks).
+	poolTarget := maxInt(150, limit*20)
+	if poolTarget > 400 {
+		poolTarget = 400
 	}
 
 	candidatesLimit := poolTarget
 	var candidates []models.PropertySale
-	if err := q.Session(&gorm.Session{}).Limit(candidatesLimit).Find(&candidates).Error; err != nil {
+	candQ := q.Session(&gorm.Session{}).Limit(candidatesLimit)
+	// Smart feed always skips huge text/json columns — detail screen loads full record.
+	candQ = candQ.Omit(
+		"Description", "DescriptionTranslations",
+		"FloorPlans", "Neighborhood",
+		"Features", "Amenities", "HostPrivateNote", "VerificationNotes", "VirtualTour",
+	)
+	if err := candQ.Find(&candidates).Error; err != nil {
 		return []models.PropertySale{}, 0, false, ""
 	}
 	if len(candidates) == 0 {

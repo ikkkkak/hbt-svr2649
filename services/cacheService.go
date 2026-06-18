@@ -39,6 +39,7 @@ const (
 	PropertySaleKey         = "property:sale:%d"           // property:sale:{propertyId}
 	PropertySalesSearchKey  = "property:sales:search:%s"   // property:sales:search:{searchHash}
 	PropertySalesPageKey    = "property:sales:page:v3:%d:%d"  // v3 = full gallery (images + classified_photos)
+	PropertySaleVideoFeedKey = "feed:property-sale-videos:anon:%d:%d" // page, limit
 
 	// Property Details Cache Keys
 	PropertyDetailsKey      = "property:details:%d"        // property:details:{propertyId}

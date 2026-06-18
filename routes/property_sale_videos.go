@@ -6,6 +6,7 @@ import (
 	"apartments-clone-server/services/videoprocessing"
 	"apartments-clone-server/storage"
 	"apartments-clone-server/utils"
+	"context"
 	"fmt"
 	"log"
 	"net/http"
@@ -227,9 +228,6 @@ func CreatePropertySaleVideo(ctx iris.Context) {
 // GetPropertySaleVideoFeed returns paginated property sale videos extracted from property sales table
 func GetPropertySaleVideoFeed(ctx iris.Context) {
 	start := time.Now()
-	defer func() {
-		log.Printf("📹 Property Sale Video Feed done in %v", time.Since(start))
-	}()
 	// Get user ID if authenticated, otherwise use 0 for public access
 	// Try context values first (set by optionalAuthMiddleware), then JWT claims
 	var userID uint = 0
@@ -237,13 +235,11 @@ func GetPropertySaleVideoFeed(ctx iris.Context) {
 	// Method 1: Get from context values (set by optionalAuthMiddleware)
 	if ctxUserID, ok := ctx.Values().Get("userID").(uint); ok && ctxUserID > 0 {
 		userID = ctxUserID
-		fmt.Printf("✅ Property Sale Video Feed - User ID from context: %d\n", userID)
 	} else {
 		// Method 2: Try to get from JWT claims in context values
 		if jwtClaims := ctx.Values().Get("jwt.claims"); jwtClaims != nil {
 			if accessToken, ok := jwtClaims.(*utils.AccessToken); ok && accessToken.ID > 0 {
 				userID = accessToken.ID
-				fmt.Printf("✅ Property Sale Video Feed - User ID from jwt.claims: %d\n", userID)
 			}
 		}
 
@@ -252,13 +248,8 @@ func GetPropertySaleVideoFeed(ctx iris.Context) {
 			if claims := jsonWT.Get(ctx); claims != nil {
 				if accessToken, ok := claims.(*utils.AccessToken); ok && accessToken.ID > 0 {
 					userID = accessToken.ID
-					fmt.Printf("✅ Property Sale Video Feed - User ID from jsonWT.Get: %d\n", userID)
 				}
 			}
-		}
-
-		if userID == 0 {
-			fmt.Printf("⚠️ Property Sale Video Feed - No user authentication - proceeding as public\n")
 		}
 	}
 
@@ -271,8 +262,8 @@ func GetPropertySaleVideoFeed(ctx iris.Context) {
 	if limit < 1 || limit > 50 {
 		limit = 10
 	}
-	feedLite := ctx.URLParamDefault("lite", "") == "1" ||
-		strings.EqualFold(strings.TrimSpace(ctx.URLParam("quality")), "low")
+	// Default lite payload for scroll feed; pass ?full=1 for legacy fat JSON.
+	feedLite := strings.TrimSpace(ctx.URLParam("full")) != "1"
 	if feedLite && limit > 8 {
 		limit = 8
 	}
@@ -288,16 +279,50 @@ func GetPropertySaleVideoFeed(ctx iris.Context) {
 		ctx.URLParamFloat64Default("max_price", 0) > 0
 	fastFirstPage := page == 1 && !hasGeoFilters
 
+	// Redis cache: anonymous first page, no filters — instant cold open on weak networks.
+	if userID == 0 && fastFirstPage && feedLite {
+		bgCtx := context.Background()
+		cacheSvc := services.NewCacheService(storage.Redis)
+		cacheKey := services.FormatKey(services.PropertySaleVideoFeedKey, page, limit)
+		var cached struct {
+			Videos     []map[string]interface{} `json:"videos"`
+			NextCursor string                   `json:"nextCursor"`
+			HasMore    bool                     `json:"hasMore"`
+		}
+		if err := cacheSvc.Get(bgCtx, cacheKey, &cached); err == nil && len(cached.Videos) > 0 {
+			ctx.JSON(iris.Map{
+				"videos":     cached.Videos,
+				"nextCursor": cached.NextCursor,
+				"hasMore":    cached.HasMore,
+				"pagination": iris.Map{"page": page, "limit": limit, "total": len(cached.Videos)},
+				"source":     "cache",
+			})
+			return
+		}
+	}
+
 	// Base: property sales that have videos
-	query := storage.DB.
-		Model(&models.PropertySale{}).
-		Preload("Organization").
-		Preload("Owner").
+	query := storage.DB.Model(&models.PropertySale{}).
 		Where("(status = ? OR is_published = ? OR status IS NULL) AND COALESCE(is_deactivated, false) = ?", "published", true, false).
 		Where(`(
 			(property_sales.videos IS NOT NULL AND property_sales.videos::text NOT IN ('[]','null',''))
 			OR EXISTS (SELECT 1 FROM property_sale_videos psv WHERE psv.property_sale_id = property_sales.id AND psv.deleted_at IS NULL)
 		)`)
+	if feedLite {
+		query = query.Omit(
+			"Description", "DescriptionTranslations",
+			"FloorPlans", "Neighborhood",
+			"Features", "Amenities", "HostPrivateNote", "VerificationNotes", "VirtualTour",
+		)
+		query = query.Preload("Organization", func(db *gorm.DB) *gorm.DB {
+			return db.Select("id", "name", "logo", "banner_image", "owner_id")
+		})
+		query = query.Preload("Owner", func(db *gorm.DB) *gorm.DB {
+			return db.Select("id", "first_name", "last_name", "avatar_url")
+		})
+	} else {
+		query = query.Preload("Organization").Preload("Owner")
+	}
 
 	if userID > 0 {
 		query = query.Where("NOT EXISTS (SELECT 1 FROM hidden_property_sales hps WHERE hps.property_sale_id = property_sales.id AND hps.user_id = ? AND hps.deleted_at IS NULL)", userID)
@@ -556,6 +581,21 @@ func GetPropertySaleVideoFeed(ctx iris.Context) {
 	nextCursor := ""
 	if hasMore {
 		nextCursor = fmt.Sprintf("%d", page+1)
+	}
+
+	if userID == 0 && fastFirstPage && feedLite && len(videos) > 0 {
+		bgCtx := context.Background()
+		cacheSvc := services.NewCacheService(storage.Redis)
+		cacheKey := services.FormatKey(services.PropertySaleVideoFeedKey, page, limit)
+		_ = cacheSvc.Set(bgCtx, cacheKey, map[string]interface{}{
+			"videos":     videos,
+			"nextCursor": nextCursor,
+			"hasMore":    hasMore,
+		}, 2*time.Minute)
+	}
+
+	if time.Since(start) >= 300*time.Millisecond {
+		log.Printf("📹 Property Sale Video Feed slow: %v (user=%d page=%d)", time.Since(start), userID, page)
 	}
 
 	ctx.JSON(iris.Map{

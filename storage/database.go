@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -52,10 +53,13 @@ func connectToDB() *gorm.DB {
 
 	// Connection pool tuning (important on Cloud Run/Cloud SQL to avoid stalls/timeouts).
 	if sqlDB, err := db.DB(); err == nil {
-		sqlDB.SetMaxOpenConns(40)
-		sqlDB.SetMaxIdleConns(10)
+		maxOpen := envInt("DB_MAX_OPEN_CONNS", 40)
+		maxIdle := envInt("DB_MAX_IDLE_CONNS", 10)
+		sqlDB.SetMaxOpenConns(maxOpen)
+		sqlDB.SetMaxIdleConns(maxIdle)
 		sqlDB.SetConnMaxLifetime(30 * time.Minute)
 		sqlDB.SetConnMaxIdleTime(5 * time.Minute)
+		log.Printf("🔧 DB pool maxOpen=%d maxIdle=%d", maxOpen, maxIdle)
 	} else {
 		log.Printf("⚠️ Could not access sql.DB for pool tuning: %v", err)
 	}
@@ -229,6 +233,16 @@ func performMigrations(db *gorm.DB) {
 	db.Exec(`
 		CREATE UNIQUE INDEX IF NOT EXISTS idx_property_feed_seen_device_property
 		ON property_feed_seen(device_id, property_id)
+		WHERE user_id IS NULL
+	`)
+	db.Exec(`
+		CREATE INDEX IF NOT EXISTS idx_property_feed_seen_user_seen_at
+		ON property_feed_seen(user_id, seen_at DESC)
+		WHERE user_id IS NOT NULL
+	`)
+	db.Exec(`
+		CREATE INDEX IF NOT EXISTS idx_property_feed_seen_device_seen_at
+		ON property_feed_seen(device_id, seen_at DESC)
 		WHERE user_id IS NULL
 	`)
 
@@ -817,4 +831,17 @@ func InitializeDB() *gorm.DB {
 	db := connectToDB()
 	performMigrations(db)
 	return db
+}
+
+// envInt reads a positive integer from the environment or returns default.
+func envInt(key string, def int) int {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return def
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		return def
+	}
+	return n
 }

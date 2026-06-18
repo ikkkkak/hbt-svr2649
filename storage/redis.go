@@ -45,10 +45,12 @@ func InitializeRedis() {
 	}
 
 	opts := &redis.Options{
-		Addr:     addr,
-		Username: user,
-		Password: pass,
-		DB:       0,
+		Addr:         addr,
+		Username:     user,
+		Password:     pass,
+		DB:           0,
+		PoolSize:     envInt("REDIS_POOL_SIZE", 20),
+		MinIdleConns: envInt("REDIS_MIN_IDLE", 4),
 	}
 	if useTLS {
 		opts.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12}

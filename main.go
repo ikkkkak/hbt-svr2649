@@ -297,7 +297,7 @@ func main() {
 		ctx.Next()
 	})
 
-	// Log every request with duration (diagnose slow feeds / missing handlers).
+	// Slow/error-only request logging (feed polling was flooding logs and adding I/O overhead).
 	app.Use(func(ctx iris.Context) {
 		if ctx.Method() == iris.MethodOptions {
 			ctx.Next()
@@ -309,10 +309,28 @@ func main() {
 		ctx.Next()
 		ms := time.Since(start).Milliseconds()
 		status := ctx.GetStatusCode()
-		if ms >= 500 {
-			log.Printf("← %s %s %dms status=%d (slow)", method, path, ms, status)
-		} else {
-			log.Printf("← %s %s %dms status=%d", method, path, ms, status)
+		if ms >= 300 || status >= 400 {
+			tag := ""
+			if ms >= 500 {
+				tag = " (slow)"
+			}
+			log.Printf("← %s %s %dms status=%d%s", method, path, ms, status, tag)
+		}
+	})
+
+	// Short CDN/client cache for public feed GETs — safe on weak networks (stale-while-revalidate).
+	app.Use(func(ctx iris.Context) {
+		ctx.Next()
+		if ctx.Method() != iris.MethodGet || ctx.GetStatusCode() != iris.StatusOK {
+			return
+		}
+		if ctx.GetHeader("Cache-Control") != "" {
+			return
+		}
+		path := ctx.Path()
+		if strings.Contains(path, "/feed") || strings.Contains(path, "/published") ||
+			strings.HasSuffix(path, "/properties") {
+			ctx.Header("Cache-Control", "public, max-age=30, stale-while-revalidate=120")
 		}
 	})
 

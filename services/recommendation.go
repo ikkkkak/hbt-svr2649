@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"sort"
 	"time"
 
 	"gorm.io/datatypes"
@@ -175,6 +176,7 @@ func (s *RecommendationService) computeFeed(opt GetFeedOptions) ([]FeedItem, err
 	if len(excludeVideoIDs) > 0 {
 		vq = vq.Where("videos.id NOT IN ?", excludeVideoIDs)
 	}
+	vq = vq.Limit(400)
 	if err := vq.Find(&videos).Error; err != nil {
 		log.Printf("recommendation.videos err: %v", err)
 	}
@@ -194,13 +196,46 @@ func (s *RecommendationService) computeFeed(opt GetFeedOptions) ([]FeedItem, err
 	if len(excludePropertySaleIDs) > 0 {
 		sq = sq.Where("property_sales.id NOT IN ?", excludePropertySaleIDs)
 	}
+	sq = sq.Limit(400)
 	if err := sq.Find(&sales).Error; err != nil {
 		log.Printf("recommendation.sales err: %v", err)
 	}
-	// Enrich sales with likes/saves from PropertySaleVideoLike/Save (keyed by property_sale_id in this codebase)
-	for i := range sales {
-		storage.DB.Model(&models.PropertySaleVideoLike{}).Where("property_sale_video_id = ?", sales[i].ID).Count(&sales[i].Likes)
-		storage.DB.Model(&models.PropertySaleVideoSave{}).Where("property_sale_video_id = ?", sales[i].ID).Count(&sales[i].Saves)
+	// Batch likes/saves counts (was N+1 per listing).
+	if len(sales) > 0 {
+		saleIDs := make([]uint, len(sales))
+		for i := range sales {
+			saleIDs[i] = sales[i].ID
+		}
+		type engRow struct {
+			PropertySaleVideoID uint  `gorm:"column:property_sale_video_id"`
+			Cnt                 int64 `gorm:"column:cnt"`
+		}
+		likesByID := map[uint]int64{}
+		savesByID := map[uint]int64{}
+		var likeRows []engRow
+		if err := storage.DB.Model(&models.PropertySaleVideoLike{}).
+			Select("property_sale_video_id, COUNT(*) as cnt").
+			Where("property_sale_video_id IN ?", saleIDs).
+			Group("property_sale_video_id").
+			Scan(&likeRows).Error; err == nil {
+			for _, r := range likeRows {
+				likesByID[r.PropertySaleVideoID] = r.Cnt
+			}
+		}
+		var saveRows []engRow
+		if err := storage.DB.Model(&models.PropertySaleVideoSave{}).
+			Select("property_sale_video_id, COUNT(*) as cnt").
+			Where("property_sale_video_id IN ?", saleIDs).
+			Group("property_sale_video_id").
+			Scan(&saveRows).Error; err == nil {
+			for _, r := range saveRows {
+				savesByID[r.PropertySaleVideoID] = r.Cnt
+			}
+		}
+		for i := range sales {
+			sales[i].Likes = likesByID[sales[i].ID]
+			sales[i].Saves = savesByID[sales[i].ID]
+		}
 	}
 
 	// 3) User signals for warm start
@@ -225,13 +260,12 @@ func (s *RecommendationService) computeFeed(opt GetFeedOptions) ([]FeedItem, err
 	}
 
 	// 5) Sort by score desc, then by id for stability
-	for i := 0; i < len(merged)-1; i++ {
-		for j := i + 1; j < len(merged); j++ {
-			if merged[j].S > merged[i].S || (merged[j].S == merged[i].S && merged[j].ID > merged[i].ID) {
-				merged[i], merged[j] = merged[j], merged[i]
-			}
+	sort.Slice(merged, func(i, j int) bool {
+		if merged[i].S != merged[j].S {
+			return merged[i].S > merged[j].S
 		}
-	}
+		return merged[i].ID > merged[j].ID
+	})
 
 	// 6) Convert to FeedItem
 	out := make([]FeedItem, 0, len(merged))

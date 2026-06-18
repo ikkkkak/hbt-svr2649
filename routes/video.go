@@ -222,27 +222,6 @@ func GetVideoFeed(ctx iris.Context) {
 		sortOrder = "DESC"
 	}
 
-	// ⚠️ DEBUG: Check if ANY videos exist at all
-	if !hasAuth {
-		var totalVideoCount int64
-		var activePropertyVideoCount int64
-		var rejectedVideoCount int64
-		
-		storage.DB.Model(&models.Video{}).Count(&totalVideoCount)
-		storage.DB.Model(&models.Video{}).
-			Joins("LEFT JOIN properties ON videos.property_id = properties.id").
-			Where("properties.id IS NOT NULL AND COALESCE(properties.is_active, true) = true").
-			Count(&activePropertyVideoCount)
-		storage.DB.Model(&models.Video{}).
-			Where("COALESCE(videos.is_flagged, false) = true OR LOWER(videos.status) = 'rejected'").
-			Count(&rejectedVideoCount)
-		
-		fmt.Printf("📊 DEBUG Video Availability:\n")
-		fmt.Printf("   Total videos in DB: %d\n", totalVideoCount)
-		fmt.Printf("   Videos with active properties: %d\n", activePropertyVideoCount)
-		fmt.Printf("   Flagged/rejected videos: %d\n", rejectedVideoCount)
-	}
-
 	// Base query (non-promotional videos only; promotional handled separately)
 	baseQuery := storage.DB.Model(&models.Video{}).
 		Where("COALESCE(videos.is_promotional, ?) = ?", false, false).
@@ -371,8 +350,8 @@ func GetVideoFeed(ctx iris.Context) {
 			(videos.likes_count * 2 + videos.comments_count * 3 + videos.saves_count + videos.view_count) DESC, 
 			videos.created_at DESC`, userID)
 		} else {
-			// Default: mix of recent and trending with randomization
-			orderClause = "RANDOM(), (videos.likes_count * 2 + videos.comments_count * 3 + videos.saves_count + videos.view_count) DESC, videos.created_at DESC"
+			// Public feed: engagement + recency (no RANDOM() — avoids full table scans on weak DB connections).
+			orderClause = "(videos.likes_count * 2 + videos.comments_count * 3 + videos.saves_count + videos.view_count) DESC, videos.created_at DESC, videos.id DESC"
 		}
 	}
 
@@ -413,14 +392,8 @@ func GetVideoFeed(ctx iris.Context) {
 			nextCursor = ""
 		}
 	} else {
-		// For page-based, check if there are more videos
-		if len(selectedVideos) == limit {
-			var count int64
-			baseQuery.Count(&count)
-			hasMore = int64(offset+limit) < count
-		} else {
-			hasMore = false
-		}
+		// Page-based: skip expensive COUNT — infer hasMore from page fill.
+		hasMore = len(selectedVideos) == limit
 		nextCursor = ""
 	}
 
