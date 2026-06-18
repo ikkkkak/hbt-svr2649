@@ -25,12 +25,13 @@ type Rendition struct {
 	Playlist string `json:"playlist_url"`
 }
 
-// Portrait ladder (9:16) — width x height
+// Portrait ladder (9:16) — width x height. 240p first for 2G/weak LTE.
 var portraitLadder = []struct {
 	Width   int
 	Height  int
 	Bitrate string
 }{
+	{240, 426, "250k"},
 	{360, 640, "450k"},
 	{540, 960, "900k"},
 	{720, 1280, "1800k"},
@@ -377,7 +378,7 @@ func activeLadder() []struct {
 } {
 	fast := strings.TrimSpace(os.Getenv("VIDEO_LADDER_FAST"))
 	if fast == "" || fast == "1" || strings.EqualFold(fast, "true") {
-		return portraitLadder[:3] // 360, 540, 720
+		return portraitLadder[:4] // 240, 360, 540, 720
 	}
 	return portraitLadder
 }

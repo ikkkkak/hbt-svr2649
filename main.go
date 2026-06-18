@@ -692,6 +692,9 @@ func main() {
 
 	// Nearby POIs (schools, hospitals, restaurants)
 	app.Get("/api/nearby", routes.NearbyHandler)
+	app.Get("/api/bootstrap", optionalAuthMiddleware, routes.GetAppBootstrap)
+	app.Post("/api/batch/property-sales", optionalAuthMiddleware, routes.BatchGetPropertySales)
+	app.Post("/api/sync/mutations", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.PostSyncMutations)
 
 	apartment := app.Party("/api/apartment")
 	{

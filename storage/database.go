@@ -175,6 +175,7 @@ func performMigrations(db *gorm.DB) {
 		&models.RefreshToken{},
 		// Recommendation & notification system (TikTok-style)
 		&models.Interaction{},
+		&models.ClientMutation{},
 		&models.RecommendationCache{},
 		&models.NotificationEvent{},
 		&models.NotificationDeliveryLog{},

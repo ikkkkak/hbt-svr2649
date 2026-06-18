@@ -2251,14 +2251,23 @@ func GetPublishedProperties(ctx iris.Context) {
 			expandPropertySaleGalleries(properties)
 			applyCardFeedTrim(properties)
 		}
-		ctx.JSON(iris.Map{
+		payload := iris.Map{
 			"data":       properties,
 			"properties": properties,
 			"hasMore":    hasMore,
 			"nextCursor": nextCursor,
 			"meta":       iris.Map{"total": totalCount, "page": page, "limit": limit},
 			"source":     "smart_feed",
-		})
+		}
+		if userID == 0 && page == 1 && !hasFilters && cardFields {
+			go func(p iris.Map, lim int, language string) {
+				bgCtx := context.Background()
+				cacheSvc := services.NewCacheService(storage.Redis)
+				key := services.FormatKey(services.PropertySalesSmartFeedAnonKey, lim, language)
+				_ = cacheSvc.Set(bgCtx, key, p, 2*time.Minute)
+			}(payload, limit, lang)
+		}
+		utils.RespondJSONWithETag(ctx, iris.StatusOK, payload)
 		return
 	}
 
