@@ -5,10 +5,44 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-redis/redis/v8"
 )
+
+var (
+	redisCircuitMu        sync.RWMutex
+	redisCircuitOpenUntil time.Time
+	lastRedisLimitLog     time.Time
+)
+
+func markRedisCircuit(err error) {
+	if err == nil {
+		return
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "max requests limit") &&
+		!strings.Contains(msg, "ERR max requests") &&
+		!strings.Contains(msg, "quota") {
+		return
+	}
+	redisCircuitMu.Lock()
+	redisCircuitOpenUntil = time.Now().Add(10 * time.Minute)
+	if time.Since(lastRedisLimitLog) > time.Minute {
+		lastRedisLimitLog = time.Now()
+		log.Printf("[CacheService] Redis quota/limit hit — cache bypassed for 10m")
+	}
+	redisCircuitMu.Unlock()
+}
+
+func isRedisCircuitOpen() bool {
+	redisCircuitMu.RLock()
+	open := time.Now().Before(redisCircuitOpenUntil)
+	redisCircuitMu.RUnlock()
+	return open
+}
 
 // CacheService provides centralized Redis caching for the application
 type CacheService struct {
@@ -89,6 +123,9 @@ func NewCacheService(client *redis.Client) *CacheService {
 
 // Set stores a value in Redis with TTL
 func (cs *CacheService) Set(ctx context.Context, key string, value interface{}, ttl time.Duration) error {
+	if isRedisCircuitOpen() {
+		return nil
+	}
 	jsonData, err := json.Marshal(value)
 	if err != nil {
 		cs.logger.Printf("❌ JSON marshal error for key %s: %v", key, err)
@@ -97,7 +134,10 @@ func (cs *CacheService) Set(ctx context.Context, key string, value interface{}, 
 
 	err = cs.client.Set(ctx, key, jsonData, ttl).Err()
 	if err != nil {
-		cs.logger.Printf("⚠️ Failed to cache %s: %v", key, err)
+		markRedisCircuit(err)
+		if !isRedisCircuitOpen() {
+			cs.logger.Printf("⚠️ Failed to cache %s: %v", key, err)
+		}
 		return err
 	}
 
@@ -107,12 +147,18 @@ func (cs *CacheService) Set(ctx context.Context, key string, value interface{}, 
 
 // Get retrieves a value from Redis
 func (cs *CacheService) Get(ctx context.Context, key string, dest interface{}) error {
+	if isRedisCircuitOpen() {
+		return nil // Treat as cache miss — serve from DB
+	}
 	val, err := cs.client.Get(ctx, key).Result()
 	if err == redis.Nil {
 		return nil // Cache miss (not an error)
 	}
 	if err != nil {
-		cs.logger.Printf("⚠️ Redis get error for key %s: %v", key, err)
+		markRedisCircuit(err)
+		if !isRedisCircuitOpen() {
+			cs.logger.Printf("⚠️ Redis get error for key %s: %v", key, err)
+		}
 		return err
 	}
 
