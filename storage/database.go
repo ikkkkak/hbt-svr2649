@@ -46,23 +46,28 @@ func connectToDB() *gorm.DB {
 		}
 		dsn += sep + "connect_timeout=5"
 	}
-	// Kill runaway queries so one slow path cannot hold the whole pool for minutes.
-	if !strings.Contains(dsn, "statement_timeout") {
-		if strings.Contains(dsn, " ") && !strings.HasPrefix(dsn, "postgres://") && !strings.HasPrefix(dsn, "postgresql://") {
-			dsn += " options='-c statement_timeout=15000'"
-		} else {
-			sep := "?"
-			if strings.Contains(dsn, "?") {
-				sep = "&"
+	// Optional query timeout — do NOT default to 15s (kills legitimate slow reads under load).
+	// Set DB_STATEMENT_TIMEOUT_MS=45000 in env if you need a safety cap.
+	if timeoutMs := envInt("DB_STATEMENT_TIMEOUT_MS", 0); timeoutMs > 0 {
+		if !strings.Contains(dsn, "statement_timeout") {
+			if strings.Contains(dsn, " ") && !strings.HasPrefix(dsn, "postgres://") && !strings.HasPrefix(dsn, "postgresql://") {
+				dsn += fmt.Sprintf(" options='-c statement_timeout=%d'", timeoutMs)
+			} else {
+				sep := "?"
+				if strings.Contains(dsn, "?") {
+					sep = "&"
+				}
+				dsn += fmt.Sprintf("%sstatement_timeout=%d", sep, timeoutMs)
 			}
-			dsn += sep + "statement_timeout=15000"
 		}
 	}
 
 	slowMs := envInt("DB_SLOW_MS", 2000)
-	logLevel := logger.Silent
-	if os.Getenv("DB_LOG_SQL") == "1" {
-		logLevel = logger.Warn
+	logLevel := logger.Warn
+	if os.Getenv("DB_LOG_SQL") == "0" {
+		logLevel = logger.Error
+	} else if os.Getenv("DB_LOG_SQL") == "1" {
+		logLevel = logger.Info
 	}
 	gormLogger := logger.New(
 		log.New(os.Stdout, "\r\n", log.LstdFlags),
@@ -81,8 +86,8 @@ func connectToDB() *gorm.DB {
 
 	// Connection pool tuning (important on Cloud Run/Cloud SQL to avoid stalls/timeouts).
 	if sqlDB, err := db.DB(); err == nil {
-		maxOpen := envInt("DB_MAX_OPEN_CONNS", 40)
-		maxIdle := envInt("DB_MAX_IDLE_CONNS", 10)
+		maxOpen := envInt("DB_MAX_OPEN_CONNS", 50)
+		maxIdle := envInt("DB_MAX_IDLE_CONNS", 15)
 		sqlDB.SetMaxOpenConns(maxOpen)
 		sqlDB.SetMaxIdleConns(maxIdle)
 		sqlDB.SetConnMaxLifetime(30 * time.Minute)

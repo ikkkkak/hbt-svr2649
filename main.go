@@ -303,9 +303,20 @@ func main() {
 			ctx.Next()
 			return
 		}
+		routes.IncActiveRequest()
+		defer routes.DecActiveRequest()
+
+		reqID := ctx.GetHeader("X-Request-ID")
+		if reqID == "" {
+			reqID = fmt.Sprintf("%d", time.Now().UnixNano())
+		}
+		ctx.Values().Set("request_id", reqID)
+		ctx.Header("X-Request-ID", reqID)
+
 		start := time.Now()
 		path := ctx.Path()
 		method := ctx.Method()
+		clientSource := ctx.GetHeader("X-Client-Source")
 		ctx.Next()
 		ms := time.Since(start).Milliseconds()
 		status := ctx.GetStatusCode()
@@ -314,7 +325,11 @@ func main() {
 			if ms >= 8000 {
 				tag = " (slow)"
 			}
-			log.Printf("← %s %s %dms status=%d%s", method, path, ms, status, tag)
+			src := ""
+			if clientSource != "" {
+				src = fmt.Sprintf(" src=%s", clientSource)
+			}
+			log.Printf("← %s %s %dms status=%d req=%s%s%s", method, path, ms, status, reqID, src, tag)
 		}
 	})
 
@@ -382,22 +397,13 @@ func main() {
 		auth.Get("/sessions", accessTokenVerifierMiddleware, utils.ListRefreshTokenSessions)
 	}
 
-	// Health check endpoint - CRITICAL for Render
-	fmt.Println("🔧 Setting up health check endpoint...")
-	app.Get("/health", func(ctx iris.Context) {
-		ctx.JSON(iris.Map{
-			"ok":      true,
-			"code":    "SERVER_OK",
-			"status":  "ok",
-			"message": "Server is running",
-		})
-	})
-	app.Get("/healthz", func(ctx iris.Context) {
-		ctx.JSON(iris.Map{"ok": true, "code": "SERVER_OK", "status": "ok", "message": "Server is running"})
-	})
-	app.Get("/api/health", func(ctx iris.Context) {
-		ctx.JSON(iris.Map{"ok": true, "code": "SERVER_OK", "status": "ok", "message": "API is reachable"})
-	})
+	// Health — liveness vs readiness vs deep diagnostics
+	fmt.Println("🔧 Setting up health check endpoints...")
+	app.Get("/health", routes.HealthLive)
+	app.Get("/healthz", routes.HealthLive)
+	app.Get("/api/health", routes.HealthLive)
+	app.Get("/api/health/ready", routes.HealthReady)
+	app.Get("/api/health/deep", routes.HealthDeep)
 
 	// Simple test endpoint
 	app.Get("/test", func(ctx iris.Context) {
