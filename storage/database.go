@@ -13,6 +13,7 @@ import (
 	"github.com/joho/godotenv"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 )
 
 var DB *gorm.DB
@@ -45,8 +46,35 @@ func connectToDB() *gorm.DB {
 		}
 		dsn += sep + "connect_timeout=5"
 	}
+	// Kill runaway queries so one slow path cannot hold the whole pool for minutes.
+	if !strings.Contains(dsn, "statement_timeout") {
+		if strings.Contains(dsn, " ") && !strings.HasPrefix(dsn, "postgres://") && !strings.HasPrefix(dsn, "postgresql://") {
+			dsn += " options='-c statement_timeout=15000'"
+		} else {
+			sep := "?"
+			if strings.Contains(dsn, "?") {
+				sep = "&"
+			}
+			dsn += sep + "statement_timeout=15000"
+		}
+	}
 
-	db, dbError := gorm.Open(postgres.Open(dsn), &gorm.Config{})
+	slowMs := envInt("DB_SLOW_MS", 2000)
+	logLevel := logger.Silent
+	if os.Getenv("DB_LOG_SQL") == "1" {
+		logLevel = logger.Warn
+	}
+	gormLogger := logger.New(
+		log.New(os.Stdout, "\r\n", log.LstdFlags),
+		logger.Config{
+			SlowThreshold:             time.Duration(slowMs) * time.Millisecond,
+			LogLevel:                  logLevel,
+			IgnoreRecordNotFoundError: true,
+			Colorful:                  false,
+		},
+	)
+
+	db, dbError := gorm.Open(postgres.Open(dsn), &gorm.Config{Logger: gormLogger})
 	if dbError != nil {
 		log.Panic("error connection to db: " + dbError.Error())
 	}
@@ -826,6 +854,30 @@ func ensureHabitatGISRelations(db *gorm.DB) {
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_habitat_plots_plan_sector ON habitat_plots(plan_id, sector_id)`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_habitat_plots_number ON habitat_plots(plot_number)`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_habitat_sectors_plan ON habitat_sectors(plan_id)`)
+
+	ensurePerformanceIndexes(db)
+}
+
+// ensurePerformanceIndexes adds indexes for hot paths that were stalling the DB pool.
+func ensurePerformanceIndexes(db *gorm.DB) {
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_guide_comments_host_parent_sale
+		ON guide_comments(host_id, parent_id, property_sale_id)
+		WHERE deleted_at IS NULL`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_guide_comments_host_status
+		ON guide_comments(host_id, status)
+		WHERE parent_id IS NULL AND deleted_at IS NULL`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_notification_preferences_user_updated
+		ON notification_preferences(user_id, updated_at DESC)
+		WHERE deleted_at IS NULL`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_notification_preferences_user_enabled
+		ON notification_preferences(user_id, enabled)
+		WHERE deleted_at IS NULL`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_organizations_owner
+		ON organizations(owner_id)
+		WHERE deleted_at IS NULL`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_landmarks_org_owner
+		ON landmarks(organization_id, owner_id)
+		WHERE deleted_at IS NULL`)
 }
 
 func InitializeDB() *gorm.DB {

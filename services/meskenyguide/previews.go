@@ -26,8 +26,13 @@ func GetListingPreviews(hostID uint, listingIDs []uint) map[uint]ListingGuidePre
 		return out
 	}
 
+	if cached, ok := getCachedListingPreviews(hostID, listingIDs); ok {
+		return cached
+	}
+
 	var comments []models.GuideComment
-	storage.DB.Where("host_id = ? AND parent_id IS NULL AND property_sale_id IN ?", hostID, listingIDs).
+	storage.DB.Select("id", "property_sale_id", "diagnosis", "severity", "status", "category", "trigger_event", "locale").
+		Where("host_id = ? AND parent_id IS NULL AND property_sale_id IN ?", hostID, listingIDs).
 		Where("status NOT IN ?", []string{models.GuideStatusDismissed, models.GuideStatusResolved}).
 		Order(`CASE severity WHEN 'urgent' THEN 0 WHEN 'action' THEN 1 ELSE 2 END,
 			CASE status WHEN 'unread' THEN 0 WHEN 'read' THEN 1 ELSE 2 END,
@@ -51,6 +56,7 @@ func GetListingPreviews(hostID uint, listingIDs []uint) map[uint]ListingGuidePre
 			Locale:         c.Locale,
 		}
 	}
+	setCachedListingPreviews(hostID, listingIDs, out)
 	return out
 }
 

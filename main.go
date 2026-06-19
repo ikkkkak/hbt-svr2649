@@ -297,7 +297,7 @@ func main() {
 		ctx.Next()
 	})
 
-	// Slow/error-only request logging (feed polling was flooding logs and adding I/O overhead).
+	// Error / very-slow-only logging — sub-300ms polling was flooding I/O and worsening stalls.
 	app.Use(func(ctx iris.Context) {
 		if ctx.Method() == iris.MethodOptions {
 			ctx.Next()
@@ -309,9 +309,9 @@ func main() {
 		ctx.Next()
 		ms := time.Since(start).Milliseconds()
 		status := ctx.GetStatusCode()
-		if ms >= 300 || status >= 400 {
+		if status >= 500 || (status >= 400 && ms >= 2000) || ms >= 8000 {
 			tag := ""
-			if ms >= 500 {
+			if ms >= 8000 {
 				tag = " (slow)"
 			}
 			log.Printf("← %s %s %dms status=%d%s", method, path, ms, status, tag)

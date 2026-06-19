@@ -14,13 +14,7 @@ import (
 )
 
 func syncHostLocaleFromRequest(ctx iris.Context, userID uint) {
-	loc := meskenyguide.NormalizeLocalePublic(ctx.GetHeader("X-App-Locale"))
-	if loc == "" {
-		return
-	}
-	storage.DB.Model(&models.NotificationPreference{}).
-		Where("user_id = ?", userID).
-		Update("language", loc)
+	meskenyguide.SyncHostLocaleAsync(userID, ctx.GetHeader("X-App-Locale"))
 }
 
 func canAccessSaleListing(userID, propertySaleID uint) bool {
