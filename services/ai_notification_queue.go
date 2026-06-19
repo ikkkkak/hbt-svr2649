@@ -203,15 +203,7 @@ func handleAINotificationJob(job AINotificationJob) {
 			return
 		}
 
-		// Localize title/description lightly (use user lang from notification preference if available).
-		lang := "en"
-		var pref models.NotificationPreference
-		if err := storage.DB.Where("user_id = ? AND enabled = ?", job.UserID, true).First(&pref).Error; err == nil {
-			if strings.TrimSpace(pref.Language) != "" {
-				lang = strings.ToLower(strings.TrimSpace(pref.Language))
-			}
-		}
-
+		lang := NormalizeNotificationLang(ResolveUserNotificationLang(job.UserID))
 		title, body := saleViewReminderCopy(lang, p.Title, p.City, p.ListingPrice)
 		title, body = maybeAICopy(
 			job.UserID,
@@ -293,14 +285,7 @@ func handleAINotificationJob(job AINotificationJob) {
 			return
 		}
 
-		lang := "en"
-		var pref models.NotificationPreference
-		if err := storage.DB.Where("user_id = ? AND enabled = ?", job.UserID, true).First(&pref).Error; err == nil {
-			if strings.TrimSpace(pref.Language) != "" {
-				lang = strings.ToLower(strings.TrimSpace(pref.Language))
-			}
-		}
-
+		lang := NormalizeNotificationLang(ResolveUserNotificationLang(job.UserID))
 		title, body := saleStillAvailableCopy(lang, p.Title, p.City, p.ListingPrice)
 		title, body = maybeAICopy(
 			job.UserID,
@@ -414,14 +399,7 @@ func handleAINotificationJob(job AINotificationJob) {
 		}
 
 		// Language from notification preference.
-		lang := "en"
-		var pref models.NotificationPreference
-		if err := storage.DB.Where("user_id = ? AND enabled = ?", job.UserID, true).First(&pref).Error; err == nil {
-			if strings.TrimSpace(pref.Language) != "" {
-				lang = strings.ToLower(strings.TrimSpace(pref.Language))
-			}
-		}
-
+		lang := NormalizeNotificationLang(ResolveUserNotificationLang(job.UserID))
 		title, body := saleSimilarCopy(lang, base.Title, sims)
 		simTitles := make([]string, 0, len(sims))
 		for _, s := range sims {
@@ -511,14 +489,7 @@ func handleAINotificationJob(job AINotificationJob) {
 		}
 		chosen := props[0]
 
-		lang := "en"
-		var pref models.NotificationPreference
-		if err := storage.DB.Where("user_id = ? AND enabled = ?", job.UserID, true).First(&pref).Error; err == nil {
-			if strings.TrimSpace(pref.Language) != "" {
-				lang = strings.ToLower(strings.TrimSpace(pref.Language))
-			}
-		}
-
+		lang := NormalizeNotificationLang(ResolveUserNotificationLang(job.UserID))
 		title, body := reengageCopy(lang, chosen.Title, chosen.City, chosen.ListingPrice)
 		title, body = maybeAICopy(
 			job.UserID,

@@ -3,6 +3,7 @@ package services
 import (
 	"apartments-clone-server/models"
 	"apartments-clone-server/storage"
+	"fmt"
 	"log"
 	"time"
 )
@@ -72,19 +73,15 @@ func checkAndSendNotifications() {
 			continue
 		}
 
-		// Send engaging Arabic notification
+		// Send localized host-mode reminder
 		userName := candidate.User.FirstName
-		if userName == "" {
-			userName = "عزيزي المستخدم"
-		}
-
-		// Generate engaging, TikTok-like notification message
-		title, body := generateEngagingNotification(userName, candidate.UserID)
+		lang := ResolveUserNotificationLang(candidate.UserID)
+		title, body := HostModeReminderCopy(lang, userName)
 
 		// Create notification data with deep linking to AddProperty screen
 		notificationData := NotificationData{
 			Type:   "host_mode_reminder",
-			UserID: string(rune(candidate.UserID)),
+			UserID: fmt.Sprintf("%d", candidate.UserID),
 			Screen: "AddProperty",
 			Params: `{"source": "host_mode_notification"}`,
 			Action: "add_property",
@@ -114,51 +111,4 @@ func checkAndSendNotifications() {
 
 		log.Printf("✅ Sent host mode reminder notification to user %d (%s)", candidate.UserID, userName)
 	}
-}
-
-// generateEngagingNotification creates TikTok-like engaging Arabic notifications
-// that guide users to add a property in less than 2 minutes
-func generateEngagingNotification(userName string, userID uint) (title, body string) {
-	// Get user's property count to personalize message
-	var propertyCount int64
-	storage.DB.Model(&models.Property{}).Where("host_id = ?", userID).Count(&propertyCount)
-
-	// Engaging, action-oriented messages in Arabic
-	messages := []struct {
-		title string
-		body  string
-	}{
-		{
-			title: "🏠 ابدأ رحلتك كمالك عقار!",
-			body:  "✨ أضف عقارك الأول في أقل من دقيقتين! 💰 ابدأ في كسب المال الآن",
-		},
-		{
-			title: "⚡ فرصة ذهبية!",
-			body:  "🎯 أضف عقارك الآن واستفد من آلاف المسافرين الباحثين عن مكان مثالي! 🚀",
-		},
-		{
-			title: "💰 اربح من عقارك!",
-			body:  "🏡 أضف عقارك في دقيقتين فقط وابدأ في استقبال الحجوزات! ⏱️ سريع وسهل",
-		},
-		{
-			title: "🚀 ابدأ الآن!",
-			body:  "✨ أضف عقارك الأول في أقل من دقيقتين! 💎 آلاف المسافرين ينتظرونك",
-		},
-		{
-			title: "💎 لا تفوت الفرصة!",
-			body:  "🏠 أضف عقارك الآن وابدأ في كسب المال! ⚡ سريع جداً - أقل من دقيقتين",
-		},
-	}
-
-	// Use user ID to consistently select a message (for A/B testing)
-	selectedIndex := int(userID) % len(messages)
-	selected := messages[selectedIndex]
-
-	// Personalize with user name
-	personalizedBody := selected.body
-	if userName != "" && userName != "عزيزي المستخدم" {
-		personalizedBody = "مرحباً " + userName + "! " + selected.body
-	}
-
-	return selected.title, personalizedBody
 }

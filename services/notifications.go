@@ -193,6 +193,9 @@ func (ns *NotificationService) getUserPushTokens(userID uint) ([]string, error) 
 
 // SendNotificationToUser sends a notification to a specific user
 func (ns *NotificationService) SendNotificationToUser(userID uint, title, body string, data NotificationData) error {
+	lang := ResolveUserNotificationLang(userID)
+	title, body = EnsureNotificationCopy(lang, data.Type, title, body)
+
 	if NotificationOrchestratorEnabled() {
 		dataMap := map[string]string{
 			"type":       data.Type,
@@ -445,22 +448,8 @@ func (ns *NotificationService) SendExperienceBookingNotificationToHost(experienc
 
 // SendPropertyStatusNotificationToHost sends notification when property status changes
 func (ns *NotificationService) SendPropertyStatusNotificationToHost(propertyID, hostID uint, propertyTitle, status string) error {
-	var title, body string
-
-	switch status {
-	case "approved":
-		title = "✅ Propriété Approuvée!"
-		body = fmt.Sprintf("Félicitations! Votre propriété '%s' a été approuvée et est maintenant visible.", propertyTitle)
-	case "rejected":
-		title = "❌ Propriété Rejetée"
-		body = fmt.Sprintf("Votre propriété '%s' a été rejetée. Veuillez vérifier les détails et soumettre à nouveau.", propertyTitle)
-	case "under_review":
-		title = "🔍 Propriété en Révision"
-		body = fmt.Sprintf("Votre propriété '%s' est en cours de révision par nos équipes.", propertyTitle)
-	default:
-		title = "🏠 Mise à Jour de Propriété"
-		body = fmt.Sprintf("Le statut de votre propriété '%s' a été mis à jour: %s", propertyTitle, status)
-	}
+	lang := ResolveUserNotificationLang(hostID)
+	title, body := PropertyStatusChangedCopy(lang, status, propertyTitle)
 
 	// Create navigation parameters for deep linking to property details
 	params := fmt.Sprintf(`{"propertyId": %d, "status": "%s"}`, propertyID, status)

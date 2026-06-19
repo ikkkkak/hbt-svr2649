@@ -172,12 +172,14 @@ func SubmitNotificationCandidate(in NotificationCandidateInput) (string, error) 
 	}
 
 	id := randomUUIDv4()
+	lang := ResolveUserNotificationLang(in.UserID)
+	title, body := EnsureNotificationCopy(lang, in.NotificationType, in.Title, in.Body)
 	row := models.NotificationCandidate{
 		ID:               id,
 		UserID:           in.UserID,
 		NotificationType: strings.TrimSpace(in.NotificationType),
-		Title:            in.Title,
-		Body:             in.Body,
+		Title:            title,
+		Body:             body,
 		Payload:          datatypes.JSON(payloadBytes),
 		ImageURL:         strings.TrimSpace(in.ImageURL),
 		RelevanceScore:   rel,
@@ -488,8 +490,10 @@ func deliverCandidate(c *models.NotificationCandidate) bool {
 		data["type"] = c.NotificationType
 	}
 	data["candidate_id"] = c.ID
+	lang := ResolveUserNotificationLang(c.UserID)
+	title, body := EnsureNotificationCopy(lang, c.NotificationType, c.Title, c.Body)
 	ns := NotificationServiceInstance
-	ok := ns.DeliverPushDirectToUser(c.UserID, c.Title, c.Body, c.ImageURL, data)
+	ok := ns.DeliverPushDirectToUser(c.UserID, title, body, c.ImageURL, data)
 	if ok {
 		logOrchestratorLegacyDelivery(c, data)
 	}
@@ -634,7 +638,7 @@ func tryComposeBatchDigests() {
 		}
 
 		batchID := randomUUIDv4()
-		parts := make([]string, 0, len(items))
+		typeKeys := make([]string, 0, len(items))
 		ids := make([]string, 0, len(items))
 		for _, it := range items {
 			ids = append(ids, it.ID)
@@ -642,10 +646,10 @@ func tryComposeBatchDigests() {
 			if p == "" {
 				p = "update"
 			}
-			parts = append(parts, p)
+			typeKeys = append(typeKeys, p)
 		}
-		title := "Meskeny — plusieurs mises à jour"
-		body := fmt.Sprintf("%d notifications: %s", len(items), strings.Join(parts, ", "))
+		lang := ResolveUserNotificationLang(uid)
+		title, body := NotificationDigestCopy(lang, len(items), typeKeys)
 		digestID := randomUUIDv4()
 		payload, _ := json.Marshal(map[string]interface{}{
 			"type":                "notification_digest",

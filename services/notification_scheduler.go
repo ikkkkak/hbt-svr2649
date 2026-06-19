@@ -132,31 +132,15 @@ func (ns *NotificationService) sendRentSuggestionNotifications(now time.Time) {
 			continue
 		}
 
- 		// Language: prefer notification_preferences.language; fallback to "en".
- 		lang := "en"
- 		var pref models.NotificationPreference
- 		if err := storage.DB.
- 			Where("user_id = ? AND enabled = ?", u.ID, true).
- 			Order("updated_at DESC").
- 			First(&pref).Error; err == nil {
- 			if strings.TrimSpace(pref.Language) != "" {
- 				lang = strings.ToLower(strings.TrimSpace(pref.Language))
- 			}
- 		}
- 		if len(lang) > 2 {
- 			lang = lang[:2]
+ 		// Language from notification preferences (en | fr | ar).
+ 		lang := ResolveUserNotificationLang(u.ID)
+
+ 		propTitle := strings.TrimSpace(chosen.Title)
+ 		if propTitle == "" {
+ 			propTitle = fmt.Sprintf("Property #%d", chosen.ID)
  		}
 
- 		// Localized copy (stable, no external MT dependency for push templates).
- 		title := "🏠 Property for rent"
- 		bodyPrefix := "Check this out"
- 		if lang == "ar" {
- 			title = "🏠 عقار للإيجار"
- 			bodyPrefix = "شاهد هذا"
- 		} else if lang == "fr" {
- 			title = "🏠 Location disponible"
- 			bodyPrefix = "À découvrir"
- 		}
+ 		title, body := SmartRentSuggestionCopy(lang, propTitle)
 
  		// Best-effort image from Property.Images JSON string.
  		imageURL := ""
@@ -167,12 +151,6 @@ func (ns *NotificationService) sendRentSuggestionNotifications(now time.Time) {
  			}
  		}
 
- 		propTitle := strings.TrimSpace(chosen.Title)
- 		if propTitle == "" {
- 			propTitle = fmt.Sprintf("Property #%d", chosen.ID)
- 		}
-
- 		body := fmt.Sprintf("%s: %s", bodyPrefix, propTitle)
  		data := map[string]string{
  			"type":       "rent_suggestion",
  			"id":         fmt.Sprintf("%d", chosen.ID),
@@ -331,8 +309,8 @@ func (ns *NotificationService) sendContinueBrowsingNotifications(now time.Time) 
 			imageURL = prop.Images[0]
 		}
 
-		title := "Continue where you left off"
-		body := "New properties are waiting for you in your area."
+		lang := ResolveUserNotificationLang(u.ID)
+		title, body := SmartContinueBrowsingCopy(lang)
 		data := map[string]string{
 			"type":       "continue_browsing",
 			"id":         fmt.Sprintf("%d", prop.ID),
@@ -441,8 +419,8 @@ func (ns *NotificationService) sendTrendingNotifications(now time.Time) {
 			imageURL = selected.Images[0]
 		}
 
-		title := "Trending in your area"
-		body := "These properties are getting a lot of attention. Check them now."
+		lang := ResolveUserNotificationLang(u.ID)
+		title, body := SmartTrendingCopy(lang)
 		data := map[string]string{
 			"type":       "trending_properties",
 			"id":         fmt.Sprintf("%d", selected.ID),
@@ -533,8 +511,8 @@ func (ns *NotificationService) sendWeeklyDigestNotifications(now time.Time) {
 			imageURL = chosen.Images[0]
 		}
 
-		title := "Top properties this week"
-		body := fmt.Sprintf("Best picks for you: %s", chosen.Title)
+		lang := ResolveUserNotificationLang(u.ID)
+		title, body := SmartWeeklyDigestCopy(lang, chosen.Title)
 		data := map[string]string{
 			"type":       "weekly_digest",
 			"id":         fmt.Sprintf("%d", chosen.ID),
@@ -652,12 +630,8 @@ func (ns *NotificationService) sendNearbyNotifications(now time.Time) {
 			imageURL = chosen.Images[0]
 		}
 
-		title := "New property near you"
-		body := fmt.Sprintf(
-			"A new apartment is available within %.1f km of your location. Check \"%s\".",
-			chosenDistKm,
-			chosen.Title,
-		)
+		lang := ResolveUserNotificationLang(u.ID)
+		title, body := SmartNearbyCopy(lang, chosen.Title, chosenDistKm)
 		data := map[string]string{
 			"type":       "nearby_property",
 			"id":         fmt.Sprintf("%d", chosen.ID),
@@ -803,13 +777,16 @@ func (ns *NotificationService) DeliverPushDirectToUser(userID uint, title, body,
 }
 
 func (ns *NotificationService) sendToUserWithImage(userID uint, title, body, imageURL string, data map[string]string) bool {
-	if NotificationOrchestratorEnabled() {
-		typ := "push"
-		if data != nil {
-			if t := strings.TrimSpace(data["type"]); t != "" {
-				typ = t
-			}
+	typ := "push"
+	if data != nil {
+		if t := strings.TrimSpace(data["type"]); t != "" {
+			typ = t
 		}
+	}
+	lang := ResolveUserNotificationLang(userID)
+	title, body = EnsureNotificationCopy(lang, typ, title, body)
+
+	if NotificationOrchestratorEnabled() {
 		_, err := SubmitNotificationCandidate(NotificationCandidateInput{
 			UserID:           userID,
 			NotificationType: typ,

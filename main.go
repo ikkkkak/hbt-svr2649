@@ -397,6 +397,12 @@ func main() {
 		auth.Get("/sessions", accessTokenVerifierMiddleware, utils.ListRefreshTokenSessions)
 	}
 
+	// OAuth 2.0 naming alias (RFC 6749 token endpoint)
+	tokenParty := app.Party("/api/token")
+	{
+		tokenParty.Post("/refresh", utils.RefreshToken)
+	}
+
 	// Health — liveness vs readiness vs deep diagnostics
 	fmt.Println("🔧 Setting up health check endpoints...")
 	app.Get("/health", routes.HealthLive)
@@ -487,6 +493,7 @@ func main() {
 		user.Post("/register-phone", routes.RegisterPhone)
 		user.Post("/login-phone", routes.LoginPhone)
 		user.Post("/facebook", routes.FacebookLoginOrSignUp)
+		user.Post("/facebook/code", routes.FacebookLoginWithCode)
 		user.Post("/google", routes.GoogleLoginOrSignUp)
 		user.Post("/apple", routes.AppleLoginOrSignUp)
 		user.Post("/forgotpassword", routes.ForgotPassword)

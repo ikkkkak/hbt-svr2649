@@ -9,6 +9,8 @@ import (
 	"io/ioutil"
 	"log"
 	"net/http"
+	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -237,6 +239,9 @@ func LoginPhone(ctx iris.Context) {
 }
 
 func FacebookLoginOrSignUp(ctx iris.Context) {
+	if !utils.EnforceLoginRateLimit(ctx) {
+		return
+	}
 	var userInput FacebookOrGoogleUserInput
 	err := ctx.ReadJSON(&userInput)
 	if err != nil {
@@ -244,52 +249,138 @@ func FacebookLoginOrSignUp(ctx iris.Context) {
 		return
 	}
 
-	endpoint := "https://graph.facebook.com/me?fields=id,name,email&access_token=" + userInput.AccessToken
-	client := &http.Client{}
+	facebookBody, fbErr := fetchFacebookProfile(userInput.AccessToken)
+	if fbErr != nil {
+		utils.CreateInternalServerError(ctx)
+		return
+	}
+	handleFacebookUser(facebookBody, ctx)
+}
+
+// FacebookLoginWithCode exchanges an OAuth authorization code (PKCE) server-side, then issues app tokens.
+func FacebookLoginWithCode(ctx iris.Context) {
+	if !utils.EnforceLoginRateLimit(ctx) {
+		return
+	}
+	var input FacebookCodeInput
+	if err := ctx.ReadJSON(&input); err != nil {
+		utils.HandleValidationErrors(err, ctx)
+		return
+	}
+	if input.Code == "" || input.RedirectURI == "" {
+		ctx.StatusCode(iris.StatusBadRequest)
+		ctx.JSON(iris.Map{"error": "code and redirect_uri are required"})
+		return
+	}
+
+	accessToken, exchangeErr := exchangeFacebookAuthCode(input.Code, input.CodeVerifier, input.RedirectURI)
+	if exchangeErr != nil {
+		log.Printf("[auth] facebook code exchange failed: %v", exchangeErr)
+		ctx.StatusCode(iris.StatusUnauthorized)
+		ctx.JSON(iris.Map{"error": "facebook authorization failed"})
+		return
+	}
+
+	facebookBody, fbErr := fetchFacebookProfile(accessToken)
+	if fbErr != nil {
+		utils.CreateInternalServerError(ctx)
+		return
+	}
+	handleFacebookUser(facebookBody, ctx)
+}
+
+func exchangeFacebookAuthCode(code, codeVerifier, redirectURI string) (string, error) {
+	appID := os.Getenv("FACEBOOK_APP_ID")
+	appSecret := os.Getenv("FACEBOOK_APP_SECRET")
+	if appID == "" || appSecret == "" {
+		return "", fmt.Errorf("facebook app credentials not configured")
+	}
+
+	params := url.Values{}
+	params.Set("client_id", appID)
+	params.Set("client_secret", appSecret)
+	params.Set("redirect_uri", redirectURI)
+	params.Set("code", code)
+	if codeVerifier != "" {
+		params.Set("code_verifier", codeVerifier)
+	}
+
+	resp, err := http.PostForm("https://graph.facebook.com/v21.0/oauth/access_token", params)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+	if resp.StatusCode >= 400 {
+		return "", fmt.Errorf("facebook token error (%d): %s", resp.StatusCode, string(body))
+	}
+
+	var tokenRes struct {
+		AccessToken string `json:"access_token"`
+	}
+	if err := json.Unmarshal(body, &tokenRes); err != nil {
+		return "", err
+	}
+	if tokenRes.AccessToken == "" {
+		return "", fmt.Errorf("empty facebook access token")
+	}
+	return tokenRes.AccessToken, nil
+}
+
+func fetchFacebookProfile(accessToken string) (FacebookUserRes, error) {
+	endpoint := "https://graph.facebook.com/me?fields=id,name,email&access_token=" + url.QueryEscape(accessToken)
+	client := &http.Client{Timeout: 12 * time.Second}
 	req, _ := http.NewRequest("GET", endpoint, nil)
 	res, facebookErr := client.Do(req)
 	if facebookErr != nil {
-		utils.CreateInternalServerError(ctx)
-		return
+		return FacebookUserRes{}, facebookErr
 	}
-
 	defer res.Body.Close()
 	body, bodyErr := ioutil.ReadAll(res.Body)
 	if bodyErr != nil {
-		log.Panic(bodyErr)
+		return FacebookUserRes{}, bodyErr
+	}
+	var facebookBody FacebookUserRes
+	json.Unmarshal(body, &facebookBody)
+	return facebookBody, nil
+}
+
+func handleFacebookUser(facebookBody FacebookUserRes, ctx iris.Context) {
+	if facebookBody.Email == "" {
+		ctx.StatusCode(iris.StatusUnauthorized)
+		ctx.JSON(iris.Map{"error": "facebook account must provide an email"})
+		return
+	}
+
+	var user models.User
+	userExists, userExistsErr := getAndHandleUserExists(&user, facebookBody.Email)
+	if userExistsErr != nil {
 		utils.CreateInternalServerError(ctx)
 		return
 	}
 
-	var facebookBody FacebookUserRes
-	json.Unmarshal(body, &facebookBody)
-
-	if facebookBody.Email != "" {
-		var user models.User
-		userExists, userExistsErr := getAndHandleUserExists(&user, facebookBody.Email)
-
-		if userExistsErr != nil {
-			utils.CreateInternalServerError(ctx)
-			return
+	if !userExists {
+		nameArr := strings.SplitN(facebookBody.Name, " ", 2)
+		lastName := ""
+		if len(nameArr) > 1 {
+			lastName = nameArr[1]
 		}
-
-		if userExists == false {
-			nameArr := strings.SplitN(facebookBody.Name, " ", 2)
-			user = models.User{FirstName: nameArr[0], LastName: nameArr[1], Email: facebookBody.Email, SocialLogin: true, SocialProvider: "Facebook"}
-			storage.DB.Create(&user)
-
-			returnUser(user, ctx)
-			return
-		}
-
-		if user.SocialLogin == true && user.SocialProvider == "Facebook" {
-			returnUser(user, ctx)
-			return
-		}
-
-		utils.CreateEmailAlreadyRegistered(ctx)
+		user = models.User{FirstName: nameArr[0], LastName: lastName, Email: facebookBody.Email, SocialLogin: true, SocialProvider: "Facebook"}
+		storage.DB.Create(&user)
+		returnUser(user, ctx)
 		return
 	}
+
+	if user.SocialLogin && user.SocialProvider == "Facebook" {
+		returnUser(user, ctx)
+		return
+	}
+
+	utils.CreateEmailAlreadyRegistered(ctx)
 }
 
 func GoogleLoginOrSignUp(ctx iris.Context) {
@@ -1461,6 +1552,12 @@ type LoginPhoneInput struct {
 
 type FacebookOrGoogleUserInput struct {
 	AccessToken string `json:"accessToken" validate:"required"`
+}
+
+type FacebookCodeInput struct {
+	Code         string `json:"code" validate:"required"`
+	CodeVerifier string `json:"code_verifier"`
+	RedirectURI  string `json:"redirect_uri" validate:"required"`
 }
 
 type AppleUserInput struct {

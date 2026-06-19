@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
+	"log"
 	"net"
 	"os"
 	"strconv"
@@ -106,9 +107,9 @@ func PurgeOldRefreshTokens() {
 }
 
 
-// AccessTokenExpiry returns the access token lifetime. Uses ACCESS_TOKEN_EXPIRY_MINUTES (default 15).
+// AccessTokenExpiry returns the access token lifetime. Uses ACCESS_TOKEN_EXPIRY_MINUTES (default 60).
 func AccessTokenExpiry() time.Duration {
-	m := 15
+	m := 60
 	if s := os.Getenv("ACCESS_TOKEN_EXPIRY_MINUTES"); s != "" {
 		if n, _ := strconv.Atoi(s); n > 0 {
 			m = n
@@ -123,9 +124,9 @@ func AccessTokenExpiresInSeconds() int {
 }
 
 // RefreshTokenExpiry returns the refresh token lifetime.
-// Uses REFRESH_TOKEN_EXPIRY_DAYS (default 90 for Zero Re-Login per brief).
+// Uses REFRESH_TOKEN_EXPIRY_DAYS (default 14 — OAuth mobile session target).
 func RefreshTokenExpiry() time.Duration {
-	d := 90
+	d := 14
 	if s := os.Getenv("REFRESH_TOKEN_EXPIRY_DAYS"); s != "" {
 		if n, _ := strconv.Atoi(s); n > 0 {
 			d = n
@@ -277,6 +278,7 @@ func RefreshToken(ctx iris.Context) {
 	if refreshTokenRecord.Revoked {
 		// Token reuse detection: a revoked refresh token is being used again.
 		// Security response: revoke ALL tokens for this user (force re-login everywhere).
+		log.Printf("[auth] refresh reuse detected user_id=%d ip=%s", refreshTokenRecord.UserID, clientIP(ctx))
 		storage.DB.Model(&models.RefreshToken{}).
 			Where("user_id = ? AND revoked = false", refreshTokenRecord.UserID).
 			Updates(map[string]interface{}{"revoked": true, "revoked_at": time.Now()})
@@ -308,11 +310,13 @@ func RefreshToken(ctx iris.Context) {
 
 	tokenPair, err := CreateTokenPair(refreshTokenRecord.UserID, deviceID)
 	if err != nil {
+		log.Printf("[auth] refresh token issue failed user_id=%d: %v", refreshTokenRecord.UserID, err)
 		ctx.StatusCode(iris.StatusInternalServerError)
 		ctx.JSON(iris.Map{"error": "failed to generate new tokens"})
 		return
 	}
 
+	log.Printf("[auth] refresh ok user_id=%d ip=%s", refreshTokenRecord.UserID, clientIP(ctx))
 	ctx.JSON(iris.Map{
 		"accessToken":  string(tokenPair.AccessToken),
 		"refreshToken": string(tokenPair.RefreshToken),
