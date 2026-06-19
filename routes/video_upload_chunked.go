@@ -325,7 +325,14 @@ func UploadVideoChunk(ctx iris.Context) {
 	bufWriter := bufio.NewWriterSize(out, 256*1024) // 256KB buffer
 
 	// Stream chunk with proper error handling
-	written, err := io.Copy(bufWriter, io.LimitReader(ctx.Request().Body, int64(expected)))
+	written, copyErr := io.Copy(bufWriter, io.LimitReader(ctx.Request().Body, int64(expected)))
+	if copyErr != nil && copyErr != io.EOF {
+		log.Printf("❌ failed to read chunk for upload %s index %d: %v", uploadID, index, copyErr)
+		out.Close()
+		_ = os.Remove(path)
+		ctx.StopWithJSON(http.StatusBadRequest, iris.Map{"error": "failed to read chunk"})
+		return
+	}
 	if err := bufWriter.Flush(); err != nil {
 		log.Printf("❌ failed to flush chunk buffer for upload %s index %d: %v", uploadID, index, err)
 		out.Close()
@@ -335,14 +342,6 @@ func UploadVideoChunk(ctx iris.Context) {
 	}
 	out.Close()
 
-	if err != nil && err != io.EOF {
-		log.Printf("❌ failed to read chunk for upload %s index %d: %v", uploadID, index, err)
-		_ = os.Remove(path)
-		ctx.StopWithJSON(http.StatusBadRequest, iris.Map{"error": "failed to read chunk"})
-		return
-	}
-
-	// Verify chunk size
 	if written != int64(expected) {
 		log.Printf("❌ chunk size mismatch for upload %s index %d: expected %d, got %d", uploadID, index, expected, written)
 		_ = os.Remove(path)

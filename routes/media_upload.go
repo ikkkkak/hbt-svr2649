@@ -180,17 +180,17 @@ func UploadVideoChunkHLS(ctx iris.Context) {
 	bufWriter := bufio.NewWriterSize(f, 256*1024) // 256KB buffer
 
 	// Stream chunk to disk (not in memory)
-	written, err := io.Copy(bufWriter, limitedReader)
+	written, copyErr := io.Copy(bufWriter, limitedReader)
+	if copyErr != nil && copyErr != io.EOF {
+		log.Printf("❌ failed to stream chunk for upload %s index %d: %v", uploadID, chunkIndex, copyErr)
+		os.Remove(chunkPath)
+		ctx.StopWithJSON(http.StatusInternalServerError, iris.Map{"error": "failed to stream chunk"})
+		return
+	}
 	if err := bufWriter.Flush(); err != nil {
 		log.Printf("❌ failed to flush chunk buffer for upload %s index %d: %v", uploadID, chunkIndex, err)
 		os.Remove(chunkPath)
 		ctx.StopWithJSON(http.StatusInternalServerError, iris.Map{"error": "failed to write chunk data"})
-		return
-	}
-	if err != nil {
-		log.Printf("❌ failed to stream chunk for upload %s index %d: %v", uploadID, chunkIndex, err)
-		os.Remove(chunkPath)
-		ctx.StopWithJSON(http.StatusInternalServerError, iris.Map{"error": "failed to stream chunk"})
 		return
 	}
 
