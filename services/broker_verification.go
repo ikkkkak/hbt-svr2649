@@ -7,13 +7,21 @@ import (
 	"strings"
 )
 
+// BrokerIDString returns the public broker ID or "" when unset.
+func BrokerIDString(u *models.User) string {
+	if u == nil || u.BrokerID == nil {
+		return ""
+	}
+	return strings.TrimSpace(*u.BrokerID)
+}
+
 // IsVerifiedBroker returns true when the user completed broker identity verification.
 func IsVerifiedBroker(u *models.User) bool {
 	if u == nil {
 		return false
 	}
 	if strings.EqualFold(strings.TrimSpace(u.BrokerStatus), "approved") &&
-		strings.TrimSpace(u.BrokerID) != "" {
+		BrokerIDString(u) != "" {
 		return true
 	}
 	return u.TrueBroker

@@ -229,6 +229,8 @@ func performMigrations(db *gorm.DB) {
 		log.Printf("❌ AutoMigrate error: %v", err)
 	}
 
+	ensureBrokerIDPartialUniqueIndex(db)
+
 	ensureHabitatGISRelations(db)
 	ensureLandmarkWishlistTables(db)
 
@@ -883,6 +885,33 @@ func ensurePerformanceIndexes(db *gorm.DB) {
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_landmarks_org_owner
 		ON landmarks(organization_id, owner_id)
 		WHERE deleted_at IS NULL`)
+}
+
+// ensureBrokerIDPartialUniqueIndex prevents signup failures when many users have no broker ID yet.
+// GORM uniqueIndex on broker_id treated '' as one value — only assigned IDs must be unique.
+func ensureBrokerIDPartialUniqueIndex(db *gorm.DB) {
+	db.Exec(`UPDATE users SET broker_id = NULL WHERE broker_id = ''`)
+	db.Exec(`DROP INDEX IF EXISTS idx_users_broker_id`)
+	db.Exec(`DROP INDEX IF EXISTS uni_users_broker_id`)
+	db.Exec(`
+DO $$
+DECLARE r RECORD;
+BEGIN
+  FOR r IN
+    SELECT indexname
+    FROM pg_indexes
+    WHERE schemaname = 'public'
+      AND tablename = 'users'
+      AND indexdef ILIKE '%broker_id%'
+      AND indexdef NOT ILIKE '%where%'
+  LOOP
+    EXECUTE format('DROP INDEX IF EXISTS %I', r.indexname);
+  END LOOP;
+END $$`)
+	db.Exec(`
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_broker_id
+  ON users (broker_id)
+  WHERE broker_id IS NOT NULL AND broker_id <> ''`)
 }
 
 func InitializeDB() *gorm.DB {

@@ -18,6 +18,33 @@ import (
 var fcmClient *messaging.Client
 var fcmInitialized bool
 
+func logServiceAccountMeta(jsonData map[string]interface{}) {
+	if pid, ok := jsonData["project_id"].(string); ok && pid != "" {
+		log.Printf("🔥 FCM project_id=%s", pid)
+	}
+	if email, ok := jsonData["client_email"].(string); ok && email != "" {
+		log.Printf("🔥 FCM service account=%s", email)
+	}
+}
+
+func isFCMAuthError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "invalid_grant") ||
+		strings.Contains(msg, "cannot fetch token") ||
+		strings.Contains(msg, "account not found")
+}
+
+func disableFCMAuth(reason string) {
+	fcmInitialized = false
+	fcmClient = nil
+	log.Printf("❌ FCM disabled: %s", reason)
+	log.Printf("❌ Fix: Firebase Console → Project Settings → Service Accounts → Generate new private key")
+	log.Printf("❌ Set FCM_CREDENTIALS_JSON on the server with the new JSON (old/deleted service accounts cause invalid_grant).")
+}
+
 func looksLikeFirebaseServiceAccount(path string) bool {
 	b, err := os.ReadFile(path)
 	if err != nil || len(b) == 0 || len(b) > 2<<20 {
@@ -121,6 +148,7 @@ func InitializeFCM() error {
 			log.Printf("⚠️ FCM will be disabled. Make sure FCM_CREDENTIALS_JSON contains valid service-account.json content")
 			return fmt.Errorf("invalid JSON in FCM_CREDENTIALS_JSON: %v", err)
 		}
+		logServiceAccountMeta(jsonData)
 
 		// Create a temporary file with the credentials
 		tmpFile, err := os.CreateTemp("", "fcm-credentials-*.json")
@@ -340,9 +368,14 @@ func SendFCMPushWithImage(tokens []string, title, body, imageURL string, data ma
 	br, err := fcmClient.SendMulticast(ctx, message)
 	if err != nil {
 		log.Printf("⚠️ FCM send error: %v", err)
-		// Check if it's a token error - we might need to handle invalid tokens
-		if strings.Contains(err.Error(), "invalid") || strings.Contains(err.Error(), "not found") {
-			// Try sending individually to identify bad tokens
+		if isFCMAuthError(err) {
+			disableFCMAuth(err.Error())
+			return err
+		}
+		// Token-level failures — try individually to identify bad tokens.
+		errLower := strings.ToLower(err.Error())
+		if strings.Contains(errLower, "invalid registration") ||
+			strings.Contains(errLower, "unregistered") {
 			log.Printf("🔄 Attempting individual sends to identify invalid tokens...")
 			return sendIndividualFCMPushWithImage(ctx, validTokens, title, body, imageURL, data)
 		}
@@ -423,6 +456,10 @@ func sendIndividualFCMPushWithImage(ctx context.Context, tokens []string, title,
 
 		_, err := fcmClient.Send(ctx, message)
 		if err != nil {
+			if isFCMAuthError(err) {
+				disableFCMAuth(err.Error())
+				return err
+			}
 			log.Printf("⚠️ Failed to send to token %s...: %v", token[:min(30, len(token))], err)
 			// Remove invalid token
 			if strings.Contains(strings.ToLower(err.Error()), "invalid") ||

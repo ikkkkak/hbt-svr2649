@@ -2,6 +2,7 @@ package routes
 
 import (
 	"apartments-clone-server/models"
+	"apartments-clone-server/services"
 	"apartments-clone-server/storage"
 	"apartments-clone-server/utils"
 	"net/http"
@@ -37,7 +38,7 @@ func adminIdentityUserDTO(u *models.User, historyCount int) iris.Map {
 		"idFrontImage":       u.IDFrontImage,
 		"idBackImage":        u.IDBackImage,
 		"selfieImage":        u.SelfieImage,
-		"brokerId":           u.BrokerID,
+		"brokerId":           services.BrokerIDString(u),
 		"brokerStatus":       u.BrokerStatus,
 		"createdAt":          u.CreatedAt,
 		"updatedAt":          u.UpdatedAt,

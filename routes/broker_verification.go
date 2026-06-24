@@ -56,7 +56,7 @@ func brokerStatusPayload(u *models.User) iris.Map {
 	showProfile := services.BrokerProfileVisibleOnListings(u)
 	out := iris.Map{
 		"status":                        strings.TrimSpace(u.BrokerStatus),
-		"broker_id":                     strings.TrimSpace(u.BrokerID),
+		"broker_id":                     services.BrokerIDString(u),
 		"is_verified":                   verified,
 		"show_profile_on_listings":      showProfile,
 		"broker_profile_visible":        showProfile,
@@ -301,13 +301,13 @@ func AdminReviewBrokerVerification(ctx iris.Context) {
 	user.BrokerVerifiedBy = &adminID
 
 	if status == "approved" {
-		if strings.TrimSpace(user.BrokerID) == "" {
+		if services.BrokerIDString(&user) == "" {
 			brokerID, genErr := services.GenerateBrokerID()
 			if genErr != nil {
 				utils.JSONError(ctx, http.StatusInternalServerError, "id_generation_failed", genErr.Error())
 				return
 			}
-			user.BrokerID = brokerID
+			user.BrokerID = &brokerID
 		}
 		user.BrokerVerifiedAt = &now
 		user.TrueBroker = true

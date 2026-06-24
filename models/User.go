@@ -37,7 +37,7 @@ type User struct {
 	SelfieImage         string         `json:"selfieImage"`
 	Role                string         `json:"role" gorm:"type:varchar(20);default:user;index"` // user, host, admin, super_admin
 	TrueBroker          bool           `json:"true_broker" gorm:"default:false"`                // admin-verified broker; all their properties show TrueBroker
-	BrokerID            string         `json:"broker_id" gorm:"uniqueIndex;size:32"`            // public ID e.g. MSK-B-100042
+	BrokerID            *string        `json:"broker_id" gorm:"size:32"` // assigned on broker approval; NULL until then
 	BrokerStatus        string         `json:"broker_status" gorm:"default:'none';index"`       // none, pending, approved, rejected
 	BrokerVerifiedAt    *time.Time     `json:"broker_verified_at"`
 	BrokerVerifiedBy    *uint          `json:"broker_verified_by"`

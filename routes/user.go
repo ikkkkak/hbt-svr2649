@@ -179,12 +179,14 @@ func RegisterPhone(ctx iris.Context) {
 
 	// Create user with proper error handling
 	if err := storage.DB.Create(&newUser).Error; err != nil {
-		// For phone registration, only check phone number constraint
 		if strings.Contains(err.Error(), "idx_users_phone_number") {
 			utils.CreateError(iris.StatusConflict, "Registration Error", "Phone number already exists", ctx)
 			return
 		}
-		// Generic database error
+		if strings.Contains(err.Error(), "idx_users_broker_id") || strings.Contains(err.Error(), "broker_id") {
+			utils.CreateError(iris.StatusConflict, "Registration Error", "Unable to complete registration. Please try again.", ctx)
+			return
+		}
 		utils.CreateInternalServerError(ctx)
 		return
 	}
