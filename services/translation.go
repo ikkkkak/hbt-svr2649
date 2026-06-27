@@ -20,6 +20,90 @@ var translateCache = struct {
 	data: make(map[string]map[string]string),
 }
 
+// circuit breaker — stops calling MarianMT after repeated failures (503 suspended, etc.)
+var translationBreaker = struct {
+	sync.Mutex
+	failures    int
+	openUntil   time.Time
+	lastLogAt   time.Time
+	constantErr error
+}{
+	constantErr: fmt.Errorf("translation service unavailable (circuit open)"),
+}
+
+const (
+	translationFailureThreshold = 3
+	translationBreakerCooldown  = 15 * time.Minute
+)
+
+func translationEnabled() bool {
+	v := strings.TrimSpace(strings.ToLower(os.Getenv("TRANSLATION_ENABLED")))
+	if v == "0" || v == "false" || v == "no" || v == "off" {
+		return false
+	}
+	return true
+}
+
+func marianMTURL() string {
+	if u := strings.TrimSpace(os.Getenv("MARIANMT_URL")); u != "" {
+		return u
+	}
+	return "https://librerender-1.onrender.com/translate"
+}
+
+func translationCircuitOpen() bool {
+	translationBreaker.Lock()
+	defer translationBreaker.Unlock()
+	return time.Now().Before(translationBreaker.openUntil)
+}
+
+func recordTranslationFailure(err error) {
+	translationBreaker.Lock()
+	defer translationBreaker.Unlock()
+	translationBreaker.failures++
+	if translationBreaker.failures >= translationFailureThreshold {
+		translationBreaker.openUntil = time.Now().Add(translationBreakerCooldown)
+		if time.Since(translationBreaker.lastLogAt) > time.Minute {
+			translationBreaker.lastLogAt = time.Now()
+			log.Printf("⚠️  Translation circuit open for %v (%d failures). Set MARIANMT_URL to a live service or TRANSLATION_ENABLED=false. Last error: %v",
+				translationBreakerCooldown, translationBreaker.failures, err)
+		}
+	}
+}
+
+func recordTranslationSuccess() {
+	translationBreaker.Lock()
+	defer translationBreaker.Unlock()
+	if translationBreaker.failures > 0 {
+		log.Printf("✅ Translation service recovered after %d failure(s)", translationBreaker.failures)
+	}
+	translationBreaker.failures = 0
+	translationBreaker.openUntil = time.Time{}
+}
+
+func buildFallbackTranslations(text string) map[string]string {
+	sourceLang := detectSourceLanguage(text)
+	out := map[string]string{"en": text, "fr": text, "ar": text}
+	if sourceLang != "" {
+		out[sourceLang] = text
+	}
+	return out
+}
+
+func isNonRetryableTranslationStatus(code int) bool {
+	switch code {
+	case http.StatusTooManyRequests,
+		http.StatusForbidden,
+		http.StatusNotFound,
+		http.StatusServiceUnavailable,
+		http.StatusUnauthorized,
+		http.StatusPaymentRequired:
+		return true
+	default:
+		return code >= 500 && code != http.StatusBadGateway && code != http.StatusGatewayTimeout
+	}
+}
+
 type marianMTResponse struct {
 	TranslatedText interface{} `json:"translated_text"` // Can be string or []string
 }
@@ -30,12 +114,14 @@ func translateOnce(text, target string) (string, error) {
 	if text == "" {
 		return "", nil
 	}
-
-	// Get MarianMT API URL from environment or use default
-	url := os.Getenv("MARIANMT_URL")
-	if url == "" {
-		url = "https://librerender-1.onrender.com/translate"
+	if !translationEnabled() {
+		return text, nil
 	}
+	if translationCircuitOpen() {
+		return "", translationBreaker.constantErr
+	}
+
+	url := marianMTURL()
 
 	// Detect source language (simple heuristic - can be improved)
 	source := detectSourceLanguage(text)
@@ -71,30 +157,39 @@ func translateOnce(text, target string) (string, error) {
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	// Retry logic for Render cold starts (up to 2 retries)
+	// Retry logic for Render cold starts (502/504 only)
 	var resp *http.Response
 	maxRetries := 2
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if attempt > 0 {
-			// Wait before retry (exponential backoff)
 			waitTime := time.Duration(attempt) * 2 * time.Second
 			log.Printf("⏳ Retrying MarianMT request (attempt %d/%d) after %v...", attempt+1, maxRetries+1, waitTime)
 			time.Sleep(waitTime)
+			req, err = http.NewRequest("POST", url, bytes.NewBuffer(body))
+			if err != nil {
+				return "", fmt.Errorf("failed to create request: %w", err)
+			}
+			req.Header.Set("Content-Type", "application/json")
 		}
 
 		resp, err = client.Do(req)
-		if err == nil {
+		if err != nil {
+			if attempt < maxRetries && (strings.Contains(err.Error(), "timeout") || strings.Contains(err.Error(), "connection")) {
+				log.Printf("⚠️  MarianMT request failed (attempt %d/%d): %v", attempt+1, maxRetries+1, err)
+				continue
+			}
+			recordTranslationFailure(err)
+			return "", fmt.Errorf("failed to call MarianMT after %d attempts: %w", attempt+1, err)
+		}
+
+		if resp.StatusCode == http.StatusOK || isNonRetryableTranslationStatus(resp.StatusCode) {
 			break
 		}
-
-		// Check if it's a timeout or connection error (likely cold start)
-		if attempt < maxRetries && (strings.Contains(err.Error(), "timeout") || strings.Contains(err.Error(), "connection")) {
-			log.Printf("⚠️  MarianMT request failed (attempt %d/%d): %v", attempt+1, maxRetries+1, err)
+		if attempt < maxRetries && (resp.StatusCode == http.StatusBadGateway || resp.StatusCode == http.StatusGatewayTimeout) {
+			resp.Body.Close()
 			continue
 		}
-
-		// Last attempt or non-retryable error
-		return "", fmt.Errorf("failed to call MarianMT after %d attempts: %w", attempt+1, err)
+		break
 	}
 
 	if resp == nil {
@@ -113,13 +208,20 @@ func translateOnce(text, target string) (string, error) {
 		if len(responsePreview) > 500 {
 			responsePreview = responsePreview[:500] + "..."
 		}
-		log.Printf("❌ MarianMT API error (HTTP %d): %s", resp.StatusCode, responsePreview)
-		// Check for 502 Bad Gateway (common on Render cold starts)
+		err := fmt.Errorf("HTTP %d: %s", resp.StatusCode, responsePreview[:min(200, len(responsePreview))])
 		if resp.StatusCode == http.StatusBadGateway {
-			return "", fmt.Errorf("HTTP 502 Bad Gateway - MarianMT service unavailable (likely cold start or service down)")
+			err = fmt.Errorf("HTTP 502 Bad Gateway - MarianMT service unavailable (likely cold start or service down)")
 		}
-		return "", fmt.Errorf("HTTP %d: %s", resp.StatusCode, responsePreview[:min(200, len(responsePreview))])
+		recordTranslationFailure(err)
+		if resp.StatusCode == http.StatusServiceUnavailable || resp.StatusCode == http.StatusTooManyRequests {
+			log.Printf("❌ MarianMT unavailable (HTTP %d) — check MARIANMT_URL (%s)", resp.StatusCode, url)
+		} else {
+			log.Printf("❌ MarianMT API error (HTTP %d): %s", resp.StatusCode, responsePreview)
+		}
+		return "", err
 	}
+
+	recordTranslationSuccess()
 
 	var r marianMTResponse
 	if err := json.Unmarshal(responseBody.Bytes(), &r); err != nil {
@@ -263,11 +365,17 @@ func DetectSourceLanguageDirect(text string) string {
 // TranslateAllLanguages returns a map with permanent translations for en/fr/ar.
 // It detects the source language and only translates to other languages.
 func TranslateAllLanguages(text string) map[string]string {
-	langs := []string{"en", "fr", "ar"}
-	out := make(map[string]string, len(langs))
 	if text == "" {
-		return out
+		return map[string]string{}
 	}
+	if !translationEnabled() {
+		return buildFallbackTranslations(text)
+	}
+	if translationCircuitOpen() {
+		return buildFallbackTranslations(text)
+	}
+
+	langs := []string{"en", "fr", "ar"}
 
 	translateCache.RLock()
 	if cached, ok := translateCache.data[text]; ok {
@@ -275,6 +383,8 @@ func TranslateAllLanguages(text string) map[string]string {
 		return cached
 	}
 	translateCache.RUnlock()
+
+	out := make(map[string]string, len(langs))
 
 	// Detect source language first
 	sourceLang := detectSourceLanguage(text)
@@ -289,8 +399,9 @@ func TranslateAllLanguages(text string) map[string]string {
 		
 		translated, err := translateOnce(text, lang)
 		if err != nil {
-			// On error, log and use original text as fallback
-			log.Printf("⚠️  Translation to %s failed for text '%s': %v", lang, text[:min(50, len(text))], err)
+			if err != translationBreaker.constantErr {
+				log.Printf("⚠️  Translation to %s failed for text '%s': %v", lang, text[:min(50, len(text))], err)
+			}
 			out[lang] = text
 		} else if translated == "" {
 			// Empty translation, use original

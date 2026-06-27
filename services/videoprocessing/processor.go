@@ -7,9 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -329,25 +327,7 @@ func ffmpegPath() string {
 }
 
 func downloadFile(ctx context.Context, url, dest string) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return err
-	}
-	res, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer res.Body.Close()
-	if res.StatusCode >= 400 {
-		return fmt.Errorf("download: %s", res.Status)
-	}
-	f, err := os.Create(dest)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	_, err = io.Copy(f, res.Body)
-	return err
+	return storage.DownloadMediaFile(ctx, url, dest)
 }
 
 func uploadDirectory(dir, cdnPrefix string) (playlistURL string, err error) {

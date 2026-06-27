@@ -58,7 +58,7 @@ func slideshowMinImages() int {
 			return n
 		}
 	}
-	return 2
+	return 1
 }
 
 func slideshowMaxImages() int {
@@ -90,6 +90,7 @@ func runSlideshowWorker(db *gorm.DB, id int) {
 // EnqueuePropertySaleSlideshow creates a job when a listing has images but no video.
 func EnqueuePropertySaleSlideshow(db *gorm.DB, propertySaleID, userID uint) (*models.PropertyVideoGenerationJob, error) {
 	if !slideshowEnabled() {
+		log.Printf("⚠️ slideshow skipped sale=%d: ffmpeg not found (set FFMPEG_PATH or install ffmpeg); SLIDESHOW_VIDEO_ENABLED=false also disables", propertySaleID)
 		return nil, nil
 	}
 	var sale models.PropertySale
@@ -100,6 +101,7 @@ func EnqueuePropertySaleSlideshow(db *gorm.DB, propertySaleID, userID uint) (*mo
 		return nil, nil
 	}
 	images := filterHTTPURLs(sale.Images)
+	images = slideshowEligibleImages(images)
 	if len(images) < slideshowMinImages() {
 		return nil, nil
 	}
@@ -140,15 +142,88 @@ func EnqueuePropertySaleSlideshow(db *gorm.DB, propertySaleID, userID uint) (*mo
 		log.Printf("🎞️ slideshow enqueued job=%d sale=%d images=%d", job.ID, propertySaleID, len(images))
 		return &job, nil
 	}
-	go func() {
+	go func(jid uint) {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 		defer cancel()
-		_ = ProcessSlideshowJob(ctx, db, job.ID)
-	}()
+		if err := ProcessSlideshowJob(ctx, db, jid); err != nil {
+			log.Printf("❌ slideshow job %d: %v", jid, err)
+		}
+	}(job.ID)
 	return &job, nil
 }
 
-// ProcessSlideshowJob renders MP4, uploads to CDN, attaches to property sale feed.
+// EnqueueLandmarkSlideshow creates a job when a land listing has photos but no video.
+func EnqueueLandmarkSlideshow(db *gorm.DB, landmarkID, userID uint) (*models.PropertyVideoGenerationJob, error) {
+	if !slideshowEnabled() {
+		log.Printf("⚠️ slideshow skipped land=%d: ffmpeg not found (set FFMPEG_PATH or install ffmpeg); SLIDESHOW_VIDEO_ENABLED=false also disables", landmarkID)
+		return nil, nil
+	}
+	var lm models.Landmark
+	if err := db.First(&lm, landmarkID).Error; err != nil {
+		return nil, err
+	}
+	if lm.VideoURL != nil && strings.TrimSpace(*lm.VideoURL) != "" {
+		return nil, nil
+	}
+	images := landmarkImageURLs(lm.Images)
+	if len(images) < slideshowMinImages() {
+		return nil, nil
+	}
+	if len(images) > slideshowMaxImages() {
+		images = images[:slideshowMaxImages()]
+	}
+
+	// Skip if a job is already pending/processing, or a completed job already produced a video.
+	var existing models.PropertyVideoGenerationJob
+	err := db.Where("entity_type = ? AND entity_id = ? AND status IN ?",
+		"land", landmarkID, []string{"pending", "processing"}).
+		Order("id DESC").First(&existing).Error
+	if err == nil {
+		return &existing, nil
+	}
+	var done models.PropertyVideoGenerationJob
+	if err := db.Where("entity_type = ? AND entity_id = ? AND status = ? AND output_video_url <> ''",
+		"land", landmarkID, "completed").Order("id DESC").First(&done).Error; err == nil {
+		_ = attachSlideshowToLandmark(db, landmarkID, done.OutputVideoURL)
+		return &done, nil
+	}
+
+	imgJSON, _ := json.Marshal(images)
+	job := models.PropertyVideoGenerationJob{
+		UserID:          userID,
+		EntityType:      "land",
+		EntityID:        landmarkID,
+		Status:          "pending",
+		Progress:        0,
+		ImageURLs:       imgJSON,
+		PropertyType:    strings.TrimSpace(lm.LandType),
+		OverlayTitle:    strings.TrimSpace(lm.Title),
+		OverlayLocation: formatLandmarkLocation(lm),
+		OverlayArea:     formatLandmarkArea(lm),
+		OverlayPrice:      formatPrice(lm.Price, lm.Currency),
+		OverlayPlotNumber: formatLandmarkPlotNumber(lm),
+		OverlayCTA:        "Découvrir sur Meskeny",
+	}
+	if err := db.Create(&job).Error; err != nil {
+		return nil, err
+	}
+
+	StartSlideshowWorkers(db)
+	if pushSlideshowRedis(job.ID) {
+		log.Printf("🎞️ slideshow enqueued job=%d land=%d images=%d", job.ID, landmarkID, len(images))
+		return &job, nil
+	}
+	go func(jid uint) {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+		defer cancel()
+		if err := ProcessSlideshowJob(ctx, db, jid); err != nil {
+			log.Printf("❌ slideshow job %d: %v", jid, err)
+		}
+	}(job.ID)
+	return &job, nil
+}
+
+// ProcessSlideshowJob renders MP4, uploads to CDN, attaches to listing feed.
 func ProcessSlideshowJob(ctx context.Context, db *gorm.DB, jobID uint) error {
 	var job models.PropertyVideoGenerationJob
 	if err := db.First(&job, jobID).Error; err != nil {
@@ -175,12 +250,10 @@ func ProcessSlideshowJob(ctx context.Context, db *gorm.DB, jobID uint) error {
 	updateJob("processing", 5, "", "")
 	log.Printf("🎞️ slideshow job %d: processing (%s #%d)", jobID, job.EntityType, job.EntityID)
 
-	var imageURLs []string
-	_ = json.Unmarshal(job.ImageURLs, &imageURLs)
-	imageURLs = filterHTTPURLs(imageURLs)
+	imageURLs := freshSlideshowImageURLs(db, &job)
 	if len(imageURLs) == 0 {
-		updateJob("failed", 0, "no images", "")
-		return fmt.Errorf("no images")
+		updateJob("failed", 0, "no spaces images", "")
+		return fmt.Errorf("no eligible images")
 	}
 
 	workDir, err := os.MkdirTemp("", fmt.Sprintf("slideshow_%d_", jobID))
@@ -193,9 +266,15 @@ func ProcessSlideshowJob(ctx context.Context, db *gorm.DB, jobID uint) error {
 	updateJob("processing", 15, "", "")
 	localImages := make([]string, 0, len(imageURLs))
 	for i, u := range imageURLs {
-		dest := filepath.Join(workDir, fmt.Sprintf("img_%03d.jpg", i))
+		ext := strings.ToLower(filepath.Ext(strings.Split(u, "?")[0]))
+		switch ext {
+		case ".jpg", ".jpeg", ".png", ".webp", ".avif", ".gif":
+		default:
+			ext = ".jpg"
+		}
+		dest := filepath.Join(workDir, fmt.Sprintf("img_%03d%s", i, ext))
 		if err := downloadFile(ctx, u, dest); err != nil {
-			log.Printf("⚠️ slideshow job %d: skip image %d: %v", jobID, i, err)
+			log.Printf("⚠️ slideshow job %d: skip image %d (%s): %v", jobID, i, truncateMediaURL(u), err)
 			continue
 		}
 		localImages = append(localImages, dest)
@@ -218,6 +297,7 @@ func ProcessSlideshowJob(ctx context.Context, db *gorm.DB, jobID uint) error {
 
 	outPath := filepath.Join(workDir, "slideshow.mp4")
 	updateJob("processing", 50, "", "")
+	log.Printf("🎞️ slideshow job %d: rendering %d image(s) with ffmpeg…", jobID, len(localImages))
 	if err := GenerateSlideshowMP4(ctx, SlideshowInput{
 		ImagePaths:  localImages,
 		MusicPath:   musicPath,
@@ -226,6 +306,7 @@ func ProcessSlideshowJob(ctx context.Context, db *gorm.DB, jobID uint) error {
 		Location:    job.OverlayLocation,
 		Area:        job.OverlayArea,
 		Price:       job.OverlayPrice,
+		PlotNumber:  job.OverlayPlotNumber,
 		CTA:         job.OverlayCTA,
 		SecPerSlide: slideshowSecPerSlide,
 	}); err != nil {
@@ -235,6 +316,9 @@ func ProcessSlideshowJob(ctx context.Context, db *gorm.DB, jobID uint) error {
 
 	updateJob("processing", 80, "", "")
 	objectKey := fmt.Sprintf("property-sales/%d/auto-slideshow_%d.mp4", job.EntityID, jobID)
+	if job.EntityType == "land" {
+		objectKey = fmt.Sprintf("landmarks/%d/auto-slideshow_%d.mp4", job.EntityID, jobID)
+	}
 	res := storage.UploadLocalFileObjectKey(outPath, objectKey, "video/mp4")
 	videoURL := res["url"]
 	if videoURL == "" {
@@ -248,6 +332,11 @@ func ProcessSlideshowJob(ctx context.Context, db *gorm.DB, jobID uint) error {
 
 	if job.EntityType == "sale" {
 		if err := attachSlideshowToPropertySale(db, job.EntityID, job.UserID, videoURL); err != nil {
+			updateJob("failed", 90, err.Error(), videoURL)
+			return err
+		}
+	} else if job.EntityType == "land" {
+		if err := attachSlideshowToLandmark(db, job.EntityID, videoURL); err != nil {
 			updateJob("failed", 90, err.Error(), videoURL)
 			return err
 		}
@@ -302,6 +391,58 @@ func attachSlideshowToPropertySale(db *gorm.DB, saleID, userID uint, videoURL st
 	}
 	EnqueuePropertySaleVideo(db, row.ID, userID)
 	return nil
+}
+
+func attachSlideshowToLandmark(db *gorm.DB, landmarkID uint, videoURL string) error {
+	var lm models.Landmark
+	if err := db.First(&lm, landmarkID).Error; err != nil {
+		return err
+	}
+	if lm.VideoURL != nil && strings.TrimSpace(*lm.VideoURL) == videoURL {
+		return nil
+	}
+	mediaType := "video"
+	if len(landmarkImageURLs(lm.Images)) > 0 {
+		mediaType = "both"
+	}
+	return db.Model(&lm).Updates(map[string]interface{}{
+		"video_url":  videoURL,
+		"media_type": mediaType,
+	}).Error
+}
+
+func landmarkImageURLs(raw []byte) []string {
+	return slideshowEligibleImages(parseJSONStringList(raw))
+}
+
+func formatLandmarkLocation(lm models.Landmark) string {
+	parts := []string{}
+	for _, p := range []string{lm.District, lm.Region} {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			parts = append(parts, p)
+		}
+	}
+	return strings.Join(parts, ", ")
+}
+
+func formatLandmarkArea(lm models.Landmark) string {
+	if lm.Area <= 0 {
+		return ""
+	}
+	unit := strings.TrimSpace(lm.AreaUnit)
+	if unit == "" || unit == "sqm" {
+		return fmt.Sprintf("%.0f m²", lm.Area)
+	}
+	return fmt.Sprintf("%.0f %s", lm.Area, unit)
+}
+
+func formatLandmarkPlotNumber(lm models.Landmark) string {
+	p := strings.TrimSpace(lm.PlotNumber)
+	if p == "" {
+		return ""
+	}
+	return "Plot #" + p
 }
 
 func pickMusicTrack(db *gorm.DB, propertyType string) *models.MusicTrack {
@@ -371,14 +512,210 @@ func formatPrice(price float64, currency string) string {
 }
 
 func filterHTTPURLs(urls []string) []string {
-	out := make([]string, 0, len(urls))
+	return storage.NormalizePublicMediaURLs(urls)
+}
+
+// slideshowEligibleImages prefers DigitalOcean Spaces URLs; skips dead Cloudinary legacy links.
+func slideshowEligibleImages(urls []string) []string {
+	normalized := storage.NormalizePublicMediaURLs(urls)
+	if len(normalized) == 0 {
+		return nil
+	}
+	spaces := make([]string, 0, len(normalized))
+	other := make([]string, 0, len(normalized))
+	for _, u := range normalized {
+		lower := strings.ToLower(u)
+		if strings.Contains(lower, "digitaloceanspaces.com") {
+			spaces = append(spaces, u)
+		} else if strings.Contains(lower, "res.cloudinary.com") {
+			continue
+		} else {
+			other = append(other, u)
+		}
+	}
+	if len(spaces) > 0 {
+		return spaces
+	}
+	return other
+}
+
+func countImageSources(urls []string) (spaces, cloudinary, other int) {
 	for _, u := range urls {
 		u = strings.TrimSpace(u)
-		if strings.HasPrefix(u, "http://") || strings.HasPrefix(u, "https://") {
-			out = append(out, u)
+		if u == "" {
+			continue
+		}
+		lower := strings.ToLower(u)
+		switch {
+		case strings.Contains(lower, "digitaloceanspaces.com"):
+			spaces++
+		case strings.Contains(lower, "res.cloudinary.com"):
+			cloudinary++
+		default:
+			other++
+		}
+	}
+	return
+}
+
+func parseJSONStringList(raw []byte) []string {
+	if len(raw) == 0 {
+		return nil
+	}
+	var urls []string
+	if json.Unmarshal(raw, &urls) != nil {
+		return nil
+	}
+	return urls
+}
+
+func freshSlideshowImageURLs(db *gorm.DB, job *models.PropertyVideoGenerationJob) []string {
+	switch job.EntityType {
+	case "land":
+		var lm models.Landmark
+		if err := db.First(&lm, job.EntityID).Error; err == nil {
+			return landmarkImageURLs(lm.Images)
+		}
+	case "sale":
+		var sale models.PropertySale
+		if err := db.First(&sale, job.EntityID).Error; err == nil {
+			return slideshowEligibleImages(sale.Images)
+		}
+	}
+	var stored []string
+	_ = json.Unmarshal(job.ImageURLs, &stored)
+	return slideshowEligibleImages(stored)
+}
+
+func truncateMediaURL(u string) string {
+	u = strings.TrimSpace(u)
+	if len(u) <= 96 {
+		return u
+	}
+	return u[:48] + "…" + u[len(u)-40:]
+}
+
+func compactStrings(in []string) []string {
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		if strings.TrimSpace(s) != "" {
+			out = append(out, s)
 		}
 	}
 	return out
+}
+
+// RepairLandmarkVideoFromJob copies output_video_url from a completed slideshow job onto the landmark when missing.
+func RepairLandmarkVideoFromJob(db *gorm.DB, landmarkID uint) bool {
+	return repairLandmarkVideoFromJob(db, landmarkID)
+}
+
+// LatestCompletedLandSlideshowURL returns the newest completed slideshow MP4 URL for a land listing.
+func LatestCompletedLandSlideshowURL(db *gorm.DB, landmarkID uint) string {
+	var job models.PropertyVideoGenerationJob
+	err := db.Where("entity_type = ? AND entity_id = ? AND status = ? AND TRIM(output_video_url) <> ''",
+		"land", landmarkID, "completed").
+		Order("id DESC").First(&job).Error
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(job.OutputVideoURL)
+}
+
+func repairLandmarkVideoFromJob(db *gorm.DB, landmarkID uint) bool {
+	var lm models.Landmark
+	if err := db.First(&lm, landmarkID).Error; err != nil {
+		return false
+	}
+	if lm.VideoURL != nil && strings.TrimSpace(*lm.VideoURL) != "" {
+		return true
+	}
+	var job models.PropertyVideoGenerationJob
+	err := db.Where("entity_type = ? AND entity_id = ? AND status = ? AND output_video_url <> ''",
+		"land", landmarkID, "completed").
+		Order("id DESC").First(&job).Error
+	if err != nil {
+		return false
+	}
+	if err := attachSlideshowToLandmark(db, landmarkID, job.OutputVideoURL); err != nil {
+		log.Printf("⚠️ slideshow repair land=%d from job %d: %v", landmarkID, job.ID, err)
+		return false
+	}
+	log.Printf("✅ slideshow repaired land=%d video_url from completed job %d", landmarkID, job.ID)
+	return true
+}
+
+func sanitizeLandmarkImageRecords(db *gorm.DB) int {
+	var landmarks []models.Landmark
+	if err := db.Find(&landmarks).Error; err != nil {
+		return 0
+	}
+	ctx := context.Background()
+	fixed := 0
+	migrated := 0
+	for _, lm := range landmarks {
+		if len(lm.Images) == 0 {
+			continue
+		}
+		var raw []string
+		if json.Unmarshal(lm.Images, &raw) != nil {
+			continue
+		}
+		changed := false
+		for i, u := range raw {
+			if !strings.Contains(u, "res.cloudinary.com") {
+				continue
+			}
+			newURL, err := storage.MigrateCloudinaryURLToSpaces(ctx, u)
+			if err != nil {
+				log.Printf("ℹ️ slideshow migrate land=%d %q: removing dead cloudinary link", lm.ID, truncateMediaURL(u))
+				raw[i] = ""
+				changed = true
+				continue
+			}
+			if newURL != u && newURL != "" {
+				raw[i] = newURL
+				changed = true
+				migrated++
+			}
+		}
+		cleaned := slideshowEligibleImages(compactStrings(raw))
+		if len(cleaned) == 0 {
+			if len(raw) > 0 {
+				sp, cl, ot := countImageSources(raw)
+				log.Printf("ℹ️ slideshow land=%d %q: no Spaces images (spaces=%d cloudinary=%d other=%d) — re-upload photos",
+					lm.ID, strings.TrimSpace(lm.Title), sp, cl, ot)
+			}
+			continue
+		}
+		if !changed {
+			same := len(cleaned) == len(raw)
+			if same {
+				for i := range cleaned {
+					if cleaned[i] != strings.TrimSpace(raw[i]) {
+						same = false
+						break
+					}
+				}
+			}
+			if same {
+				continue
+			}
+		}
+		b, err := json.Marshal(cleaned)
+		if err != nil {
+			continue
+		}
+		if err := db.Model(&models.Landmark{}).Where("id = ?", lm.ID).Update("images", b).Error; err != nil {
+			log.Printf("⚠️ slideshow sanitize land=%d images: %v", lm.ID, err)
+			continue
+		}
+		fixed++
+	}
+	if migrated > 0 {
+		log.Printf("🎞️ slideshow: migrated %d cloudinary image(s) to Spaces", migrated)
+	}
+	return fixed
 }
 
 func pushSlideshowRedis(jobID uint) bool {
@@ -405,6 +742,212 @@ func dequeueSlideshow(ctx context.Context) (uint, bool) {
 		return 0, false
 	}
 	return job.JobID, true
+}
+
+func slideshowBackfillEnabled() bool {
+	if strings.EqualFold(os.Getenv("SLIDESHOW_BACKFILL_ENABLED"), "false") {
+		return false
+	}
+	return true
+}
+
+func slideshowBackfillLimit() int {
+	if v := strings.TrimSpace(os.Getenv("SLIDESHOW_BACKFILL_LIMIT")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+	}
+	return 500
+}
+
+func landmarkOwnerUserID(db *gorm.DB, lm *models.Landmark) uint {
+	if lm.OwnerID != nil && *lm.OwnerID > 0 {
+		return *lm.OwnerID
+	}
+	if lm.OrganizationID != nil && *lm.OrganizationID > 0 {
+		var org models.Organization
+		if err := db.Select("owner_id").First(&org, *lm.OrganizationID).Error; err == nil && org.OwnerID > 0 {
+			return org.OwnerID
+		}
+	}
+	return 0
+}
+
+// BackfillSlideshowVideosOnStart scans all lands and property sales with Spaces photos but no video.
+func BackfillSlideshowVideosOnStart(db *gorm.DB) {
+	backfillLandmarksWithoutVideos(db)
+	backfillPropertySalesWithoutVideos(db)
+}
+
+// BackfillLandmarksWithoutVideos runs on server startup for land listings.
+func BackfillLandmarksWithoutVideos(db *gorm.DB) {
+	backfillLandmarksWithoutVideos(db)
+}
+
+func backfillLandmarksWithoutVideos(db *gorm.DB) {
+	if db == nil {
+		return
+	}
+	if !slideshowBackfillEnabled() {
+		log.Printf("ℹ️ slideshow backfill disabled (SLIDESHOW_BACKFILL_ENABLED=false)")
+		return
+	}
+	if !slideshowEnabled() {
+		log.Printf("⚠️ slideshow backfill skipped: ffmpeg not available")
+		return
+	}
+
+	if fixed := sanitizeLandmarkImageRecords(db); fixed > 0 {
+		log.Printf("🧹 slideshow: cleaned invalid/local image paths on %d landmark(s)", fixed)
+	}
+
+	minImg := slideshowMinImages()
+	var landmarks []models.Landmark
+	q := db.Where("(video_url IS NULL OR TRIM(video_url) = '')").
+		Where("status <> ?", "inactive").
+		Order("id ASC")
+	if limit := slideshowBackfillLimit(); limit > 0 {
+		q = q.Limit(limit)
+	}
+	if err := q.Find(&landmarks).Error; err != nil {
+		log.Printf("❌ slideshow backfill: query failed: %v", err)
+		return
+	}
+
+	log.Printf("🎞️ slideshow backfill — %d land listing(s) without video:", len(landmarks))
+	for _, lm := range landmarks {
+		raw := parseJSONStringList(lm.Images)
+		eligible := slideshowEligibleImages(raw)
+		sp, cl, ot := countImageSources(raw)
+		log.Printf("   • land #%d %q — eligible=%d (spaces=%d cloudinary=%d other=%d)",
+			lm.ID, strings.TrimSpace(lm.Title), len(eligible), sp, cl, ot)
+	}
+
+	var enqueued, skippedNoImages, skippedTooFew, skippedNoOwner, skippedAlready, skippedRepaired, failed int
+	for _, lm := range landmarks {
+		if repairLandmarkVideoFromJob(db, lm.ID) {
+			skippedRepaired++
+			continue
+		}
+		raw := parseJSONStringList(lm.Images)
+		eligible := slideshowEligibleImages(raw)
+		if len(eligible) == 0 {
+			skippedNoImages++
+			continue
+		}
+		if len(eligible) < minImg {
+			skippedTooFew++
+			continue
+		}
+		uid := landmarkOwnerUserID(db, &lm)
+		if uid == 0 {
+			skippedNoOwner++
+			continue
+		}
+		job, err := EnqueueLandmarkSlideshow(db, lm.ID, uid)
+		if err != nil {
+			failed++
+			log.Printf("⚠️ slideshow backfill land=%d: %v", lm.ID, err)
+			continue
+		}
+		if job == nil {
+			skippedAlready++
+			continue
+		}
+		enqueued++
+		time.Sleep(150 * time.Millisecond)
+	}
+
+	log.Printf("🎞️ slideshow land backfill done: scanned=%d enqueued=%d repaired=%d skip_no_spaces=%d skip_too_few=%d skip_no_owner=%d skip_already=%d failed=%d (min_images=%d)",
+		len(landmarks), enqueued, skippedRepaired, skippedNoImages, skippedTooFew, skippedNoOwner, skippedAlready, failed, minImg)
+}
+
+func propertySaleUserID(db *gorm.DB, sale *models.PropertySale) uint {
+	if sale.OwnerID != nil && *sale.OwnerID > 0 {
+		return *sale.OwnerID
+	}
+	if sale.OrganizationID != nil && *sale.OrganizationID > 0 {
+		var org models.Organization
+		if err := db.Select("owner_id").First(&org, *sale.OrganizationID).Error; err == nil && org.OwnerID > 0 {
+			return org.OwnerID
+		}
+	}
+	if sale.AgentID != nil && *sale.AgentID > 0 {
+		var agent models.Agent
+		if err := db.Select("user_id").First(&agent, *sale.AgentID).Error; err == nil && agent.UserID > 0 {
+			return agent.UserID
+		}
+	}
+	return 0
+}
+
+func backfillPropertySalesWithoutVideos(db *gorm.DB) {
+	if db == nil || !slideshowBackfillEnabled() || !slideshowEnabled() {
+		return
+	}
+
+	minImg := slideshowMinImages()
+	var sales []models.PropertySale
+	q := db.Where("deleted_at IS NULL").
+		Where("status NOT IN ?", []string{"withdrawn", "sold"}).
+		Order("id ASC")
+	if limit := slideshowBackfillLimit(); limit > 0 {
+		q = q.Limit(limit)
+	}
+	if err := q.Find(&sales).Error; err != nil {
+		log.Printf("❌ slideshow sale backfill: query failed: %v", err)
+		return
+	}
+
+	var noVideo []models.PropertySale
+	var candidates []models.PropertySale
+	for _, s := range sales {
+		if len(s.Videos) > 0 {
+			continue
+		}
+		noVideo = append(noVideo, s)
+		if len(slideshowEligibleImages(s.Images)) >= minImg {
+			candidates = append(candidates, s)
+		}
+	}
+
+	log.Printf("🎞️ slideshow backfill — %d property sale(s) without video:", len(noVideo))
+	for _, s := range noVideo {
+		raw := s.Images
+		eligible := slideshowEligibleImages(raw)
+		sp, cl, ot := countImageSources(raw)
+		log.Printf("   • sale #%d %q — eligible=%d (spaces=%d cloudinary=%d other=%d)",
+			s.ID, strings.TrimSpace(s.Title), len(eligible), sp, cl, ot)
+	}
+	if len(candidates) == 0 && len(noVideo) > 0 {
+		log.Printf("ℹ️ slideshow sale backfill: none queued (need Spaces images + no existing videos JSON)")
+	} else if len(noVideo) == 0 {
+		log.Printf("ℹ️ slideshow sale backfill: all property sales already have videos[] set")
+	}
+
+	var enqueued, skippedNoOwner, skippedAlready, failed int
+	for _, s := range candidates {
+		uid := propertySaleUserID(db, &s)
+		if uid == 0 {
+			skippedNoOwner++
+			continue
+		}
+		job, err := EnqueuePropertySaleSlideshow(db, s.ID, uid)
+		if err != nil {
+			failed++
+			log.Printf("⚠️ slideshow backfill sale=%d: %v", s.ID, err)
+			continue
+		}
+		if job == nil {
+			skippedAlready++
+			continue
+		}
+		enqueued++
+		time.Sleep(150 * time.Millisecond)
+	}
+
+	log.Printf("🎞️ slideshow sale backfill done: candidates=%d enqueued=%d skip_no_owner=%d skip_already=%d failed=%d",
+		len(candidates), enqueued, skippedNoOwner, skippedAlready, failed)
 }
 
 // SeedDefaultMusicTracks inserts placeholder library rows (admin uploads MP3 URLs later).

@@ -569,6 +569,9 @@ func GetPropertySaleVideoFeed(ctx iris.Context) {
 			}
 			if tv != nil {
 				applyPropertySaleVideoStreamFields(video, tv)
+				if strings.Contains(strings.ToLower(strings.TrimSpace(tv.Caption)), "auto-generated") {
+					video["isAutoSlideshow"] = true
+				}
 			}
 
 			videos = append(videos, video)

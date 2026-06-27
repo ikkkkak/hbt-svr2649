@@ -3,6 +3,7 @@ package videoprocessing
 import (
 	"context"
 	"fmt"
+	"log"
 	"math"
 	"os"
 	"os/exec"
@@ -28,11 +29,12 @@ type SlideshowInput struct {
 	Location    string
 	Area        string
 	Price       string
+	PlotNumber  string
 	CTA         string
 	SecPerSlide float64
 }
 
-// GenerateSlideshowMP4 builds a 9:16 MP4 with Ken Burns motion, fades, text, and optional music.
+// GenerateSlideshowMP4 builds a 9:16 MP4 — letterbox for square/landscape photos, Ken Burns for portrait only.
 func GenerateSlideshowMP4(ctx context.Context, in SlideshowInput) error {
 	if len(in.ImagePaths) == 0 {
 		return fmt.Errorf("slideshow: no images")
@@ -49,7 +51,7 @@ func GenerateSlideshowMP4(ctx context.Context, in SlideshowInput) error {
 	clips := make([]string, 0, len(in.ImagePaths))
 	for i, img := range in.ImagePaths {
 		clipPath := filepath.Join(workDir, fmt.Sprintf("slide_%03d.mp4", i))
-		if err := renderKenBurnsClip(ctx, ffmpeg, img, clipPath, in.SecPerSlide, i); err != nil {
+		if err := renderSlideClip(ctx, ffmpeg, img, clipPath, in.SecPerSlide, i); err != nil {
 			return fmt.Errorf("slide %d: %w", i+1, err)
 		}
 		clips = append(clips, clipPath)
@@ -62,16 +64,118 @@ func GenerateSlideshowMP4(ctx context.Context, in SlideshowInput) error {
 
 	withText := filepath.Join(workDir, "with_text.mp4")
 	if err := burnTextOverlays(ctx, ffmpeg, mergedSilent, withText, in); err != nil {
-		return err
+		log.Printf("⚠️ slideshow drawtext skipped: %v", err)
+		withText = mergedSilent
+	}
+
+	branded := filepath.Join(workDir, "branded.mp4")
+	wheelPNG := filepath.Join(workDir, "meskeny_wheel.png")
+	if err := writeSlideshowWheelPNG(wheelPNG); err != nil {
+		log.Printf("⚠️ slideshow wheel png: %v", err)
+		branded = withText
+	} else if err := overlayRotatingWheel(ctx, ffmpeg, withText, wheelPNG, branded); err != nil {
+		log.Printf("⚠️ slideshow wheel overlay skipped: %v", err)
+		branded = withText
 	}
 
 	if strings.TrimSpace(in.MusicPath) != "" {
-		if err := muxMusic(ctx, ffmpeg, withText, in.MusicPath, in.OutputPath); err != nil {
+		if err := muxMusic(ctx, ffmpeg, branded, in.MusicPath, in.OutputPath); err != nil {
 			return err
 		}
 		return nil
 	}
-	return copyFile(withText, in.OutputPath)
+	return copyFile(branded, in.OutputPath)
+}
+
+// landscapeLetterboxThreshold: width/height >= this → fit entire image with black bars (no zoom crop).
+const landscapeLetterboxThreshold = 0.92
+
+func renderSlideClip(ctx context.Context, ffmpeg, imagePath, outPath string, durationSec float64, index int) error {
+	w, h, err := probeImageSize(ctx, imagePath)
+	if err != nil || w <= 0 || h <= 0 {
+		log.Printf("⚠️ slideshow: could not probe %s (%v) — using letterbox", filepath.Base(imagePath), err)
+		return renderLetterboxClip(ctx, ffmpeg, imagePath, outPath, durationSec)
+	}
+	aspect := float64(w) / float64(h)
+	if aspect >= landscapeLetterboxThreshold {
+		return renderLetterboxClip(ctx, ffmpeg, imagePath, outPath, durationSec)
+	}
+	return renderKenBurnsClip(ctx, ffmpeg, imagePath, outPath, durationSec, index)
+}
+
+// renderLetterboxClip fits the full image inside 9:16 with black bars — no zoom (keeps plot details visible).
+func renderLetterboxClip(ctx context.Context, ffmpeg, imagePath, outPath string, durationSec float64) error {
+	vf := fmt.Sprintf(
+		"scale=%d:%d:force_original_aspect_ratio=decrease,"+
+			"pad=%d:%d:(ow-iw)/2:(oh-ih)/2:color=black,"+
+			"fps=%d,format=yuv420p",
+		slideshowWidth, slideshowHeight,
+		slideshowWidth, slideshowHeight,
+		slideshowFPS,
+	)
+	args := []string{
+		"-y", "-loop", "1", "-i", imagePath,
+		"-vf", vf,
+		"-t", fmt.Sprintf("%.3f", durationSec),
+		"-c:v", "libx264", "-preset", "medium", "-crf", "22",
+		"-pix_fmt", "yuv420p", "-an", outPath,
+	}
+	out, err := exec.CommandContext(ctx, ffmpeg, args...).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("ffmpeg letterbox: %w: %s", err, trimFFmpegOut(out))
+	}
+	return nil
+}
+
+func probeImageSize(ctx context.Context, imagePath string) (width, height int, err error) {
+	probe := ffprobePath()
+	if probe == "" {
+		return 0, 0, fmt.Errorf("ffprobe not found")
+	}
+	args := []string{
+		"-v", "error",
+		"-select_streams", "v:0",
+		"-show_entries", "stream=width,height",
+		"-of", "csv=p=0:s=x",
+		imagePath,
+	}
+	out, err := exec.CommandContext(ctx, probe, args...).CombinedOutput()
+	if err != nil {
+		return 0, 0, fmt.Errorf("ffprobe: %w", err)
+	}
+	parts := strings.Split(strings.TrimSpace(string(out)), "x")
+	if len(parts) != 2 {
+		return 0, 0, fmt.Errorf("unexpected ffprobe output: %q", strings.TrimSpace(string(out)))
+	}
+	fmt.Sscanf(parts[0], "%d", &width)
+	fmt.Sscanf(parts[1], "%d", &height)
+	if width <= 0 || height <= 0 {
+		return 0, 0, fmt.Errorf("invalid dimensions: %dx%d", width, height)
+	}
+	return width, height, nil
+}
+
+func ffprobePath() string {
+	if p := strings.TrimSpace(os.Getenv("FFPROBE_PATH")); p != "" {
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	if p, err := exec.LookPath("ffprobe"); err == nil {
+		return p
+	}
+	ff := ffmpegPath()
+	if ff == "" {
+		return ""
+	}
+	dir := filepath.Dir(ff)
+	for _, name := range []string{"ffprobe.exe", "ffprobe"} {
+		candidate := filepath.Join(dir, name)
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate
+		}
+	}
+	return ""
 }
 
 func renderKenBurnsClip(ctx context.Context, ffmpeg, imagePath, outPath string, durationSec float64, index int) error {
@@ -188,23 +292,53 @@ func concatClipsSimple(ctx context.Context, ffmpeg string, clips []string, outPa
 
 func burnTextOverlays(ctx context.Context, ffmpeg, inPath, outPath string, in SlideshowInput) error {
 	font := slideshowFontPath()
-	title := escapeDrawtext(truncateRunes(in.Title, 48))
-	loc := escapeDrawtext(truncateRunes(in.Location, 40))
+	if font == "" {
+		return fmt.Errorf("no font file found (set SLIDESHOW_FONT_PATH)")
+	}
+	title := escapeDrawtext(truncateRunes(in.Title, 52))
+	if title == "" {
+		title = escapeDrawtext("Meskeny")
+	}
+	loc := escapeDrawtext(truncateRunes(in.Location, 44))
 	area := escapeDrawtext(strings.TrimSpace(in.Area))
 	price := escapeDrawtext(strings.TrimSpace(in.Price))
-	cta := escapeDrawtext(truncateRunes(in.CTA, 32))
-	if cta == "" {
-		cta = escapeDrawtext("Meskeny")
+	plot := escapeDrawtext(strings.TrimSpace(in.PlotNumber))
+	brand := escapeDrawtext("Meskeny")
+
+	detailLine := area
+	if plot != "" && area != "" {
+		detailLine = escapeDrawtext(strings.TrimSpace(in.Area + "  ·  " + in.PlotNumber))
+	} else if plot != "" {
+		detailLine = plot
+	}
+	if detailLine == "" {
+		detailLine = escapeDrawtext(" ")
+	}
+	if price == "" {
+		price = escapeDrawtext(" ")
+	}
+	if loc == "" {
+		loc = escapeDrawtext(" ")
 	}
 
+	// Clean bottom info card + thin top brand strip.
 	filter := fmt.Sprintf(
-		"[0:v]drawbox=x=0:y=h*0.62:w=iw:h=h*0.38:color=black@0.45:t=fill,"+
-			"drawtext=fontfile='%s':text='%s':fontsize=52:fontcolor=white:x=(w-text_w)/2:y=h*0.66:shadowcolor=black@0.6:shadowx=2:shadowy=2,"+
-			"drawtext=fontfile='%s':text='%s':fontsize=36:fontcolor=white@0.95:x=(w-text_w)/2:y=h*0.74,"+
-			"drawtext=fontfile='%s':text='%s':fontsize=32:fontcolor=0xFFD166:x=(w-text_w)/2:y=h*0.80,"+
-			"drawtext=fontfile='%s':text='%s':fontsize=40:fontcolor=white:x=(w-text_w)/2:y=h*0.86,"+
-			"drawtext=fontfile='%s':text='%s':fontsize=28:fontcolor=white@0.9:x=(w-text_w)/2:y=h*0.92[v]",
-		font, title, font, loc, font, area, font, price, font, cta,
+		"[0:v]drawbox=x=0:y=0:w=iw:h=72:color=black@0.55:t=fill,"+
+			"drawtext=fontfile='%s':text='%s':fontsize=28:fontcolor=0xD16024:x=(w-text_w)/2:y=22:"+
+			"shadowcolor=black@0.5:shadowx=1:shadowy=1,"+
+			"drawbox=x=24:y=h*0.78:w=iw-48:h=h*0.17:color=black@0.72:t=fill,"+
+			"drawbox=x=24:y=h*0.78:w=iw-48:h=4:color=0xD16024@0.95:t=fill,"+
+			"drawtext=fontfile='%s':text='%s':fontsize=40:fontcolor=white:x=48:y=h*0.805:"+
+			"shadowcolor=black@0.7:shadowx=2:shadowy=2,"+
+			"drawtext=fontfile='%s':text='%s':fontsize=44:fontcolor=0xFFD166:x=48:y=h*0.855:"+
+			"shadowcolor=black@0.7:shadowx=2:shadowy=2,"+
+			"drawtext=fontfile='%s':text='%s':fontsize=30:fontcolor=white@0.95:x=48:y=h*0.905,"+
+			"drawtext=fontfile='%s':text='%s':fontsize=26:fontcolor=white@0.75:x=48:y=h*0.945[v]",
+		font, brand,
+		font, title,
+		font, price,
+		font, detailLine,
+		font, loc,
 	)
 
 	args := []string{
@@ -217,6 +351,24 @@ func burnTextOverlays(ctx context.Context, ffmpeg, inPath, outPath string, in Sl
 	out, err := exec.CommandContext(ctx, ffmpeg, args...).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("ffmpeg drawtext: %w: %s", err, trimFFmpegOut(out))
+	}
+	return nil
+}
+
+// overlayRotatingWheel burns a continuously spinning Meskeny wheel badge at the bottom-right.
+func overlayRotatingWheel(ctx context.Context, ffmpeg, inPath, wheelPNG, outPath string) error {
+	filter := "[1:v]format=rgba,rotate=angle='2*PI*t/5':c=none:ow=rotw(iw):oh=roth(ih)[w];" +
+		"[0:v][w]overlay=x=main_w-overlay_w-36:y=main_h-overlay_h-48:format=auto[v]"
+	args := []string{
+		"-y", "-i", inPath, "-i", wheelPNG,
+		"-filter_complex", filter,
+		"-map", "[v]",
+		"-c:v", "libx264", "-preset", "medium", "-crf", "22",
+		"-pix_fmt", "yuv420p", "-an", outPath,
+	}
+	out, err := exec.CommandContext(ctx, ffmpeg, args...).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("ffmpeg wheel overlay: %w: %s", err, trimFFmpegOut(out))
 	}
 	return nil
 }
@@ -253,7 +405,7 @@ func slideshowFontPath() string {
 			return c
 		}
 	}
-	return "DejaVuSans-Bold"
+	return ""
 }
 
 func escapeDrawtext(s string) string {

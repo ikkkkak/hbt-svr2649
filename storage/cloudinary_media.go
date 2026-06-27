@@ -12,12 +12,58 @@ import (
 	"github.com/cloudinary/cloudinary-go/v2"
 	"github.com/cloudinary/cloudinary-go/v2/api"
 	"github.com/cloudinary/cloudinary-go/v2/api/uploader"
+	"github.com/cloudinary/cloudinary-go/v2/asset"
 )
 
 var (
 	cloudinaryClient    *cloudinary.Cloudinary
 	cloudinaryCloudName string
+	cloudinaryByCloud   = map[string]*cloudinary.Cloudinary{}
 )
+
+func ensureCloudinaryClients() {
+	initCloudinaryCDN()
+	initCloudinaryLegacyAccounts()
+}
+
+func initCloudinaryLegacyAccounts() {
+	raw := envTrim("CLOUDINARY_LEGACY_ACCOUNTS")
+	if raw == "" {
+		return
+	}
+	for _, part := range strings.Split(raw, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		// cloudName:apiKey:apiSecret (secret may contain escaped chars — use last colon split)
+		first := strings.Index(part, ":")
+		if first <= 0 {
+			continue
+		}
+		cloudName := part[:first]
+		rest := part[first+1:]
+		second := strings.Index(rest, ":")
+		if second <= 0 {
+			continue
+		}
+		apiKey := rest[:second]
+		apiSecret := rest[second+1:]
+		if cloudName == "" || apiKey == "" || apiSecret == "" {
+			continue
+		}
+		if _, ok := cloudinaryByCloud[cloudName]; ok {
+			continue
+		}
+		cld, err := cloudinary.NewFromParams(cloudName, apiKey, apiSecret)
+		if err != nil {
+			fmt.Printf("⚠️  Cloudinary legacy account %s init failed: %v\n", cloudName, err)
+			continue
+		}
+		cloudinaryByCloud[cloudName] = cld
+		fmt.Printf("✅ Cloudinary legacy account ready: %s\n", cloudName)
+	}
+}
 
 func envTrim(key string) string {
 	v := strings.TrimSpace(os.Getenv(key))
@@ -25,6 +71,9 @@ func envTrim(key string) string {
 }
 
 func initCloudinaryCDN() {
+	if cloudinaryClient != nil {
+		return
+	}
 	if cldURL := envTrim("CLOUDINARY_URL"); cldURL != "" {
 		cld, err := cloudinary.NewFromURL(cldURL)
 		if err != nil {
@@ -32,6 +81,7 @@ func initCloudinaryCDN() {
 		} else {
 			cloudinaryClient = cld
 			cloudinaryCloudName = cld.Config.Cloud.CloudName
+			cloudinaryByCloud[cloudinaryCloudName] = cld
 			fmt.Printf("✅ Cloudinary CDN ready (cloud: %s, from CLOUDINARY_URL)\n", cloudinaryCloudName)
 			return
 		}
@@ -51,6 +101,7 @@ func initCloudinaryCDN() {
 	}
 	cloudinaryClient = cld
 	cloudinaryCloudName = cloudName
+	cloudinaryByCloud[cloudName] = cld
 	fmt.Printf("✅ Cloudinary CDN ready (cloud: %s)\n", cloudName)
 	if preset := envTrim("CLOUDINARY_UPLOAD_PRESET"); preset != "" {
 		fmt.Printf("   unsigned preset configured: %s\n", preset)
@@ -239,7 +290,8 @@ func uploadBase64VideoCloudinary(base64VideoSrc, publicID, mime string) map[stri
 }
 
 func deleteCloudinaryMedia(mediaURL string) bool {
-	if cloudinaryClient == nil || !strings.Contains(mediaURL, "res.cloudinary.com") {
+	cld := cloudinaryClientForURL(mediaURL)
+	if cld == nil || !strings.Contains(mediaURL, "res.cloudinary.com") {
 		return false
 	}
 	publicID, resourceType := cloudinaryPublicIDFromURL(mediaURL)
@@ -248,7 +300,7 @@ func deleteCloudinaryMedia(mediaURL string) bool {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	_, err := cloudinaryClient.Upload.Destroy(ctx, uploader.DestroyParams{
+	_, err := cld.Upload.Destroy(ctx, uploader.DestroyParams{
 		PublicID:     publicID,
 		ResourceType: resourceType,
 	})
@@ -279,4 +331,59 @@ func cloudinaryPublicIDFromURL(mediaURL string) (publicID, resourceType string) 
 		rest = rest[:dot]
 	}
 	return rest, resourceType
+}
+
+func cloudinaryCloudNameFromURL(mediaURL string) string {
+	u := strings.TrimSpace(mediaURL)
+	const marker = "res.cloudinary.com/"
+	idx := strings.Index(u, marker)
+	if idx < 0 {
+		return ""
+	}
+	rest := u[idx+len(marker):]
+	if slash := strings.Index(rest, "/"); slash > 0 {
+		return rest[:slash]
+	}
+	return ""
+}
+
+func cloudinaryClientForURL(mediaURL string) *cloudinary.Cloudinary {
+	if cloud := cloudinaryCloudNameFromURL(mediaURL); cloud != "" {
+		if cld, ok := cloudinaryByCloud[cloud]; ok {
+			return cld
+		}
+	}
+	return cloudinaryClient
+}
+
+// CloudinarySignedDeliveryURL returns an authenticated delivery URL for a Cloudinary asset.
+func CloudinarySignedDeliveryURL(mediaURL string) (string, error) {
+	cld := cloudinaryClientForURL(mediaURL)
+	if cld == nil {
+		return "", fmt.Errorf("cloudinary not configured for %s", cloudinaryCloudNameFromURL(mediaURL))
+	}
+	publicID, resourceType := cloudinaryPublicIDFromURL(mediaURL)
+	if publicID == "" {
+		return "", fmt.Errorf("invalid cloudinary url")
+	}
+	var assetObj *asset.Asset
+	var err error
+	if resourceType == "video" {
+		assetObj, err = cld.Video(publicID)
+	} else {
+		assetObj, err = cld.Image(publicID)
+	}
+	if err != nil {
+		return "", err
+	}
+	return assetObj.String()
+}
+
+// DownloadCloudinaryMedia saves a Cloudinary asset using signed delivery (works when public GET returns 401).
+func DownloadCloudinaryMedia(ctx context.Context, mediaURL, destPath string) error {
+	signed, err := CloudinarySignedDeliveryURL(mediaURL)
+	if err != nil {
+		return err
+	}
+	return downloadHTTP(ctx, signed, destPath)
 }

@@ -10,7 +10,7 @@ import (
 type PropertyVideoGenerationJob struct {
 	gorm.Model
 	UserID         uint           `json:"user_id" gorm:"index;not null"`
-	EntityType     string         `json:"entity_type" gorm:"size:16;index;not null"` // sale | rent
+	EntityType     string         `json:"entity_type" gorm:"size:16;index;not null"` // sale | land
 	EntityID       uint           `json:"entity_id" gorm:"index;not null"`
 	Status         string         `json:"status" gorm:"size:20;default:pending;index"`
 	Progress       int            `json:"progress" gorm:"default:0"`
@@ -22,6 +22,7 @@ type PropertyVideoGenerationJob struct {
 	OverlayTitle   string         `json:"overlay_title" gorm:"size:300"`
 	OverlayLocation string        `json:"overlay_location" gorm:"size:300"`
 	OverlayArea    string         `json:"overlay_area" gorm:"size:64"`
-	OverlayPrice   string         `json:"overlay_price" gorm:"size:64"`
+	OverlayPrice    string         `json:"overlay_price" gorm:"size:64"`
+	OverlayPlotNumber string       `json:"overlay_plot_number" gorm:"size:64"`
 	OverlayCTA     string         `json:"overlay_cta" gorm:"size:120"`
 }

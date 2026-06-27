@@ -864,6 +864,22 @@ func ensureHabitatGISRelations(db *gorm.DB) {
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_habitat_plots_plan_sector ON habitat_plots(plan_id, sector_id)`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_habitat_plots_number ON habitat_plots(plot_number)`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_habitat_sectors_plan ON habitat_sectors(plan_id)`)
+	// GORM may create a broken unique index on plot_number alone — replace with (sector_id, plot_number).
+	db.Exec(`DROP INDEX IF EXISTS unique_plot_per_sector`)
+	db.Exec(`
+		DO $$ BEGIN
+			IF NOT EXISTS (
+				SELECT 1 FROM pg_constraint WHERE conname = 'unique_plot_per_sector'
+			) THEN
+				ALTER TABLE habitat_plots
+					ADD CONSTRAINT unique_plot_per_sector UNIQUE (sector_id, plot_number);
+			END IF;
+		EXCEPTION
+			WHEN duplicate_object THEN NULL;
+			WHEN unique_violation THEN
+				RAISE NOTICE 'habitat_plots: duplicate (sector_id, plot_number) rows — fix data before adding unique_plot_per_sector';
+		END $$
+	`)
 
 	ensurePerformanceIndexes(db)
 }

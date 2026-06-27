@@ -3,6 +3,7 @@ package routes
 import (
 	"apartments-clone-server/models"
 	"apartments-clone-server/services"
+	"apartments-clone-server/services/videoprocessing"
 	"apartments-clone-server/storage"
 	"apartments-clone-server/utils"
 	"encoding/json"
@@ -208,7 +209,13 @@ func CreateLandmark(ctx iris.Context) {
 	}
 
 	// Convert arrays to JSON
-	imagesJSON, _ := json.Marshal(input.Images)
+	filteredImages := filterHTTPMediaURLs(input.Images)
+	if len(input.Images) > 0 && len(filteredImages) == 0 && (input.VideoURL == nil || strings.TrimSpace(*input.VideoURL) == "") {
+		ctx.StatusCode(http.StatusBadRequest)
+		ctx.JSON(iris.Map{"error": "Images must be uploaded to the server (local file paths are not allowed)"})
+		return
+	}
+	imagesJSON, _ := json.Marshal(filteredImages)
 	utilitiesJSON, _ := json.Marshal(input.Utilities)
 	papersJSON, _ := json.Marshal(input.PropertyPapers)
 	sidesJSON, _ := json.Marshal(input.Sides)
@@ -299,6 +306,23 @@ func CreateLandmark(ctx iris.Context) {
 	if videoURL != nil {
 		log.Printf("✅ CreateLandmark: saved landmark id=%d with video_url", landmark.ID)
 	}
+
+	landmarkID := landmark.ID
+	imagesCopy := append([]string(nil), filteredImages...)
+	hasUploadedVideo := videoURL != nil && strings.TrimSpace(*videoURL) != ""
+	go func(lid, uid uint, imgs []string, hadVideo bool) {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("⚠️ Panic in CreateLandmark post-create id=%d: %v", lid, r)
+			}
+		}()
+		if !hadVideo && len(imgs) > 0 {
+			if _, err := videoprocessing.EnqueueLandmarkSlideshow(storage.DB, lid, uid); err != nil {
+				log.Printf("⚠️ slideshow enqueue land=%d: %v", lid, err)
+			}
+		}
+	}(landmarkID, userID, imagesCopy, hasUploadedVideo)
+
 	ctx.StatusCode(http.StatusCreated)
 	ctx.JSON(landmark)
 }
@@ -688,12 +712,22 @@ func GetLandmarkVideosFeed(ctx iris.Context) {
 	offset := (page - 1) * limit
 	lang := strings.ToLower(strings.TrimSpace(ctx.URLParamDefault("lang", "en")))
 
-	// Filters: price range, district (zone), region (city)
+	// Verified + published lands with a video (column or completed auto-slideshow job).
 	q := storage.DB.Model(&models.Landmark{}).
 		Preload("Organization").
 		Preload("Owner").
-		Where("landmarks.is_verified = ? AND landmarks.is_published = ? AND landmarks.status = ?", true, true, "verified").
-		Where("landmarks.video_url IS NOT NULL AND landmarks.video_url != ''")
+		Where("landmarks.is_verified = ? AND landmarks.is_published = ?", true, true).
+		Where(`(
+			(landmarks.video_url IS NOT NULL AND TRIM(landmarks.video_url) <> '')
+			OR EXISTS (
+				SELECT 1 FROM property_video_generation_jobs j
+				WHERE j.deleted_at IS NULL
+					AND j.entity_type = 'land'
+					AND j.entity_id = landmarks.id
+					AND j.status = 'completed'
+					AND TRIM(j.output_video_url) <> ''
+			)
+		)`)
 
 	if userID > 0 {
 		q = q.Joins("LEFT JOIN organizations ON organizations.id = landmarks.organization_id").
@@ -732,10 +766,29 @@ func GetLandmarkVideosFeed(ctx iris.Context) {
 		landmarks = landmarks[:limit]
 	}
 
+	// Resolve playback URL: landmarks.video_url, else newest completed slideshow job (and repair DB).
+	jobVideoByLandmark := map[uint]string{}
+	for _, lm := range landmarks {
+		if lm.VideoURL != nil && strings.TrimSpace(*lm.VideoURL) != "" {
+			continue
+		}
+		if videoprocessing.RepairLandmarkVideoFromJob(storage.DB, lm.ID) {
+			var refreshed models.Landmark
+			if storage.DB.Select("video_url").First(&refreshed, lm.ID).Error == nil &&
+				refreshed.VideoURL != nil && strings.TrimSpace(*refreshed.VideoURL) != "" {
+				jobVideoByLandmark[lm.ID] = strings.TrimSpace(*refreshed.VideoURL)
+			}
+			continue
+		}
+		if u := videoprocessing.LatestCompletedLandSlideshowURL(storage.DB, lm.ID); u != "" {
+			jobVideoByLandmark[lm.ID] = u
+		}
+	}
+
 	// Batch-fetch likes and saves counts + user's liked/saved state
 	lmIDs := make([]uint, 0, len(landmarks))
 	for _, lm := range landmarks {
-		if lm.VideoURL != nil && *lm.VideoURL != "" {
+		if resolveLandmarkFeedVideoURL(lm, jobVideoByLandmark[lm.ID]) != "" {
 			lmIDs = append(lmIDs, lm.ID)
 		}
 	}
@@ -778,14 +831,19 @@ func GetLandmarkVideosFeed(ctx iris.Context) {
 
 	var videos []map[string]interface{}
 	for _, lm := range landmarks {
-		if lm.VideoURL == nil || *lm.VideoURL == "" {
+		playbackURL := resolveLandmarkFeedVideoURL(lm, jobVideoByLandmark[lm.ID])
+		if playbackURL == "" {
 			continue
 		}
 		lmForClient := lm
+		if lmForClient.VideoURL == nil || strings.TrimSpace(*lmForClient.VideoURL) == "" {
+			u := playbackURL
+			lmForClient.VideoURL = &u
+		}
 		redactLandmarkHostNote(&lmForClient, userID)
 		lmTitle := utils.ResolveLocalizedText(lmForClient.Title, lmForClient.TitleTranslations, lang)
 		// Do not use landmark listing photos as video thumbnail — feed uses preview_blur / video still only.
-		thumbnailURL := ""
+		thumbnailURL := storage.ChunkUploadPreviewBlurURL(playbackURL)
 		// Host info: organization (if any) or individual owner - avatar/logo for profile display
 		orgName := ""
 		orgLogo := ""
@@ -811,12 +869,15 @@ func GetLandmarkVideosFeed(ctx iris.Context) {
 			profileUserID = lmForClient.Owner.ID
 		}
 		video := map[string]interface{}{
-			"ID":            lmForClient.ID,
-			"landmarkID":    lmForClient.ID,
-			"userID":        profileUserID,
-			"landmark":      lmForClient,
-			"videoURL":      *lmForClient.VideoURL,
-			"thumbnailURL":  thumbnailURL,
+			"ID":              lmForClient.ID,
+			"landmarkID":      lmForClient.ID,
+			"userID":            profileUserID,
+			"landmark":          lmForClient,
+			"videoURL":          playbackURL,
+			"VideoURL":          playbackURL,
+			"thumbnailURL":      thumbnailURL,
+			"preview_blur_url":  thumbnailURL,
+			"previewBlurURL":    thumbnailURL,
 			"caption":       lmTitle,
 			"title":         lmTitle,
 			"likesCount":    likesCountMap[lmForClient.ID],
@@ -830,8 +891,9 @@ func GetLandmarkVideosFeed(ctx iris.Context) {
 				"name":    orgName,
 				"logoURL": orgLogo,
 			},
-			"CreatedAt": lmForClient.CreatedAt,
-			"UpdatedAt": lmForClient.UpdatedAt,
+			"CreatedAt":       lmForClient.CreatedAt,
+			"UpdatedAt":       lmForClient.UpdatedAt,
+			"isAutoSlideshow": true,
 		}
 		videos = append(videos, video)
 	}
@@ -1255,7 +1317,40 @@ func VerifyLandmark(ctx iris.Context) {
 		return
 	}
 
+	if input.IsVerified {
+		landmarkID := landmark.ID
+		jobUserID := userID
+		if landmark.OwnerID != nil && *landmark.OwnerID > 0 {
+			jobUserID = *landmark.OwnerID
+		}
+		go func() {
+			videoprocessing.RepairLandmarkVideoFromJob(storage.DB, landmarkID)
+			var lm models.Landmark
+			if err := storage.DB.First(&lm, landmarkID).Error; err != nil {
+				return
+			}
+			hasVideo := lm.VideoURL != nil && strings.TrimSpace(*lm.VideoURL) != ""
+			if !hasVideo && videoprocessing.LatestCompletedLandSlideshowURL(storage.DB, landmarkID) == "" {
+				if _, err := videoprocessing.EnqueueLandmarkSlideshow(storage.DB, landmarkID, jobUserID); err != nil {
+					log.Printf("⚠️ VerifyLandmark slideshow enqueue land=%d: %v", landmarkID, err)
+				}
+			}
+		}()
+	}
+
 	ctx.JSON(iris.Map{"message": "Landmark verification updated"})
+}
+
+func resolveLandmarkFeedVideoURL(lm models.Landmark, jobFallback string) string {
+	if lm.VideoURL != nil {
+		if u := storage.NormalizePlaybackMediaURL(strings.TrimSpace(*lm.VideoURL)); u != "" {
+			return u
+		}
+	}
+	if jobFallback != "" {
+		return storage.NormalizePlaybackMediaURL(jobFallback)
+	}
+	return ""
 }
 
 // GetPendingLandmarks gets landmarks pending verification (admin only)

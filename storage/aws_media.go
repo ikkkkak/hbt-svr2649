@@ -330,3 +330,32 @@ func awsObjectKeyFromURL(mediaURL, bucket string) string {
 	}
 	return ""
 }
+
+// MediaObjectKeyFromURL extracts the object storage key from a public media URL or relative key.
+func MediaObjectKeyFromURL(mediaURL string) string {
+	u := strings.TrimSpace(mediaURL)
+	if u == "" || IsLocalMediaReference(u) {
+		return ""
+	}
+	if key := awsObjectKeyFromURL(u, s3Bucket()); key != "" && !IsLocalMediaReference(key) {
+		return key
+	}
+	if i := strings.Index(u, "?"); i >= 0 {
+		u = u[:i]
+	}
+	for _, marker := range []string{".cdn.digitaloceanspaces.com/", ".digitaloceanspaces.com/"} {
+		if idx := strings.Index(u, marker); idx >= 0 {
+			key := strings.TrimPrefix(u[idx+len(marker):], "/")
+			if key != "" && !IsLocalMediaReference(key) {
+				return key
+			}
+		}
+	}
+	if !strings.Contains(u, "://") && !strings.HasPrefix(u, "/") && !strings.Contains(u, " ") {
+		key := strings.TrimPrefix(u, "/")
+		if key != "" && !IsLocalMediaReference(key) {
+			return key
+		}
+	}
+	return ""
+}

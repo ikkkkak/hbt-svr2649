@@ -222,6 +222,10 @@ func main() {
 	realtime.StartUserHubRedisSubscriber()
 	videoprocessing.StartWorkers(storage.DB)
 	videoprocessing.StartSlideshowWorkers(storage.DB)
+	go func() {
+		time.Sleep(5 * time.Second)
+		videoprocessing.BackfillSlideshowVideosOnStart(storage.DB)
+	}()
 	if os.Getenv("VIDEO_BACKFILL_ENABLED") == "true" {
 		go videoprocessing.BackfillPendingPropertySaleVideos(storage.DB, 50)
 	}
@@ -1397,8 +1401,8 @@ func main() {
 		landmarks.Post("/", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.CreateLandmark)
 		landmarks.Get("/organization", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.GetOrganizationLandmarks)
 		landmarks.Get("/public", routes.GetPublicLandmarks)
-		landmarks.Get("/{id:uint}", optionalAuthMiddleware, routes.GetLandmarkByID)
 		landmarks.Get("/videos/feed", optionalAuthMiddleware, routes.GetLandmarkVideosFeed)
+		landmarks.Get("/{id:uint}", optionalAuthMiddleware, routes.GetLandmarkByID)
 		landmarks.Post("/{id:uint}/like", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.LikeLandmarkVideo)
 		landmarks.Post("/{id:uint}/unlike", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.UnlikeLandmarkVideo)
 		landmarks.Post("/{id:uint}/save", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.SaveLandmarkVideo)

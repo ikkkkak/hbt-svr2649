@@ -5,10 +5,31 @@ import (
 	"strings"
 )
 
+// IsLocalMediaReference reports device-local URIs that must never be stored or fetched as CDN URLs.
+func IsLocalMediaReference(u string) bool {
+	lower := strings.ToLower(strings.TrimSpace(u))
+	if lower == "" {
+		return true
+	}
+	if strings.HasPrefix(lower, "file://") ||
+		strings.HasPrefix(lower, "content://") ||
+		strings.HasPrefix(lower, "ph://") ||
+		strings.HasPrefix(lower, "assets-library://") {
+		return true
+	}
+	if strings.HasPrefix(lower, "/var/mobile/") ||
+		strings.Contains(lower, "exponentexperiencedata") ||
+		strings.Contains(lower, "/imagepicker/") ||
+		strings.Contains(lower, "/library/caches/") {
+		return true
+	}
+	return false
+}
+
 // NormalizePublicMediaURL converts stored paths to absolute https URLs for API payloads.
 func NormalizePublicMediaURL(raw string) string {
 	u := strings.TrimSpace(raw)
-	if u == "" || strings.HasPrefix(u, "data:") {
+	if u == "" || strings.HasPrefix(u, "data:") || IsLocalMediaReference(u) {
 		return ""
 	}
 	lower := strings.ToLower(u)

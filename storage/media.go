@@ -16,6 +16,8 @@ func InitializeMediaCDN() {
 	default:
 		initGCSCDN()
 	}
+	// Legacy listing images may still live on Cloudinary while new uploads use Spaces/S3.
+	ensureCloudinaryClients()
 	fmt.Printf("✅ Media CDN provider: %s\n", activeCDN)
 }
 
