@@ -135,6 +135,7 @@ func main() {
 			}
 		}()
 		storage.InitializeDB()
+		videoprocessing.SeedDefaultMusicTracks(storage.DB)
 		
 		// Start property cleanup scheduler (runs daily at 2 AM)
 		cleanupService := services.NewPropertyCleanupService()
@@ -220,6 +221,7 @@ func main() {
 	// Unified user-based realtime hub (direct messages + inbox updates)
 	realtime.StartUserHubRedisSubscriber()
 	videoprocessing.StartWorkers(storage.DB)
+	videoprocessing.StartSlideshowWorkers(storage.DB)
 	if os.Getenv("VIDEO_BACKFILL_ENABLED") == "true" {
 		go videoprocessing.BackfillPendingPropertySaleVideos(storage.DB, 50)
 	}
@@ -635,6 +637,11 @@ func main() {
 		admin.Post("/properties/{id:uint}/reassign-locations", routes.AdminReassignPropertyLocations)
 		admin.Post("/properties/{id:uint}/flag", routes.AdminFlagProperty)
 		admin.Delete("/properties/{id:uint}", routes.AdminDeleteProperty)
+		admin.Get("/music-tracks", routes.AdminListMusicTracks)
+		admin.Post("/music-tracks", routes.AdminCreateMusicTrack)
+		admin.Post("/music-tracks/upload", routes.AdminUploadMusicFile)
+		admin.Patch("/music-tracks/{id:uint}", routes.AdminUpdateMusicTrack)
+		admin.Delete("/music-tracks/{id:uint}", routes.AdminDeleteMusicTrack)
 		admin.Get("/experiences", routes.AdminListExperiences)
 		admin.Get("/experiences/{id:uint}", routes.AdminGetExperience)
 		admin.Patch("/experiences/{id:uint}/status", routes.AdminUpdateExperienceStatus)
@@ -1377,6 +1384,12 @@ func main() {
 		// Contact Host Route
 		propertySales.Post("/contact-host", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.ContactPropertySaleHost)
 		propertySales.Get("/{id:uint}/offers", routes.GetPublicPropertyOffers)
+	}
+
+	propertyVideoJobs := app.Party("/api/property-video-jobs", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware)
+	{
+		propertyVideoJobs.Get("/by-listing", routes.GetPropertyVideoJobByListing)
+		propertyVideoJobs.Get("/{id:uint}", routes.GetPropertyVideoGenerationJob)
 	}
 
 	landmarks := app.Party("/api/landmarks")

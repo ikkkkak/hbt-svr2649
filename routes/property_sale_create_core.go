@@ -4,6 +4,7 @@ import (
 	"apartments-clone-server/models"
 	"apartments-clone-server/places"
 	"apartments-clone-server/services"
+	"apartments-clone-server/services/videoprocessing"
 	"apartments-clone-server/storage"
 	"encoding/json"
 	"errors"
@@ -184,7 +185,7 @@ func ExecuteCreatePropertySale(
 			}).Error
 	}(propertyID, titleCopy, descCopy)
 
-	go func(pid, uid uint, videos []string, aIDs []uint) {
+	go func(pid, uid uint, videos, images []string, aIDs []uint) {
 		defer func() {
 			if r := recover(); r != nil {
 				log.Printf("⚠️ Panic in CreatePropertySale post-create id=%d: %v", pid, r)
@@ -192,6 +193,11 @@ func ExecuteCreatePropertySale(
 		}()
 		if len(videos) > 0 {
 			_ = SyncPropertySaleVideoRows(pid, uid, videos)
+		} else if len(images) > 0 {
+			// Auto-generate vertical marketing video from photos (lands / image-only listings).
+			if _, err := videoprocessing.EnqueuePropertySaleSlideshow(storage.DB, pid, uid); err != nil {
+				log.Printf("⚠️ slideshow enqueue sale=%d: %v", pid, err)
+			}
 		}
 		if len(aIDs) > 0 {
 			var amenities []models.Amenity
@@ -202,7 +208,7 @@ func ExecuteCreatePropertySale(
 				}
 			}
 		}
-	}(propertyID, userID, videoURLs, amenityIDs)
+	}(propertyID, userID, videoURLs, input.Images, amenityIDs)
 
 	if property.Latitude != 0 && property.Longitude != 0 && places.DefaultService != nil {
 		go places.DefaultService.FetchAndSaveNearby(propertyID, property.Latitude, property.Longitude)
