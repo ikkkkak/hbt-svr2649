@@ -234,7 +234,12 @@ func EnsureNotificationCopy(lang, notificationType, title, body string) (string,
 	if outBody == "" || looksLikeRawNotificationKey(outBody) || outBody == typ {
 		outBody = DefaultNotificationBody(lang, typ, label)
 	}
-	return outTitle, outBody
+	return sanitizePostgreSQLText(outTitle), sanitizePostgreSQLText(outBody)
+}
+
+// sanitizePostgreSQLText strips invalid UTF-8 sequences (e.g. from byte-truncated Arabic).
+func sanitizePostgreSQLText(s string) string {
+	return strings.ToValidUTF8(strings.TrimSpace(s), "")
 }
 
 func DefaultNotificationBody(lang, typ, label string) string {

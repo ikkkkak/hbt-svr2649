@@ -2,10 +2,12 @@
 FROM golang:1.24-alpine
 
 # Install runtime deps for slideshow video generation (ffmpeg + fonts)
-RUN apk add --no-cache ffmpeg ttf-dejavu ca-certificates
+RUN apk add --no-cache ffmpeg ttf-dejavu ca-certificates \
+	&& ffmpeg -version
 
 ENV FFMPEG_PATH=/usr/bin/ffmpeg
 ENV SLIDESHOW_FONT_PATH=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf
+ENV PORT=8080
 
 # Set working directory
 WORKDIR /app

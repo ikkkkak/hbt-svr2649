@@ -127,8 +127,8 @@ func (HabitatSector) TableName() string { return "habitat_sectors" }
 type HabitatPlot struct {
 	ID               uint           `json:"id" gorm:"primaryKey"`
 	PlanID           uint           `json:"plan_id" gorm:"not null;index:idx_habitat_plots_plan;constraint:OnUpdate:CASCADE,OnDelete:CASCADE"`
-	SectorID         uint           `json:"sector_id" gorm:"not null;index:idx_habitat_plots_sector;uniqueIndex:unique_plot_per_sector"`
-	PlotNumber       string         `json:"plot_number" gorm:"size:100;not null;uniqueIndex:unique_plot_per_sector"`
+	SectorID         uint           `json:"sector_id" gorm:"not null;index:idx_habitat_plots_sector"`
+	PlotNumber       string         `json:"plot_number" gorm:"size:100;not null;index:idx_habitat_plots_number"`
 	LValue           string         `json:"l_value,omitempty" gorm:"size:100"`
 	IValue           *int           `json:"i_value,omitempty"`
 	AreaM2           *float64       `json:"area_m2,omitempty"`

@@ -1,11 +1,10 @@
 package services
 
 import (
+	"apartments-clone-server/models"
 	"apartments-clone-server/storage"
 	"log"
 	"time"
-
-	"gorm.io/gorm"
 )
 
 // PropertyCleanupService handles scheduled cleanup of deleted properties
@@ -24,12 +23,9 @@ func (pcs *PropertyCleanupService) CleanupDeletedProperties() error {
 	// Find properties that were deleted 15+ days ago
 	var deletedCount int64
 	result := storage.DB.Unscoped().
+		Model(&models.PropertySale{}).
 		Where("deleted_at IS NOT NULL").
 		Where("deleted_at < ?", cutoffDate).
-		Model(&struct {
-			ID        uint
-			DeletedAt gorm.DeletedAt
-		}{}).
 		Count(&deletedCount)
 
 	if result.Error != nil {

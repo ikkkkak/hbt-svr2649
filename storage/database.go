@@ -102,6 +102,8 @@ func connectToDB() *gorm.DB {
 }
 
 func performMigrations(db *gorm.DB) {
+	ensureOrganizationInviteCodesBackfill(db)
+
 	err := db.AutoMigrate(
 		&models.Conversation{}, // create table containing many side first
 		&models.Message{},
@@ -530,6 +532,11 @@ func performMigrations(db *gorm.DB) {
 				ALTER TABLE organization_invite_codes ADD COLUMN code VARCHAR(20);
 			END IF;
 
+			-- Backfill legacy rows before NOT NULL constraint
+			UPDATE organization_invite_codes
+			SET code = 'LEG-' || LPAD(id::text, 8, '0')
+			WHERE code IS NULL OR TRIM(code) = '';
+
 			-- Add expires_at column if it doesn't exist (make it nullable for "never expires")
 			IF NOT EXISTS (
 				SELECT 1 FROM information_schema.columns 
@@ -902,8 +909,27 @@ func ensurePerformanceIndexes(db *gorm.DB) {
 		ON organizations(owner_id)
 		WHERE deleted_at IS NULL`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_landmarks_org_owner
-		ON landmarks(organization_id, owner_id)
-		WHERE deleted_at IS NULL`)
+		ON landmarks(organization_id, owner_id)`)
+}
+
+// ensureOrganizationInviteCodesBackfill fills legacy rows before GORM sets code NOT NULL.
+func ensureOrganizationInviteCodesBackfill(db *gorm.DB) {
+	if !db.Migrator().HasTable(&models.OrganizationInviteCode{}) {
+		return
+	}
+	if !db.Migrator().HasColumn(&models.OrganizationInviteCode{}, "Code") {
+		return
+	}
+	res := db.Exec(`
+		UPDATE organization_invite_codes
+		SET code = 'LEG-' || LPAD(id::text, 8, '0')
+		WHERE code IS NULL OR TRIM(code) = ''
+	`)
+	if res.Error != nil {
+		log.Printf("⚠️ organization_invite_codes backfill: %v", res.Error)
+	} else if res.RowsAffected > 0 {
+		log.Printf("✅ Backfilled %d organization_invite_codes with legacy codes", res.RowsAffected)
+	}
 }
 
 // ensureBrokerIDPartialUniqueIndex prevents signup failures when many users have no broker ID yet.

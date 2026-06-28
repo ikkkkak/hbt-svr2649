@@ -11,6 +11,7 @@ import (
 	"os"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 const discoveryEventSpotlight = "discovery_spotlight"
@@ -718,14 +719,14 @@ func buildLandmarkDiscoveryCopy(locale string, l *models.Landmark, variant int) 
 
 func trimRunes(s string, max int) string {
 	s = strings.TrimSpace(s)
-	if max <= 0 || len(s) <= max {
+	if max <= 0 || utf8.RuneCountInString(s) <= max {
 		return s
 	}
-	// byte trim is ok for push; avoid importing utf8 heavy paths
-	if len(s) > max {
-		return s[:max-1] + "…"
+	runes := []rune(s)
+	if len(runes) <= max {
+		return s
 	}
-	return s
+	return string(runes[:max-1]) + "…"
 }
 
 func saleDeepLinkData(id uint) map[string]string {
