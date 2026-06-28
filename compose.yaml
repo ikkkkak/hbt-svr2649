@@ -1,3 +1,5 @@
+# Local / Dokploy "Docker Compose" deploy only — NOT a Dockerfile.
+# Application builds: set Dokploy Dockerfile Path = Dockerfile
 version: "3.8"
 
 services:

@@ -1,7 +1,9 @@
-# Dokploy: Build Type MUST be "Dockerfile" — Dockerfile path = Dockerfile (NOT docker-compose.yaml).
-# Compose file is only for "Docker Compose" deploy type (docker compose up --build).
+# Dokploy Application deploy:
+#   Build type = Dockerfile
+#   Dockerfile path = Dockerfile   (never docker-compose.yaml or compose.yaml)
+#   Build path = .  (or apartmentscloneserver if repo root is parent)
 FROM golang:1.24-alpine
-# Slideshow / land video generation
+
 RUN apk add --no-cache ffmpeg ttf-dejavu ca-certificates \
 	&& ffmpeg -version
 
