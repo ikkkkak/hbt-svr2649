@@ -13,7 +13,7 @@ services:
     environment:
       PORT: "4000"
       FFMPEG_PATH: /usr/bin/ffmpeg
-      SLIDESHOW_FONT_PATH: /usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf
+      SLIDESHOW_FONT_PATH: /usr/share/fonts/dejavu/DejaVuSans-Bold.ttf
       SLIDESHOW_BACKFILL_ENABLED: "true"
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:4000/healthz"]

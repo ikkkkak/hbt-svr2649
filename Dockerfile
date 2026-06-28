@@ -7,7 +7,7 @@ RUN apk add --no-cache ffmpeg ttf-dejavu ca-certificates \
 	&& ffmpeg -version
 
 ENV FFMPEG_PATH=/usr/bin/ffmpeg
-ENV SLIDESHOW_FONT_PATH=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf
+ENV SLIDESHOW_FONT_PATH=/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf
 
 WORKDIR /app
 

@@ -395,6 +395,7 @@ func slideshowFontPath() string {
 		}
 	}
 	candidates := []string{
+		"/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf",
 		"/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
 		"/usr/share/fonts/TTF/DejaVuSans-Bold.ttf",
 		"C:\\Windows\\Fonts\\arialbd.ttf",
