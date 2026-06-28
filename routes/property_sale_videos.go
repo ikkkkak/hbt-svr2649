@@ -580,7 +580,7 @@ func GetPropertySaleVideoFeed(ctx iris.Context) {
 
 	fmt.Printf("📹 Property Sale Video Feed - Returning %d videos for user ID: %d (page: %d, limit: %d, fast=%v)\n", len(videos), userID, page, limit, fastFirstPage)
 
-	hasMore := len(propertySales) >= limit
+	hasMore := len(propertySales) >= limit && len(videos) > 0
 	nextCursor := ""
 	if hasMore {
 		nextCursor = fmt.Sprintf("%d", page+1)

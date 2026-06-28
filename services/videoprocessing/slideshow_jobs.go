@@ -28,6 +28,11 @@ var slideshowWorkersOnce sync.Once
 // StartSlideshowWorkers launches Redis-backed slideshow generators (idempotent).
 func StartSlideshowWorkers(db *gorm.DB) {
 	slideshowWorkersOnce.Do(func() {
+		if ff := ffmpegPath(); ff == "" {
+			log.Printf("❌ slideshow DISABLED: ffmpeg not found — set FFMPEG_PATH or install ffmpeg (land/sale auto-videos will not generate)")
+		} else {
+			log.Printf("✅ slideshow: ffmpeg=%s font=%s", ff, slideshowFontPath())
+		}
 		n := slideshowWorkerCount()
 		for i := 0; i < n; i++ {
 			go runSlideshowWorker(db, i)
@@ -770,6 +775,9 @@ func landmarkOwnerUserID(db *gorm.DB, lm *models.Landmark) uint {
 			return org.OwnerID
 		}
 	}
+	if lm.VerifiedBy != nil && *lm.VerifiedBy > 0 {
+		return *lm.VerifiedBy
+	}
 	return 0
 }
 
@@ -880,6 +888,51 @@ func reconcileLandmarkSlideshowJobs(db *gorm.DB) {
 		}
 		log.Printf("🔄 slideshow reconcile: re-enqueued land=%d after failed job", job.EntityID)
 		time.Sleep(100 * time.Millisecond)
+	}
+
+	EnqueueMissingLandmarkSlideshowsBatch(db, 100)
+}
+
+// EnqueueMissingLandmarkSlideshowsBatch queues slideshow generation for verified lands without video.
+func EnqueueMissingLandmarkSlideshowsBatch(db *gorm.DB, limit int) {
+	if db == nil || limit <= 0 || !slideshowEnabled() {
+		return
+	}
+	minImg := slideshowMinImages()
+	var landmarks []models.Landmark
+	q := db.Where("(video_url IS NULL OR TRIM(video_url) = '')").
+		Where("is_verified = ? AND is_published = ?", true, true).
+		Where("status <> ?", "inactive").
+		Order("id ASC").
+		Limit(limit)
+	if err := q.Find(&landmarks).Error; err != nil {
+		log.Printf("❌ slideshow enqueue batch: %v", err)
+		return
+	}
+	if len(landmarks) == 0 {
+		return
+	}
+	var enqueued int
+	for _, lm := range landmarks {
+		if repairLandmarkVideoFromJob(db, lm.ID) {
+			continue
+		}
+		if len(slideshowEligibleImages(landmarkImageURLs(lm.Images))) < minImg {
+			continue
+		}
+		uid := landmarkOwnerUserID(db, &lm)
+		if uid == 0 {
+			continue
+		}
+		job, err := EnqueueLandmarkSlideshow(db, lm.ID, uid)
+		if err != nil || job == nil {
+			continue
+		}
+		enqueued++
+		time.Sleep(80 * time.Millisecond)
+	}
+	if enqueued > 0 {
+		log.Printf("🎞️ slideshow enqueue batch: queued %d verified land(s)", enqueued)
 	}
 }
 

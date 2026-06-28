@@ -17,9 +17,10 @@ func upsertIncr(stat models.GoldPropertyStat, field string, delta int64) {
 	if storage.DB == nil || stat.PropertySaleID == 0 || delta == 0 {
 		return
 	}
+	qualified := "gold_property_stats." + field
 	assign := map[string]interface{}{
+		field:        gorm.Expr(qualified+" + ?", delta),
 		"updated_at": time.Now(),
-		field:        gorm.Expr(field+" + ?", delta),
 	}
 
 	err := storage.DB.Clauses(clause.OnConflict{

@@ -713,7 +713,10 @@ func GetLandmarkVideosFeed(ctx iris.Context) {
 	lang := strings.ToLower(strings.TrimSpace(ctx.URLParamDefault("lang", "en")))
 
 	if offset == 0 {
-		go videoprocessing.ReconcileLandmarkSlideshowJobs(storage.DB)
+		go func() {
+			videoprocessing.ReconcileLandmarkSlideshowJobs(storage.DB)
+			videoprocessing.EnqueueMissingLandmarkSlideshowsBatch(storage.DB, 25)
+		}()
 	}
 
 	// Verified + published lands with a video (column or completed auto-slideshow job).

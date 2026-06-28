@@ -447,7 +447,9 @@ func GetVideoFeed(ctx iris.Context) {
 	fmt.Printf("📹 Returning %d videos for user %d (page %d)\n", len(finalVideos), userID, page)
 
 	// 🔄 FALLBACK for anonymous users: If no rental videos, use property sale videos
-	if !hasAuth && len(finalVideos) == 0 {
+	// Skip when unified feed is active — the client loads /property-sale-videos/feed separately.
+	unifiedFeed := strings.TrimSpace(ctx.URLParam("unified")) == "1"
+	if !hasAuth && len(finalVideos) == 0 && !unifiedFeed {
 		fmt.Printf("⚠️ [FALLBACK TRIGGERED] No rental videos found for anonymous user, fetching property sale videos as fallback...\n")
 		
 		var fallbackPropertySales []models.PropertySale
