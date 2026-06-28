@@ -222,6 +222,7 @@ func main() {
 	realtime.StartUserHubRedisSubscriber()
 	videoprocessing.StartWorkers(storage.DB)
 	videoprocessing.StartSlideshowWorkers(storage.DB)
+	videoprocessing.LogSlideshowStartupStatus()
 	go func() {
 		time.Sleep(2 * time.Second)
 		videoprocessing.BackfillSlideshowVideosOnStart(storage.DB)

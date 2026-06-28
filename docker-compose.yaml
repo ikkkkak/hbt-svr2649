@@ -7,4 +7,8 @@ services:
       dockerfile: Dockerfile
     ports:
       - "4000:4000"
+    environment:
+      FFMPEG_PATH: /usr/bin/ffmpeg
+      SLIDESHOW_FONT_PATH: /usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf
+      SLIDESHOW_BACKFILL_ENABLED: "true"
     restart: unless-stopped

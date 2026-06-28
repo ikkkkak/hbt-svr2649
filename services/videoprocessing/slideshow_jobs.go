@@ -57,6 +57,29 @@ func slideshowEnabled() bool {
 	return ffmpegPath() != ""
 }
 
+func slideshowDisabledReason() string {
+	if strings.EqualFold(os.Getenv("SLIDESHOW_VIDEO_ENABLED"), "false") {
+		return "SLIDESHOW_VIDEO_ENABLED=false"
+	}
+	if ff := ffmpegPath(); ff == "" {
+		if p := strings.TrimSpace(os.Getenv("FFMPEG_PATH")); p != "" {
+			return fmt.Sprintf("FFMPEG_PATH=%q is set but file not found", p)
+		}
+		return "ffmpeg not installed (apk add ffmpeg or set FFMPEG_PATH=/usr/bin/ffmpeg)"
+	}
+	return ""
+}
+
+// LogSlideshowStartupStatus prints one clear line so production logs show why slideshow is off.
+func LogSlideshowStartupStatus() {
+	if reason := slideshowDisabledReason(); reason != "" {
+		log.Printf("❌ SLIDESHOW DISABLED: %s — land/sale auto-videos will NOT generate until fixed", reason)
+		return
+	}
+	log.Printf("✅ SLIDESHOW READY: ffmpeg=%s font=%s backfill=%v workers=%d",
+		ffmpegPath(), slideshowFontPath(), slideshowBackfillEnabled(), slideshowWorkerCount())
+}
+
 func slideshowMinImages() int {
 	if v := strings.TrimSpace(os.Getenv("SLIDESHOW_MIN_IMAGES")); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n >= 1 && n <= 20 {
@@ -95,7 +118,11 @@ func runSlideshowWorker(db *gorm.DB, id int) {
 // EnqueuePropertySaleSlideshow creates a job when a listing has images but no video.
 func EnqueuePropertySaleSlideshow(db *gorm.DB, propertySaleID, userID uint) (*models.PropertyVideoGenerationJob, error) {
 	if !slideshowEnabled() {
-		log.Printf("⚠️ slideshow skipped sale=%d: ffmpeg not found (set FFMPEG_PATH or install ffmpeg); SLIDESHOW_VIDEO_ENABLED=false also disables", propertySaleID)
+		reason := slideshowDisabledReason()
+		if reason == "" {
+			reason = "slideshow disabled"
+		}
+		log.Printf("⚠️ slideshow skipped sale=%d: %s", propertySaleID, reason)
 		return nil, nil
 	}
 	var sale models.PropertySale
@@ -160,7 +187,11 @@ func EnqueuePropertySaleSlideshow(db *gorm.DB, propertySaleID, userID uint) (*mo
 // EnqueueLandmarkSlideshow creates a job when a land listing has photos but no video.
 func EnqueueLandmarkSlideshow(db *gorm.DB, landmarkID, userID uint) (*models.PropertyVideoGenerationJob, error) {
 	if !slideshowEnabled() {
-		log.Printf("⚠️ slideshow skipped land=%d: ffmpeg not found (set FFMPEG_PATH or install ffmpeg); SLIDESHOW_VIDEO_ENABLED=false also disables", landmarkID)
+		reason := slideshowDisabledReason()
+		if reason == "" {
+			reason = "slideshow disabled"
+		}
+		log.Printf("⚠️ slideshow skipped land=%d: %s", landmarkID, reason)
 		return nil, nil
 	}
 	var lm models.Landmark

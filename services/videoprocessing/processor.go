@@ -316,14 +316,37 @@ func emit(userID, videoID uint, status string, progress int, hls, mobile, errMsg
 }
 
 func ffmpegPath() string {
-	if p := strings.TrimSpace(os.Getenv("FFMPEG_PATH")); p != "" {
+	seen := map[string]struct{}{}
+	try := func(p string) string {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			return ""
+		}
+		if _, ok := seen[p]; ok {
+			return ""
+		}
+		seen[p] = struct{}{}
+		st, err := os.Stat(p)
+		if err != nil || st.IsDir() {
+			return ""
+		}
 		return p
 	}
-	p, err := exec.LookPath("ffmpeg")
-	if err != nil {
-		return ""
+
+	if p := try(os.Getenv("FFMPEG_PATH")); p != "" {
+		return p
 	}
-	return p
+	if p, err := exec.LookPath("ffmpeg"); err == nil {
+		if ok := try(p); ok != "" {
+			return ok
+		}
+	}
+	for _, p := range []string{"/usr/bin/ffmpeg", "/usr/local/bin/ffmpeg"} {
+		if ok := try(p); ok != "" {
+			return ok
+		}
+	}
+	return ""
 }
 
 func downloadFile(ctx context.Context, url, dest string) error {
