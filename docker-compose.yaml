@@ -1,6 +1,3 @@
-# Dokploy (Hetzner): create a "Docker Compose" app, set Compose Path to this file.
-# Root directory must be apartmentscloneserver (where go.mod + Dockerfile live).
-# Add DATABASE_URL, REDIS_*, etc. in Dokploy Environment tab — they merge into .env here.
 version: "3.8"
 
 services:

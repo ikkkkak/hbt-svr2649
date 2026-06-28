@@ -1,7 +1,6 @@
-# Production: Hetzner VPS via Dokploy — use Build Type "Dockerfile" or "Docker Compose".
-# Do NOT use Nixpacks (default): it runs `go build` with no ffmpeg.
+# Dokploy: Build Type MUST be "Dockerfile" — Dockerfile path = Dockerfile (NOT docker-compose.yaml).
+# Compose file is only for "Docker Compose" deploy type (docker compose up --build).
 FROM golang:1.24-alpine
-
 # Slideshow / land video generation
 RUN apk add --no-cache ffmpeg ttf-dejavu ca-certificates \
 	&& ffmpeg -version
