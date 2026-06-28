@@ -7,7 +7,6 @@ RUN apk add --no-cache ffmpeg ttf-dejavu ca-certificates \
 
 ENV FFMPEG_PATH=/usr/bin/ffmpeg
 ENV SLIDESHOW_FONT_PATH=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf
-ENV PORT=8080
 
 # Set working directory
 WORKDIR /app
@@ -22,8 +21,8 @@ COPY . .
 # Build the app
 RUN go build -o server .
 
-# Expose the port Cloud Run expects
-EXPOSE 8080
+# Expose default; Render/cloud inject PORT at runtime.
+EXPOSE 4000
 
-# Run the server
+# Run the server (listens on $PORT from environment)
 CMD ["./server"]

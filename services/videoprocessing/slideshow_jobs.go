@@ -74,10 +74,25 @@ func slideshowDisabledReason() string {
 func LogSlideshowStartupStatus() {
 	if reason := slideshowDisabledReason(); reason != "" {
 		log.Printf("❌ SLIDESHOW DISABLED: %s — land/sale auto-videos will NOT generate until fixed", reason)
+		for _, line := range ffmpegDeployHints() {
+			log.Printf("💡 %s", line)
+		}
+		log.Printf("🔍 ffmpeg diagnostics: %+v", FFmpegStatus())
 		return
 	}
 	log.Printf("✅ SLIDESHOW READY: ffmpeg=%s font=%s backfill=%v workers=%d",
 		ffmpegPath(), slideshowFontPath(), slideshowBackfillEnabled(), slideshowWorkerCount())
+}
+
+func ffmpegDeployHints() []string {
+	if os.Getenv("RENDER") == "" {
+		return nil
+	}
+	return []string{
+		"Render deploy must use env: docker in render.yaml (native env: go has no ffmpeg).",
+		"After switching, redeploy and confirm logs show: SLIDESHOW READY: ffmpeg=/usr/bin/ffmpeg",
+		"Or hit GET /api/health/deep and check slideshow.ffmpeg.available=true",
+	}
 }
 
 func slideshowMinImages() int {

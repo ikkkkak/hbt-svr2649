@@ -349,6 +349,39 @@ func ffmpegPath() string {
 	return ""
 }
 
+// FFmpegStatus reports how ffmpeg was resolved (for health checks and deploy debugging).
+func FFmpegStatus() map[string]interface{} {
+	envPath := strings.TrimSpace(os.Getenv("FFMPEG_PATH"))
+	resolved := ffmpegPath()
+	lookPath, lookErr := exec.LookPath("ffmpeg")
+	lookDetail := lookPath
+	if lookErr != nil {
+		lookDetail = lookErr.Error()
+	}
+	stat := map[string]string{}
+	for _, p := range []string{envPath, "/usr/bin/ffmpeg", "/usr/local/bin/ffmpeg"} {
+		if p == "" {
+			continue
+		}
+		st, err := os.Stat(p)
+		if err != nil {
+			stat[p] = err.Error()
+		} else if st.IsDir() {
+			stat[p] = "is directory"
+		} else {
+			stat[p] = "ok"
+		}
+	}
+	return map[string]interface{}{
+		"available":       resolved != "",
+		"path":            resolved,
+		"env_FFMPEG_PATH": envPath,
+		"look_path":       lookDetail,
+		"stat":            stat,
+		"on_render":       os.Getenv("RENDER") == "true",
+	}
+}
+
 func downloadFile(ctx context.Context, url, dest string) error {
 	return storage.DownloadMediaFile(ctx, url, dest)
 }

@@ -6,6 +6,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"apartments-clone-server/services/videoprocessing"
 	"apartments-clone-server/storage"
 
 	"github.com/kataras/iris/v12"
@@ -82,6 +83,9 @@ func HealthDeep(ctx iris.Context) {
 		"redis": iris.Map{
 			"ok":     redisOK,
 			"detail": redisDetail,
+		},
+		"slideshow": iris.Map{
+			"ffmpeg": videoprocessing.FFmpegStatus(),
 		},
 		"hints": buildHealthHints(dbOK, dbMs, pool, activeRequestCount()),
 		"elapsed_ms": time.Since(start).Milliseconds(),
@@ -167,6 +171,10 @@ func buildHealthHints(dbOK bool, dbMs int64, pool poolSnapshot, inFlight int64) 
 	}
 	if inFlight > 50 {
 		hints = append(hints, "High in-flight HTTP count — instance may be overloaded or clients are polling aggressively.")
+	}
+	ff, _ := videoprocessing.FFmpegStatus()["available"].(bool)
+	if !ff {
+		hints = append(hints, "ffmpeg unavailable — land/sale slideshow videos will not generate. On Render use render.yaml env: docker (not env: go).")
 	}
 	if len(hints) == 0 {
 		hints = append(hints, "All checks nominal.")

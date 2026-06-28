@@ -8,6 +8,7 @@ services:
     ports:
       - "4000:4000"
     environment:
+      PORT: "4000"
       FFMPEG_PATH: /usr/bin/ffmpeg
       SLIDESHOW_FONT_PATH: /usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf
       SLIDESHOW_BACKFILL_ENABLED: "true"
