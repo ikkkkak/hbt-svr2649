@@ -1,3 +1,6 @@
+# Dokploy (Hetzner): create a "Docker Compose" app, set Compose Path to this file.
+# Root directory must be apartmentscloneserver (where go.mod + Dockerfile live).
+# Add DATABASE_URL, REDIS_*, etc. in Dokploy Environment tab — they merge into .env here.
 version: "3.8"
 
 services:
@@ -12,4 +15,10 @@ services:
       FFMPEG_PATH: /usr/bin/ffmpeg
       SLIDESHOW_FONT_PATH: /usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf
       SLIDESHOW_BACKFILL_ENABLED: "true"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:4000/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 90s
     restart: unless-stopped

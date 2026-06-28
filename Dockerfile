@@ -1,28 +1,23 @@
-# Use official Go image (or Node, Python, whatever you use)
+# Production: Hetzner VPS via Dokploy — use Build Type "Dockerfile" or "Docker Compose".
+# Do NOT use Nixpacks (default): it runs `go build` with no ffmpeg.
 FROM golang:1.24-alpine
 
-# Install runtime deps for slideshow video generation (ffmpeg + fonts)
+# Slideshow / land video generation
 RUN apk add --no-cache ffmpeg ttf-dejavu ca-certificates \
 	&& ffmpeg -version
 
 ENV FFMPEG_PATH=/usr/bin/ffmpeg
 ENV SLIDESHOW_FONT_PATH=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf
 
-# Set working directory
 WORKDIR /app
 
-# Copy go.mod & go.sum first to leverage caching
 COPY go.mod go.sum ./
 RUN go mod download
 
-# Copy all source files
 COPY . .
 
-# Build the app
-RUN go build -o server .
+RUN go build -ldflags="-s -w" -o server .
 
-# Expose default; Render/cloud inject PORT at runtime.
 EXPOSE 4000
 
-# Run the server (listens on $PORT from environment)
 CMD ["./server"]
