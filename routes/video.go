@@ -173,6 +173,7 @@ func GetVideoFeed(ctx iris.Context) {
 			"success":    true,
 			"videos":     videosWithState,
 			"page":       page,
+			"nextCursor": cachedFeed.NextCursor,
 			"hasMore":    cachedFeed.NextCursor != "",
 			"source":     "cache",
 		})
@@ -392,9 +393,13 @@ func GetVideoFeed(ctx iris.Context) {
 			nextCursor = ""
 		}
 	} else {
-		// Page-based: skip expensive COUNT — infer hasMore from page fill.
+		// Page-based: infer hasMore from page fill; expose last video id as cursor for infinite scroll.
 		hasMore = len(selectedVideos) == limit
-		nextCursor = ""
+		if hasMore && len(selectedVideos) > 0 {
+			nextCursor = fmt.Sprintf("%d", selectedVideos[len(selectedVideos)-1].ID)
+		} else {
+			nextCursor = ""
+		}
 	}
 
 	// Promotional videos (admin content) - intersperse every 4-5 videos
@@ -732,13 +737,10 @@ func GetVideoFeed(ctx iris.Context) {
 	}
 
 	// Include cursor information for cursor-based pagination
-	if useCursor {
-		response["nextCursor"] = nextCursor
-		response["hasMore"] = hasMore
-	} else {
-		// Include page for backward compatibility
+	response["nextCursor"] = nextCursor
+	response["hasMore"] = hasMore
+	if !useCursor {
 		response["page"] = page
-		response["hasMore"] = hasMore
 	}
 
 	// 🔴 CACHE VIDEOS FOR NEXT REQUEST (async, don't block response)
@@ -747,10 +749,7 @@ func GetVideoFeed(ctx iris.Context) {
 		cacheConfig := services.DefaultCacheConfig()
 		cacheService := services.NewCacheService(storage.Redis)
 		videoFeedCache := services.NewVideoFeedCacheService(cacheService, cacheConfig)
-		nextCur := ""
-		if useCursor {
-			nextCur = nextCursor
-		}
+		nextCur := nextCursor
 		if err := videoFeedCache.SetVideoFeedCache(bgCtx, userID, pageNum, videos, nextCur); err != nil {
 			fmt.Printf("⚠️ Failed to cache video feed: %v\n", err)
 		}
