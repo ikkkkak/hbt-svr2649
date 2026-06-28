@@ -712,6 +712,10 @@ func GetLandmarkVideosFeed(ctx iris.Context) {
 	offset := (page - 1) * limit
 	lang := strings.ToLower(strings.TrimSpace(ctx.URLParamDefault("lang", "en")))
 
+	if offset == 0 {
+		go videoprocessing.ReconcileLandmarkSlideshowJobs(storage.DB)
+	}
+
 	// Verified + published lands with a video (column or completed auto-slideshow job).
 	q := storage.DB.Model(&models.Landmark{}).
 		Preload("Organization").

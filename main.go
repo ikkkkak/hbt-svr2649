@@ -223,7 +223,7 @@ func main() {
 	videoprocessing.StartWorkers(storage.DB)
 	videoprocessing.StartSlideshowWorkers(storage.DB)
 	go func() {
-		time.Sleep(5 * time.Second)
+		time.Sleep(2 * time.Second)
 		videoprocessing.BackfillSlideshowVideosOnStart(storage.DB)
 	}()
 	if os.Getenv("VIDEO_BACKFILL_ENABLED") == "true" {

@@ -775,8 +775,112 @@ func landmarkOwnerUserID(db *gorm.DB, lm *models.Landmark) uint {
 
 // BackfillSlideshowVideosOnStart scans all lands and property sales with Spaces photos but no video.
 func BackfillSlideshowVideosOnStart(db *gorm.DB) {
+	reconcileLandmarkSlideshowJobs(db)
 	backfillLandmarksWithoutVideos(db)
 	backfillPropertySalesWithoutVideos(db)
+}
+
+// ReconcileLandmarkSlideshowJobs repairs existing lands, unstucks jobs, and re-queues pending work.
+// Call on deploy so verified lands created before slideshow rollout get videos generated.
+func ReconcileLandmarkSlideshowJobs(db *gorm.DB) {
+	reconcileLandmarkSlideshowJobs(db)
+}
+
+func reconcileLandmarkSlideshowJobs(db *gorm.DB) {
+	if db == nil {
+		return
+	}
+	if !slideshowEnabled() {
+		log.Printf("⚠️ slideshow reconcile skipped: ffmpeg not available")
+		return
+	}
+
+	staleProcessing := time.Now().Add(-45 * time.Minute)
+	if res := db.Model(&models.PropertyVideoGenerationJob{}).
+		Where("entity_type = ? AND status = ? AND updated_at < ?", "land", "processing", staleProcessing).
+		Updates(map[string]interface{}{"status": "pending", "progress": 0, "error_message": ""}); res.RowsAffected > 0 {
+		log.Printf("🔄 slideshow reconcile: reset %d stale land processing job(s)", res.RowsAffected)
+	}
+
+	stalePending := time.Now().Add(-6 * time.Hour)
+	if res := db.Model(&models.PropertyVideoGenerationJob{}).
+		Where("entity_type = ? AND status = ? AND progress = 0 AND created_at < ?", "land", "pending", stalePending).
+		Update("status", "failed"); res.RowsAffected > 0 {
+		log.Printf("🔄 slideshow reconcile: expired %d stale pending land job(s)", res.RowsAffected)
+	}
+
+	var missingVideoIDs []uint
+	if err := db.Model(&models.Landmark{}).
+		Where("(video_url IS NULL OR TRIM(video_url) = '')").
+		Where("status <> ?", "inactive").
+		Pluck("id", &missingVideoIDs).Error; err != nil {
+		log.Printf("❌ slideshow reconcile: list lands missing video: %v", err)
+	} else {
+		repaired := 0
+		for _, id := range missingVideoIDs {
+			if repairLandmarkVideoFromJob(db, id) {
+				repaired++
+			}
+		}
+		log.Printf("🔄 slideshow reconcile: repaired %d/%d land(s) from completed jobs", repaired, len(missingVideoIDs))
+	}
+
+	var pending []models.PropertyVideoGenerationJob
+	if err := db.Where("entity_type = ? AND status = ?", "land", "pending").Order("id ASC").Find(&pending).Error; err == nil && len(pending) > 0 {
+		log.Printf("🔄 slideshow reconcile: re-queueing %d pending land job(s)", len(pending))
+		for _, job := range pending {
+			jid := job.ID
+			if pushSlideshowRedis(jid) {
+				continue
+			}
+			go func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+				defer cancel()
+				if err := ProcessSlideshowJob(ctx, db, jid); err != nil {
+					log.Printf("❌ slideshow reconcile job %d: %v", jid, err)
+				}
+			}()
+			time.Sleep(50 * time.Millisecond)
+		}
+	}
+
+	var failed []models.PropertyVideoGenerationJob
+	if err := db.Where("entity_type = ? AND status = ?", "land", "failed").Order("id DESC").Find(&failed).Error; err != nil {
+		return
+	}
+	seenLand := map[uint]bool{}
+	for _, job := range failed {
+		if seenLand[job.EntityID] {
+			continue
+		}
+		seenLand[job.EntityID] = true
+
+		var lm models.Landmark
+		if err := db.First(&lm, job.EntityID).Error; err != nil {
+			continue
+		}
+		if lm.VideoURL != nil && strings.TrimSpace(*lm.VideoURL) != "" {
+			continue
+		}
+		if len(slideshowEligibleImages(landmarkImageURLs(lm.Images))) < slideshowMinImages() {
+			continue
+		}
+		uid := landmarkOwnerUserID(db, &lm)
+		if uid == 0 {
+			continue
+		}
+		var active models.PropertyVideoGenerationJob
+		if err := db.Where("entity_type = ? AND entity_id = ? AND status IN ?",
+			"land", job.EntityID, []string{"pending", "processing"}).First(&active).Error; err == nil {
+			continue
+		}
+		if _, err := EnqueueLandmarkSlideshow(db, job.EntityID, uid); err != nil {
+			log.Printf("⚠️ slideshow reconcile retry land=%d: %v", job.EntityID, err)
+			continue
+		}
+		log.Printf("🔄 slideshow reconcile: re-enqueued land=%d after failed job", job.EntityID)
+		time.Sleep(100 * time.Millisecond)
+	}
 }
 
 // BackfillLandmarksWithoutVideos runs on server startup for land listings.
@@ -805,7 +909,7 @@ func backfillLandmarksWithoutVideos(db *gorm.DB) {
 	var landmarks []models.Landmark
 	q := db.Where("(video_url IS NULL OR TRIM(video_url) = '')").
 		Where("status <> ?", "inactive").
-		Order("id ASC")
+		Order("is_verified DESC, is_published DESC, id ASC")
 	if limit := slideshowBackfillLimit(); limit > 0 {
 		q = q.Limit(limit)
 	}
