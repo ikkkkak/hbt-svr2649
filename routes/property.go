@@ -17,6 +17,7 @@ import (
 	"github.com/kataras/iris/v12"
 	"github.com/kataras/iris/v12/middleware/jwt"
 	"gorm.io/datatypes"
+	"gorm.io/gorm"
 )
 
 func authenticatedHostID(ctx iris.Context) (uint, bool) {
@@ -463,16 +464,18 @@ func DeleteProperty(ctx iris.Context) {
 		return
 	}
 
-	propertyDeleted := storage.DB.Delete(&models.Property{}, id)
-
-	if propertyDeleted.Error != nil {
+	if err := storage.DB.Transaction(func(tx *gorm.DB) error {
+		if err := services.DetachRentPropertyFromDiscovery(tx, property.ID); err != nil {
+			return err
+		}
+		return tx.Delete(&models.Property{}, id).Error
+	}); err != nil {
 		utils.CreateError(
 			iris.StatusInternalServerError,
-			"Error", propertyDeleted.Error.Error(), ctx)
+			"Error", err.Error(), ctx)
 		return
 	}
 
-	storage.DB.Where("property_id = ?", id).Delete(&models.Reservation{})
 	ctx.StatusCode(iris.StatusNoContent)
 }
 

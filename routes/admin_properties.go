@@ -215,7 +215,7 @@ func AdminDeleteProperty(ctx iris.Context) {
 	}
 
 	if err := storage.DB.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Where("property_id = ?", id).Delete(&models.Reservation{}).Error; err != nil {
+		if err := services.PurgeRentPropertyDependencies(tx, id); err != nil {
 			return err
 		}
 		if err := tx.Unscoped().Delete(&models.Property{}, id).Error; err != nil {
