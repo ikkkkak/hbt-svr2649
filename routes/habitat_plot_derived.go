@@ -3,13 +3,18 @@ package routes
 import (
 	"fmt"
 	"math"
+	"regexp"
+	"strings"
 
 	"apartments-clone-server/models"
 
 	"gorm.io/datatypes"
+	"gorm.io/gorm"
 )
 
 const earthRadiusM = 6378137.0
+
+var dimensionNumberRe = regexp.MustCompile(`\d+(?:\.\d+)?`)
 
 func haversineMeters(a, b geoLatLng) float64 {
 	dLat := (b.Lat - a.Lat) * math.Pi / 180
@@ -44,27 +49,23 @@ func ringAreaM2(ring []geoLatLng) float64 {
 	return math.Abs(area / 2)
 }
 
-func ringSideLengthsM(ring []geoLatLng) []float64 {
-	if len(ring) < 2 {
-		return nil
+func formatSideLengths(sides []float64) string {
+	if len(sides) == 0 {
+		return ""
 	}
-	n := len(ring)
-	// Drop duplicate closing vertex when present.
-	if n > 3 {
-		first, last := ring[0], ring[n-1]
-		if math.Abs(first.Lat-last.Lat) < 1e-9 && math.Abs(first.Lng-last.Lng) < 1e-9 {
-			n--
-		}
+	parts := make([]string, len(sides))
+	for i, s := range sides {
+		parts[i] = fmt.Sprintf("%.1fm", s)
 	}
-	out := make([]float64, 0, n)
-	for i := 0; i < n; i++ {
-		j := (i + 1) % n
-		d := haversineMeters(ring[i], ring[j])
-		if d > 0.05 {
-			out = append(out, d)
-		}
+	return strings.Join(parts, " ")
+}
+
+func dimensionPartCount(s string) int {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0
 	}
-	return out
+	return len(dimensionNumberRe.FindAllString(s, -1))
 }
 
 func primaryRingFromGeoJSON(raw datatypes.JSON) []geoLatLng {
@@ -94,7 +95,13 @@ func plotAreaMissing(area *float64, rounded *int) bool {
 }
 
 func fillHabitatPlotDerivedFields(plot *models.HabitatPlot) {
-	if plot == nil || len(plot.GeomGeoJSON) == 0 {
+	if plot == nil {
+		return
+	}
+
+	extractHabitatPlotFromRawProperties(plot)
+
+	if len(plot.GeomGeoJSON) == 0 {
 		return
 	}
 
@@ -103,6 +110,7 @@ func fillHabitatPlotDerivedFields(plot *models.HabitatPlot) {
 		return
 	}
 
+	// Area from geometry only when cadastre/raw data has no area.
 	if plotAreaMissing(plot.AreaM2, plot.AreaRounded) {
 		area := ringAreaM2(ring)
 		if area > 0 {
@@ -113,32 +121,16 @@ func fillHabitatPlotDerivedFields(plot *models.HabitatPlot) {
 			}
 		}
 	}
-
-	if plot.DimensionsString == "" && (plot.LengthM == nil || plot.WidthM == nil) {
-		sides := ringSideLengthsM(ring)
-		if len(sides) >= 2 {
-			minSide, maxSide := sides[0], sides[0]
-			for _, s := range sides[1:] {
-				if s < minSide {
-					minSide = s
-				}
-				if s > maxSide {
-					maxSide = s
-				}
-			}
-			length := maxSide
-			width := minSide
-			if length > 0 && width > 0 {
-				plot.LengthM = &length
-				plot.WidthM = &width
-				plot.DimensionsString = fmt.Sprintf("%.1fm %.1fm", length, width)
-			}
-		}
-	}
 }
 
-func fillHabitatPlotsDerivedFields(plots []models.HabitatPlot) {
+func fillHabitatPlotsDerivedFields(db *gorm.DB, plots []models.HabitatPlot) {
+	hydrateHabitatPlotsFromRawProperties(db, plots)
 	for i := range plots {
 		fillHabitatPlotDerivedFields(&plots[i])
 	}
 }
+
+const habitatPlotNaturalOrderSQL = `
+	CASE WHEN plot_number ~ '^[0-9]+$' THEN plot_number::bigint END ASC NULLS LAST,
+	plot_number ASC
+`

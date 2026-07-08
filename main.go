@@ -1572,6 +1572,7 @@ func main() {
 	{
 		adminHabitat.Get("/bulk/example", routes.AdminGetHabitatBulkExample)
 		adminHabitat.Post("/bulk", routes.AdminHabitatBulkImport)
+		adminHabitat.Post("/backfill-plot-fields", routes.AdminHabitatBackfillPlotFields)
 	}
 
 	// Admin MeskenyGPT analytics (AI interactions + feedback) + structured knowledge (RAG)

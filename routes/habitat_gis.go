@@ -663,7 +663,7 @@ func GetHabitatPlotsBySector(ctx iris.Context) {
 			Joins(forSaleJoin).
 			Where("sector_id = ?", uint(sectorID)).
 			Select(plotSelect).
-			Order("plot_number ASC")
+			Order(habitatPlotNaturalOrderSQL)
 		if total > int64(maxAll) {
 			q = q.Limit(maxAll)
 		}
@@ -672,7 +672,7 @@ func GetHabitatPlotsBySector(ctx iris.Context) {
 			ctx.JSON(iris.Map{"error": "Failed to fetch plots"})
 			return
 		}
-		fillHabitatPlotsDerivedFields(plots)
+		fillHabitatPlotsDerivedFields(storage.DB, plots)
 		enrichHabitatPlotsWithPlanSector(plots, uint(sectorID))
 		ctx.JSON(iris.Map{
 			"success": true,
@@ -701,14 +701,14 @@ func GetHabitatPlotsBySector(ctx iris.Context) {
 		Joins(forSaleJoin).
 		Where("sector_id = ?", uint(sectorID)).
 		Select(plotSelect).
-		Order("plot_number ASC").
+			Order(habitatPlotNaturalOrderSQL).
 		Offset(offset).Limit(limit).
 		Find(&plots).Error; err != nil {
 		ctx.StatusCode(500)
 		ctx.JSON(iris.Map{"error": "Failed to fetch plots"})
 		return
 	}
-	fillHabitatPlotsDerivedFields(plots)
+	fillHabitatPlotsDerivedFields(storage.DB, plots)
 	enrichHabitatPlotsWithPlanSector(plots, uint(sectorID))
 	ctx.JSON(iris.Map{
 		"success": true,
@@ -791,7 +791,7 @@ func GetHabitatPlotsInBBox(ctx iris.Context) {
 			sq := storage.DB.Model(&models.HabitatPlot{}).
 				Joins(forSaleJoin).
 				Where("sector_id = ?", uint(sectorID)).
-				Order("plot_number ASC")
+				Order(habitatPlotNaturalOrderSQL)
 			if sectorTotal > int64(sectorMax) {
 				sq = sq.Limit(sectorMax)
 			}
@@ -808,7 +808,7 @@ func GetHabitatPlotsInBBox(ctx iris.Context) {
 				ctx.JSON(iris.Map{"error": "Failed to fetch sector plots"})
 				return
 			}
-			fillHabitatPlotsDerivedFields(sectorPlots)
+			fillHabitatPlotsDerivedFields(storage.DB, sectorPlots)
 			enrichHabitatPlotsWithPlanSector(sectorPlots, uint(sectorID))
 			ctx.JSON(iris.Map{
 				"success": true,
@@ -830,7 +830,7 @@ func GetHabitatPlotsInBBox(ctx iris.Context) {
 
 	includeGeom := zoom >= 14
 	var plots []plotRow
-	query := q.Order("plot_number ASC").Limit(limit)
+	query := q.Order(habitatPlotNaturalOrderSQL).Limit(limit)
 	if !includeGeom {
 		query = query.Select(habitatPlotCardSelect(forSaleExpr))
 	} else {
@@ -1192,7 +1192,9 @@ func GetHabitatPlot(ctx iris.Context) {
 		return
 	}
 	ensureHabitatPlotPlanSector(&plot)
-	fillHabitatPlotDerivedFields(&plot)
+	plots := []models.HabitatPlot{plot}
+	fillHabitatPlotsDerivedFields(storage.DB, plots)
+	plot = plots[0]
 	ctx.JSON(iris.Map{"success": true, "data": plot})
 }
 
@@ -1242,5 +1244,21 @@ func SearchHabitatPlots(ctx iris.Context) {
 			"sectors": sectors,
 			"plots":   plots,
 		},
+	})
+}
+
+// POST /api/admin/habitat/backfill-plot-fields
+// Copies el_value, dimensions, sides_m, area, etc. from raw_properties into plot columns.
+func AdminHabitatBackfillPlotFields(ctx iris.Context) {
+	updated, err := backfillHabitatPlotColumnsFromRaw(storage.DB, 500)
+	if err != nil {
+		ctx.StatusCode(500)
+		ctx.JSON(iris.Map{"error": "Backfill failed: " + err.Error()})
+		return
+	}
+	ctx.JSON(iris.Map{
+		"success": true,
+		"updated": updated,
+		"message": fmt.Sprintf("Backfilled %d plots from raw_properties", updated),
 	})
 }

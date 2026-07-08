@@ -36,7 +36,21 @@ except ImportError:
     print("Install: pip install psycopg2-binary", file=sys.stderr)
     raise
 
-PLOT_NUMBER_KEYS = ("plot_number", "plotNumber", "NUMERO", "numero", "N", "n", "id", "ID", "name")
+# Cadastre parcel number keys only — do NOT use generic id/name (causes wrong plot labels).
+PLOT_NUMBER_KEYS = (
+    "plot_number",
+    "plotNumber",
+    "NUMERO",
+    "numero",
+    "Numero",
+    "N",
+    "n",
+    "PARCEL",
+    "parcel",
+    "Parcel",
+    "LOT",
+    "lot",
+)
 
 
 def plot_number_from_feature(props: dict[str, Any], fallback_index: int) -> str:
@@ -45,6 +59,55 @@ def plot_number_from_feature(props: dict[str, Any], fallback_index: int) -> str:
         if v is not None and str(v).strip():
             return str(v).strip()
     return str(fallback_index)
+
+
+def as_float(v: Any) -> float | None:
+    if v is None:
+        return None
+    try:
+        return float(str(v).replace(",", ".").strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def as_int(v: Any) -> int | None:
+    f = as_float(v)
+    if f is None:
+        return None
+    return int(round(f))
+
+
+def as_float_list(v: Any) -> list[float] | None:
+    if v is None:
+        return None
+    if isinstance(v, list):
+        out: list[float] = []
+        for item in v:
+            f = as_float(item)
+            if f is not None:
+                out.append(f)
+        return out or None
+    if isinstance(v, str):
+        try:
+            parsed = json.loads(v)
+            return as_float_list(parsed)
+        except json.JSONDecodeError:
+            return None
+    return None
+
+
+def dimensions_string_from_props(props: dict[str, Any], sides: list[float] | None) -> str | None:
+    for k in ("dimensions_string", "dimensions", "DIMENSIONS", "Dimensions", "dim", "DIM"):
+        v = props.get(k)
+        if v is not None and str(v).strip():
+            return str(v).strip()
+    if sides and len(sides) >= 3:
+        return " ".join(f"{s:.1f}m" for s in sides)
+    length = as_float(props.get("length_m") or props.get("length") or props.get("longueur"))
+    width = as_float(props.get("width_m") or props.get("width") or props.get("largeur"))
+    if length and width:
+        return f"{length:.1f}m {width:.1f}m"
+    return None
 
 
 def iter_features(geojson_path: Path) -> Iterator[tuple[dict[str, Any], dict[str, Any]]]:
@@ -117,19 +180,45 @@ def insert_plot(
     lat = props.get("centroid_lat") or props.get("lat") or props.get("LAT")
     lng = props.get("centroid_lng") or props.get("lng") or props.get("LNG")
     area = props.get("area_m2") or props.get("area") or props.get("AREA")
+    sides = as_float_list(
+        props.get("sides_m") or props.get("sides") or props.get("SIDES") or props.get("cotes")
+    )
+    dims = dimensions_string_from_props(props, sides)
+    length_m = as_float(props.get("length_m") or props.get("length") or props.get("longueur"))
+    width_m = as_float(props.get("width_m") or props.get("width") or props.get("largeur"))
+    il_value = as_float(props.get("il_value") or props.get("IL") or props.get("il"))
+    el_value = as_float(props.get("el_value") or props.get("EL") or props.get("el") or props.get("elevation"))
+    res_value = as_float(props.get("res_value") or props.get("RES") or props.get("res"))
+    l_value = props.get("l_value") or props.get("L") or props.get("l")
+    i_value = as_int(props.get("i_value") or props.get("I") or props.get("i"))
+    area_rounded = as_int(props.get("area_rounded") or props.get("area_rounded_m2"))
 
     cur.execute(
         """
         INSERT INTO habitat_plots (
             plan_id, sector_id, plot_number,
-            area_m2, centroid_lat, centroid_lng,
+            l_value, i_value,
+            area_m2, area_rounded,
+            dimensions_string, length_m, width_m, sides_m,
+            il_value, el_value, res_value,
+            centroid_lat, centroid_lng,
             geom_geojson, raw_properties, data_file_path
         )
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT (sector_id, plot_number) DO UPDATE SET
             geom_geojson = EXCLUDED.geom_geojson,
             raw_properties = EXCLUDED.raw_properties,
+            l_value = COALESCE(EXCLUDED.l_value, habitat_plots.l_value),
+            i_value = COALESCE(EXCLUDED.i_value, habitat_plots.i_value),
             area_m2 = COALESCE(EXCLUDED.area_m2, habitat_plots.area_m2),
+            area_rounded = COALESCE(EXCLUDED.area_rounded, habitat_plots.area_rounded),
+            dimensions_string = COALESCE(NULLIF(EXCLUDED.dimensions_string, ''), habitat_plots.dimensions_string),
+            length_m = COALESCE(EXCLUDED.length_m, habitat_plots.length_m),
+            width_m = COALESCE(EXCLUDED.width_m, habitat_plots.width_m),
+            sides_m = COALESCE(EXCLUDED.sides_m, habitat_plots.sides_m),
+            il_value = COALESCE(EXCLUDED.il_value, habitat_plots.il_value),
+            el_value = COALESCE(EXCLUDED.el_value, habitat_plots.el_value),
+            res_value = COALESCE(EXCLUDED.res_value, habitat_plots.res_value),
             centroid_lat = COALESCE(EXCLUDED.centroid_lat, habitat_plots.centroid_lat),
             centroid_lng = COALESCE(EXCLUDED.centroid_lng, habitat_plots.centroid_lng),
             updated_at = NOW()
@@ -138,7 +227,17 @@ def insert_plot(
             plan_id,
             sector_id,
             plot_number,
+            str(l_value).strip() if l_value is not None else None,
+            i_value,
             float(area) if area is not None else None,
+            area_rounded,
+            dims,
+            length_m,
+            width_m,
+            sides,
+            il_value,
+            el_value,
+            res_value,
             float(lat) if lat is not None else None,
             float(lng) if lng is not None else None,
             Json(geom),
