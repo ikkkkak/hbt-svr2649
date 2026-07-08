@@ -640,7 +640,7 @@ func GetHabitatSectorsByPlan(ctx iris.Context) {
 
 // GET /api/habitat/sectors/{sectorId}/plots
 // Query: page, limit (max 1000), or all=true to return every plot in the sector (max 20000).
-// map=true omits heavy JSON columns for faster map rendering.
+// map=true omits raw_properties/sides_m but includes all fields needed for the plot callout card.
 func GetHabitatPlotsBySector(ctx iris.Context) {
 	sectorID, _ := strconv.ParseUint(ctx.Params().Get("sectorId"), 10, 32)
 	fetchAll := ctx.URLParam("all") == "true" || ctx.URLParam("all") == "1"
@@ -649,23 +649,11 @@ func GetHabitatPlotsBySector(ctx iris.Context) {
 	var total int64
 	storage.DB.Model(&models.HabitatPlot{}).Where("sector_id = ?", uint(sectorID)).Count(&total)
 
-	// Mark plots that are verified+published land listings (for sale).
-	forSaleJoin := `
-		LEFT JOIN (
-			SELECT DISTINCT habitat_plot_id
-			FROM landmarks
-			WHERE habitat_plot_id IS NOT NULL
-			  AND is_verified = TRUE
-			  AND is_published = TRUE
-			  AND status = 'verified'
-		) lm ON lm.habitat_plot_id = habitat_plots.id
-	`
-	forSaleExpr := "CASE WHEN lm.habitat_plot_id IS NULL THEN FALSE ELSE TRUE END AS is_for_sale"
+	forSaleJoin := habitatForSaleJoinSQL
+	forSaleExpr := habitatForSaleSelectExpr()
 	plotSelect := "habitat_plots.*, " + forSaleExpr
 	if mapMode {
-		plotSelect = `habitat_plots.id, habitat_plots.plan_id, habitat_plots.sector_id, habitat_plots.plot_number,
-			habitat_plots.area_m2, habitat_plots.area_rounded, habitat_plots.geom_geojson,
-			habitat_plots.centroid_lat, habitat_plots.centroid_lng, habitat_plots.corners, ` + forSaleExpr
+		plotSelect = habitatPlotMapModeSelect(forSaleExpr)
 	}
 
 	if fetchAll {
@@ -684,6 +672,7 @@ func GetHabitatPlotsBySector(ctx iris.Context) {
 			ctx.JSON(iris.Map{"error": "Failed to fetch plots"})
 			return
 		}
+		enrichHabitatPlotsWithPlanSector(plots, uint(sectorID))
 		ctx.JSON(iris.Map{
 			"success": true,
 			"data":    plots,
@@ -718,6 +707,7 @@ func GetHabitatPlotsBySector(ctx iris.Context) {
 		ctx.JSON(iris.Map{"error": "Failed to fetch plots"})
 		return
 	}
+	enrichHabitatPlotsWithPlanSector(plots, uint(sectorID))
 	ctx.JSON(iris.Map{
 		"success": true,
 		"data":    plots,
@@ -770,18 +760,10 @@ func GetHabitatPlotsInBBox(ctx iris.Context) {
 		IsForSale bool `json:"is_for_sale" gorm:"column:is_for_sale"`
 	}
 
-	// Landmarks (land for sale) â€” we only mark plots that are verified + published and linked
+	// Landmarks (land for sale) — we only mark plots that are verified + published and linked
 	// by habitat_plot_id (host-confirmed cadastre plot).
-	forSaleJoin := `
-		LEFT JOIN (
-			SELECT DISTINCT habitat_plot_id
-			FROM landmarks
-			WHERE habitat_plot_id IS NOT NULL
-			  AND is_verified = TRUE
-			  AND is_published = TRUE
-			  AND status = 'verified'
-		) lm ON lm.habitat_plot_id = habitat_plots.id
-	`
+	forSaleJoin := habitatForSaleJoinSQL
+	forSaleExpr := habitatForSaleSelectExpr()
 
 	q := storage.DB.Model(&models.HabitatPlot{}).
 		Joins(forSaleJoin).
@@ -803,7 +785,7 @@ func GetHabitatPlotsInBBox(ctx iris.Context) {
 			q.Count(&sectorTotal)
 			const sectorMax = 20000
 			includeGeom := zoom >= 14
-			var sectorPlots []plotRow
+			var sectorPlots []models.HabitatPlot
 			sq := storage.DB.Model(&models.HabitatPlot{}).
 				Joins(forSaleJoin).
 				Where("sector_id = ?", uint(sectorID)).
@@ -812,17 +794,11 @@ func GetHabitatPlotsInBBox(ctx iris.Context) {
 				sq = sq.Limit(sectorMax)
 			}
 			if !includeGeom {
-				sq = sq.Select(
-					"habitat_plots.id", "habitat_plots.plan_id", "habitat_plots.sector_id", "habitat_plots.plot_number",
-					"habitat_plots.area_m2", "habitat_plots.dimensions_string",
-					"length_m", "width_m", "il_value", "el_value", "res_value",
-					"centroid_lat", "centroid_lng", "corners",
-					"CASE WHEN lm.habitat_plot_id IS NULL THEN FALSE ELSE TRUE END AS is_for_sale",
-				)
+				sq = sq.Select(habitatPlotCardSelect(forSaleExpr))
 			} else {
 				sq = sq.Select(
 					"habitat_plots.*",
-					"CASE WHEN lm.habitat_plot_id IS NULL THEN FALSE ELSE TRUE END AS is_for_sale",
+					forSaleExpr,
 				)
 			}
 			if err := sq.Find(&sectorPlots).Error; err != nil {
@@ -830,6 +806,7 @@ func GetHabitatPlotsInBBox(ctx iris.Context) {
 				ctx.JSON(iris.Map{"error": "Failed to fetch sector plots"})
 				return
 			}
+			enrichHabitatPlotsWithPlanSector(sectorPlots, uint(sectorID))
 			ctx.JSON(iris.Map{
 				"success": true,
 				"data":    sectorPlots,
@@ -852,17 +829,11 @@ func GetHabitatPlotsInBBox(ctx iris.Context) {
 	var plots []plotRow
 	query := q.Order("plot_number ASC").Limit(limit)
 	if !includeGeom {
-		query = query.Select(
-			"habitat_plots.id", "habitat_plots.plan_id", "habitat_plots.sector_id", "habitat_plots.plot_number",
-			"habitat_plots.area_m2", "habitat_plots.dimensions_string",
-			"length_m", "width_m", "il_value", "el_value", "res_value",
-			"centroid_lat", "centroid_lng", "corners",
-			"CASE WHEN lm.habitat_plot_id IS NULL THEN FALSE ELSE TRUE END AS is_for_sale",
-		)
+		query = query.Select(habitatPlotCardSelect(forSaleExpr))
 	} else {
 		query = query.Select(
 			"habitat_plots.*",
-			"CASE WHEN lm.habitat_plot_id IS NULL THEN FALSE ELSE TRUE END AS is_for_sale",
+			forSaleExpr,
 		)
 	}
 	if err := query.Find(&plots).Error; err != nil {
@@ -1202,21 +1173,13 @@ func locationNamesMatch(a, aAr, b, bAr string) bool {
 func GetHabitatPlot(ctx iris.Context) {
 	plotID, _ := strconv.ParseUint(ctx.Params().Get("plotId"), 10, 32)
 	var plot models.HabitatPlot
-	forSaleJoin := `
-		LEFT JOIN (
-			SELECT DISTINCT habitat_plot_id
-			FROM landmarks
-			WHERE habitat_plot_id IS NOT NULL
-			  AND is_verified = TRUE
-			  AND is_published = TRUE
-			  AND status = 'verified'
-		) lm ON lm.habitat_plot_id = habitat_plots.id
-	`
+	forSaleJoin := habitatForSaleJoinSQL
+	forSaleExpr := habitatForSaleSelectExpr()
 	if err := storage.DB.Model(&models.HabitatPlot{}).
 		Joins(forSaleJoin).
 		Select(
 			"habitat_plots.*",
-			"CASE WHEN lm.habitat_plot_id IS NULL THEN FALSE ELSE TRUE END AS is_for_sale",
+			forSaleExpr,
 		).
 		Preload("Sector").
 		Preload("Plan").
@@ -1225,6 +1188,7 @@ func GetHabitatPlot(ctx iris.Context) {
 		ctx.JSON(iris.Map{"error": "Plot not found"})
 		return
 	}
+	ensureHabitatPlotPlanSector(&plot)
 	ctx.JSON(iris.Map{"success": true, "data": plot})
 }
 
