@@ -97,5 +97,5 @@ func EnrichContextFromHistory(ctx MessageContext, history []HistoryTurn, raw str
 			break
 		}
 	}
-	return SanitizeBudgetContext(ctx, raw)
+	return ReconcileTransactionFromMessage(SanitizeBudgetContext(ctx, raw))
 }

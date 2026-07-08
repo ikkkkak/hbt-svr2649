@@ -1891,6 +1891,8 @@ func PublishProperty(ctx iris.Context) {
 
 	// Trigger notification to users with matching favorite city
 	go triggerNewPropertyNotification(property)
+	services.QueueSemanticIndex("sale", property.ID)
+	go services.BatchNotifyInterestedUsers(context.Background(), property)
 
 	ctx.JSON(iris.Map{
 		"message":  "Property published successfully",
@@ -2098,8 +2100,11 @@ func GetPublishedProperties(ctx iris.Context) {
 		q = q.Preload("Organization", func(db *gorm.DB) *gorm.DB {
 			return db.Select("id", "name", "phone", "email", "website", "banner_image", "logo", "owner_id")
 		})
+		q = q.Preload("Organization.Owner", func(db *gorm.DB) *gorm.DB {
+			return db.Select("id", "first_name", "last_name", "avatar_url", "phone_number", "is_verified", "verification_status")
+		})
 		q = q.Preload("Owner", func(db *gorm.DB) *gorm.DB {
-			return db.Select("id", "first_name", "last_name", "avatar_url", "phone_number")
+			return db.Select("id", "first_name", "last_name", "avatar_url", "phone_number", "is_verified", "verification_status")
 		})
 		q = q.Preload("Agent", func(db *gorm.DB) *gorm.DB {
 			return db.Select("id", "user_id", "organization_id")

@@ -753,11 +753,12 @@ func maybeAICopy(userID uint, lang string, kind string, fallbackTitle, fallbackB
 		return fallbackTitle, fallbackBody
 	}
 
-	sys := "You are MeskenyGPT writing push notifications for a real estate app (Meskeny). " +
+	sys := "You are Meskeny Model X46 writing push notifications for Meskeny (real estate app). " +
 		"Return ONLY valid JSON with keys: title, body. " +
 		"No markdown, no extra text. " +
 		"Keep title <= 52 chars, body <= 120 chars. " +
-		"Do NOT include internal IDs. Do NOT invent prices or locations."
+		"Do NOT include internal IDs. Do NOT invent prices or locations. " +
+		"Do NOT mention OpenAI, Anthropic, or OpenRouter."
 
 	langHint := "Respond in English."
 	switch strings.ToLower(strings.TrimSpace(lang)) {

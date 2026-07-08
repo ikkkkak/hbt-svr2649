@@ -221,8 +221,12 @@ func performMigrations(db *gorm.DB) {
 		&models.AIFeedback{},
 		&models.MarketSnapshot{},
 		&models.MeskenyKnowledgeEntry{},
+		&models.AIEscalation{},
+		&models.AINotification{},
+		&models.AIConversationMemory{},
 		&models.PropertyFeedSeen{},
 		&models.ListingAIUsageEvent{},
+		&models.WhatsAppShareUsageEvent{},
 		&models.HabitatPlan{},
 		&models.HabitatSector{},
 		&models.HabitatPlot{},
@@ -256,6 +260,14 @@ func performMigrations(db *gorm.DB) {
 			log.Printf("❌ Failed to create meskeny_knowledge_entries: %v", err)
 		} else {
 			log.Println("✅ meskeny_knowledge_entries table created successfully")
+		}
+	}
+	if !db.Migrator().HasTable(&models.WhatsAppShareUsageEvent{}) {
+		log.Println("⚠️ whatsapp_share_usage_events table not found, creating it...")
+		if err := db.Migrator().CreateTable(&models.WhatsAppShareUsageEvent{}); err != nil {
+			log.Printf("❌ Failed to create whatsapp_share_usage_events: %v", err)
+		} else {
+			log.Println("✅ whatsapp_share_usage_events table created successfully")
 		}
 	}
 	// Indexes for fast RAG snippet selection (active + locale + priority).
@@ -871,6 +883,70 @@ func ensureHabitatGISRelations(db *gorm.DB) {
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_habitat_plots_plan_sector ON habitat_plots(plan_id, sector_id)`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_habitat_plots_number ON habitat_plots(plot_number)`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_habitat_sectors_plan ON habitat_sectors(plan_id)`)
+	// GORM may create geom_geo_json; migrations/import use geom_geojson — align once.
+	db.Exec(`
+		DO $$ BEGIN
+			IF EXISTS (
+				SELECT 1 FROM information_schema.columns
+				WHERE table_name = 'habitat_plots' AND column_name = 'geom_geo_json'
+			) AND NOT EXISTS (
+				SELECT 1 FROM information_schema.columns
+				WHERE table_name = 'habitat_plots' AND column_name = 'geom_geojson'
+			) THEN
+				ALTER TABLE habitat_plots RENAME COLUMN geom_geo_json TO geom_geojson;
+			ELSIF EXISTS (
+				SELECT 1 FROM information_schema.columns
+				WHERE table_name = 'habitat_plots' AND column_name = 'geom_geo_json'
+			) AND EXISTS (
+				SELECT 1 FROM information_schema.columns
+				WHERE table_name = 'habitat_plots' AND column_name = 'geom_geojson'
+			) THEN
+				UPDATE habitat_plots
+				SET geom_geojson = geom_geo_json
+				WHERE (geom_geojson IS NULL OR geom_geojson::text = 'null')
+				  AND geom_geo_json IS NOT NULL
+				  AND geom_geo_json::text <> 'null';
+				ALTER TABLE habitat_plots DROP COLUMN geom_geo_json;
+			END IF;
+		END $$
+	`)
+	var merged int64
+	db.Raw(`
+		SELECT COUNT(*) FROM habitat_plots
+		WHERE geom_geojson IS NOT NULL AND geom_geojson::text <> 'null'
+	`).Scan(&merged)
+	if merged > 0 {
+		log.Printf("✅ habitat_plots geom_geojson rows with geometry: %d", merged)
+	}
+	// GORM may create bounds_geo_json; migrations use bounds_geojson — align on plans + sectors.
+	for _, table := range []string{"habitat_plans", "habitat_sectors"} {
+		db.Exec(fmt.Sprintf(`
+			DO $$ BEGIN
+				IF EXISTS (
+					SELECT 1 FROM information_schema.columns
+					WHERE table_name = '%s' AND column_name = 'bounds_geo_json'
+				) AND NOT EXISTS (
+					SELECT 1 FROM information_schema.columns
+					WHERE table_name = '%s' AND column_name = 'bounds_geojson'
+				) THEN
+					ALTER TABLE %s RENAME COLUMN bounds_geo_json TO bounds_geojson;
+				ELSIF EXISTS (
+					SELECT 1 FROM information_schema.columns
+					WHERE table_name = '%s' AND column_name = 'bounds_geo_json'
+				) AND EXISTS (
+					SELECT 1 FROM information_schema.columns
+					WHERE table_name = '%s' AND column_name = 'bounds_geojson'
+				) THEN
+					UPDATE %s
+					SET bounds_geojson = bounds_geo_json
+					WHERE (bounds_geojson IS NULL OR bounds_geojson::text = 'null')
+					  AND bounds_geo_json IS NOT NULL
+					  AND bounds_geo_json::text <> 'null';
+					ALTER TABLE %s DROP COLUMN bounds_geo_json;
+				END IF;
+			END $$
+		`, table, table, table, table, table, table, table))
+	}
 	// GORM may create a broken unique index on plot_number alone — replace with (sector_id, plot_number).
 	db.Exec(`DROP INDEX IF EXISTS unique_plot_per_sector`)
 	db.Exec(`

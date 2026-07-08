@@ -2,7 +2,9 @@ package main
 
 import (
 	meskenygpt "apartments-clone-server/MeskenyGPT/ai"
+	meskenysemantic "apartments-clone-server/MeskenyGPT/semantic"
 	"apartments-clone-server/models"
+	"context"
 	"apartments-clone-server/places"
 	"apartments-clone-server/realtime"
 	"apartments-clone-server/routes"
@@ -159,12 +161,17 @@ func main() {
 			&models.NotificationCandidate{}, &models.UserNotificationQuota{}, &models.UserNotificationLearned{},
 			&models.AIInteraction{}, &models.AIFeedback{}, &models.MarketSnapshot{}, &models.PropertyFeedSeen{},
 			&models.ListingAIUsageEvent{},
+			&models.WhatsAppShareUsageEvent{},
 			&models.GuideComment{}, &models.GuideNotification{}, &models.GuideHostPreference{},
 			&models.HabitatPlan{}, &models.HabitatSector{}, &models.HabitatPlot{},
 		); err != nil {
 			fmt.Printf("❌ Failed to migrate moderation tables: %v\n", err)
 		} else {
 			fmt.Println("✅ Tables migrated (chat_messages, hidden_properties, property_reports, user_flags, hidden_videos, property_sale_reports, landmark_reports, property_sale_videos, user_blocked_organizations, ai_chat_sessions, ai_chat_messages, device_registrations, device_sessions)")
+		}
+		if storage.DB != nil {
+			fmt.Println("🔧 Backfilling habitat plot centroids from geometry…")
+			routes.EnsureHabitatCentroidsBackfilled(storage.DB)
 		}
 	}()
 	fmt.Println("🔧 Initializing media CDN...")
@@ -254,6 +261,11 @@ func main() {
 		svc := meskenygpt.NewService(aiCfg, storage.DB, storage.Redis)
 		routes.MeskenyGPTService = svc
 		services.MeskenyGPTService = svc
+		semanticEng := meskenysemantic.NewEngine(storage.DB)
+		routes.SemanticEngine = semanticEng
+		services.RegisterSemanticIndexHook(func(source string, id uint) {
+			_ = semanticEng.IndexListing(context.Background(), source, id)
+		})
 		fmt.Println("✅ MeskenyGPT AI service initialized successfully and wired to /api/ai/chat")
 	}()
 
@@ -628,6 +640,8 @@ func main() {
 		admin.Get("/orchestrator/stats", routes.AdminOrchestratorStats)
 		admin.Get("/orchestrator/users/{userID:uint}/log", routes.AdminOrchestratorUserLog)
 		admin.Get("/users", routes.AdminListUsers)
+		admin.Post("/users/{id:uint}/contact", routes.AdminContactUser)
+		admin.Get("/meskeny-team", routes.AdminGetMeskenyTeamInfo)
 		admin.Patch("/users/{id:uint}/role", utils.SuperAdminOnlyMiddleware, routes.AdminChangeUserRole)
 		admin.Patch("/users/{id:uint}", routes.AdminUpdateUser)
 		admin.Get("/users/{id:uint}", routes.AdminGetUser)
@@ -1214,6 +1228,17 @@ func main() {
 		aiChat.Get("/sessions/{sessionId:uint}", accessTokenVerifierMiddleware, routes.GetAIChatSession)
 		aiChat.Post("/sessions", accessTokenVerifierMiddleware, routes.CreateAIChatSession)
 		aiChat.Delete("/sessions/{sessionId:uint}", accessTokenVerifierMiddleware, routes.DeleteAIChatSession)
+
+		aiChat.Post("/search/semantic", optionalAuthMiddleware, routes.SemanticSearch)
+		aiChat.Post("/search/similar", optionalAuthMiddleware, routes.SimilarProperties)
+		aiChat.Get("/search/suggestions", optionalAuthMiddleware, routes.SearchSuggestions)
+
+		aiChat.Get("/notifications", accessTokenVerifierMiddleware, routes.GetAINotifications)
+		aiChat.Post("/notifications/{id:uint}/read", accessTokenVerifierMiddleware, routes.MarkAINotificationRead)
+
+		aiChat.Post("/escalate", optionalAuthMiddleware, routes.RequestEscalation)
+		aiChat.Get("/escalate/status/{id:uint}", optionalAuthMiddleware, routes.EscalationStatus)
+		aiChat.Post("/escalate/resolve", accessTokenVerifierMiddleware, routes.ResolveEscalation)
 	}
 
 	// Listing AI — async draft generation for Add with AI flows
@@ -1222,6 +1247,12 @@ func main() {
 		listingAI.Post("/jobs", routes.PostListingAIJob)
 		listingAI.Get("/jobs/{jobId}", routes.GetListingAIJob)
 		listingAI.Post("/events", routes.PostListingAIEvent)
+	}
+
+	// WhatsApp share card analytics (optional auth — records user_id when logged in)
+	whatsappShare := app.Party("/api/whatsapp-share", optionalAuthMiddleware)
+	{
+		whatsappShare.Post("/events", routes.PostWhatsAppShareEvent)
 	}
 
 	// Direct Messages - Clean Implementation
@@ -1547,12 +1578,23 @@ func main() {
 	adminAI := app.Party("/api/admin/ai", accessTokenVerifierMiddleware, utils.AdminOnlyMiddleware)
 	{
 		adminAI.Get("/interactions", routes.AdminListAIInteractions)
+		adminAI.Get("/escalations", routes.AdminListAIEscalations)
+		adminAI.Patch("/escalations/{id:uint}/resolve", routes.AdminResolveAIEscalation)
 		adminAI.Get("/listing-usage", routes.AdminGetListingAIUsageStats)
 		adminAI.Get("/knowledge", routes.AdminListMeskenyKnowledge)
 		adminAI.Get("/knowledge/{id:uint}", routes.AdminGetMeskenyKnowledge)
 		adminAI.Post("/knowledge", routes.AdminCreateMeskenyKnowledge)
 		adminAI.Patch("/knowledge/{id:uint}", routes.AdminUpdateMeskenyKnowledge)
 		adminAI.Delete("/knowledge/{id:uint}", routes.AdminDeleteMeskenyKnowledge)
+		adminAI.Get("/semantic/status", routes.AdminSemanticStatus)
+		adminAI.Post("/semantic/reindex", routes.AdminReindexSemantic)
+		adminAI.Post("/semantic/index-property", routes.AdminIndexProperty)
+	}
+
+	adminWhatsAppShare := app.Party("/api/admin/whatsapp-share", accessTokenVerifierMiddleware, utils.AdminOnlyMiddleware)
+	{
+		adminWhatsAppShare.Get("/usage", routes.AdminGetWhatsAppShareUsageStats)
+		adminWhatsAppShare.Get("/badge", routes.AdminGetWhatsAppShareBadgeCount)
 	}
 
 	// Admin Property Types (categories) - add, edit, delete, seed

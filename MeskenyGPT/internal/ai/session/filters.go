@@ -64,6 +64,7 @@ func MergeIntoContext(ctx lang.MessageContext, fc FilterContext) lang.MessageCon
 		ctx.Type = fc.Type
 	}
 	ctx = ApplyPurposeFromFilter(ctx, fc.Purpose)
+	ctx = lang.ReconcileTransactionFromMessage(ctx)
 	if ctx.BudgetMin == 0 && fc.MinPrice > 0 {
 		ctx.BudgetMin = fc.MinPrice
 	}

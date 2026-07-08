@@ -163,6 +163,23 @@ func (s *store) Find(ctx context.Context, f Filters) ([]Property, error) {
 		return q
 	}
 
+	applyCommonNoType := func(q *gorm.DB, f Filters) *gorm.DB {
+		if f.City != "" {
+			c := strings.ToLower(strings.TrimSpace(f.City))
+			if f.Zone != "" || len(f.ZoneIDs) > 0 {
+				q = q.Where("(LOWER(city) = ? OR LOWER(city) LIKE ? OR city IS NULL OR TRIM(city) = '')",
+					c, "%"+c+"%")
+			} else {
+				q = q.Where("(LOWER(city) = ? OR LOWER(city) LIKE ? OR LOWER(address) LIKE ? OR LOWER(description) LIKE ?)",
+					c, "%"+c+"%", "%"+c+"%", "%"+c+"%")
+			}
+		}
+		if f.BudgetMin > 0 && f.BudgetMax > f.BudgetMin {
+			q = q.Where("listing_price BETWEEN ? AND ?", f.BudgetMin, f.BudgetMax)
+		}
+		return q
+	}
+
 	// Raw query fallback: match user words in title/address/description.
 	// This catches area names written only in ad text (e.g. "الصحراوي"),
 	// even if they were not parsed into structured zone fields.
@@ -217,30 +234,10 @@ func (s *store) Find(ctx context.Context, f Filters) ([]Property, error) {
 		return q
 	}
 
-	// First pass: if we have a specific zone (e.g. Tevragh Zeina), try to
-	// constrain title/address to that zone. If nothing is found, we will
-	// relax the zone and search the whole city as a fallback.
-	// Zone may be pipe-separated OR patterns (e.g. tevragh|صحراوي|sahraoui).
+	// First pass: zone via catalog zone_id OR title/address text patterns.
 	q := applyCommon(newBase())
-	if f.Zone != "" {
-		patterns := strings.Split(f.Zone, "|")
-		var ors []string
-		var args []interface{}
-		for _, raw := range patterns {
-			pat := strings.TrimSpace(raw)
-			if pat == "" {
-				continue
-			}
-			z := strings.ToLower(pat)
-			// Arabic / mixed titles: match pattern as-is and lowercased for Latin.
-			likeLatin := "%" + z + "%"
-			likeRaw := "%" + pat + "%"
-			ors = append(ors, "(LOWER(title) LIKE ? OR LOWER(address) LIKE ? OR LOWER(description) LIKE ? OR title LIKE ? OR address LIKE ? OR description LIKE ?)")
-			args = append(args, likeLatin, likeLatin, likeLatin, likeRaw, likeRaw, likeRaw)
-		}
-		if len(ors) > 0 {
-			q = q.Where(strings.Join(ors, " OR "), args...)
-		}
+	if f.Zone != "" || len(f.ZoneIDs) > 0 {
+		q = applyZoneConstraint(q, f)
 	} else {
 		q = applyQuery(q, f.Query)
 		q = applyLocationConstraint(q, f.Query)
@@ -256,7 +253,21 @@ func (s *store) Find(ctx context.Context, f Filters) ([]Property, error) {
 		return []Property{}, err
 	}
 
-	// Strict behavior: when a zone is explicitly requested, do not broaden
+	// Zone was explicit but type filter may be too strict (Arabic titles, weak property_type).
+	if len(rows) == 0 && f.Zone != "" && f.Type != "" && !relaxTypeForBroadQuery {
+		qRetry := applyCommonNoType(newBase(), f)
+		qRetry = applyZoneConstraint(qRetry, f)
+		qRetry = qRetry.Order("is_gold DESC, is_featured DESC, created_at DESC").Limit(12)
+		if err := qRetry.Find(&rows).Error; err != nil {
+			fmt.Printf("❌ MeskenyGPT zone retry DB error: %v\n", err)
+			return []Property{}, err
+		}
+		if len(rows) > 0 {
+			typeDropped = true
+		}
+	}
+
+	// Strict behavior: when a zone was explicitly requested, do not broaden
 	// to city-wide fallbacks. Return only zone-constrained matches.
 	//
 	// If no zone was explicitly requested, we can still relax type when needed.
@@ -303,8 +314,8 @@ func (s *store) Find(ctx context.Context, f Filters) ([]Property, error) {
 	if typeDropped {
 		note = " [type filter dropped]"
 	}
-	fmt.Printf("🔍 MeskenyGPT property search: city=%s zone=%s type=%s budget=[%.0f,%.0f] → %d rows%s\n",
-		f.City, f.Zone, f.Type, f.BudgetMin, f.BudgetMax, len(rows), note)
+	fmt.Printf("🔍 MeskenyGPT property search: city=%s zone=%s zone_ids=%d type=%s budget=[%.0f,%.0f] → %d rows%s\n",
+		f.City, f.Zone, len(f.ZoneIDs), f.Type, f.BudgetMin, f.BudgetMax, len(rows), note)
 
 	props := make([]Property, 0, len(rows))
 	for _, r := range rows {
@@ -544,6 +555,66 @@ func firstImageFromString(js string) string {
 	return urls[0]
 }
 
+func applyZoneConstraint(q *gorm.DB, f Filters) *gorm.DB {
+	if f.Zone == "" && len(f.ZoneIDs) == 0 {
+		return q
+	}
+
+	var parts []string
+	var args []interface{}
+
+	if len(f.ZoneIDs) > 0 {
+		parts = append(parts, "zone_id IN ?")
+		args = append(args, f.ZoneIDs)
+	}
+
+	if f.Zone != "" {
+		textSQL, textArgs := zoneTextOrClause(f.Zone)
+		if textSQL != "" {
+			parts = append(parts, "("+textSQL+")")
+			args = append(args, textArgs...)
+		}
+	}
+
+	if len(parts) > 0 {
+		q = q.Where(strings.Join(parts, " OR "), args...)
+	}
+	return q
+}
+
+func zoneTextOrClause(zonePipe string) (string, []interface{}) {
+	patterns := strings.Split(zonePipe, "|")
+	var ors []string
+	var args []interface{}
+	for _, raw := range patterns {
+		pat := strings.TrimSpace(raw)
+		if pat == "" {
+			continue
+		}
+		z := strings.ToLower(pat)
+		likeLatin := "%" + z + "%"
+		likeRaw := "%" + pat + "%"
+		likeHyphen := "%" + strings.ReplaceAll(z, " ", "-") + "%"
+		likeSpace := "%" + strings.ReplaceAll(z, "-", " ") + "%"
+		ors = append(ors, `(
+			LOWER(title) LIKE ? OR LOWER(address) LIKE ? OR LOWER(description) LIKE ?
+			OR title LIKE ? OR address LIKE ? OR description LIKE ?
+			OR LOWER(title) LIKE ? OR LOWER(address) LIKE ? OR LOWER(description) LIKE ?
+			OR LOWER(title) LIKE ? OR LOWER(address) LIKE ? OR LOWER(description) LIKE ?
+		)`)
+		args = append(args,
+			likeLatin, likeLatin, likeLatin,
+			likeRaw, likeRaw, likeRaw,
+			likeHyphen, likeHyphen, likeHyphen,
+			likeSpace, likeSpace, likeSpace,
+		)
+	}
+	if len(ors) == 0 {
+		return "", nil
+	}
+	return strings.Join(ors, " OR "), args
+}
+
 func shouldApplyRentTypeFilter(query, parsedType string) bool {
 	q := strings.ToLower(strings.TrimSpace(query))
 	t := strings.ToLower(strings.TrimSpace(parsedType))
@@ -600,11 +671,19 @@ func applySaleTypeFilter(q *gorm.DB, propertyType string) *gorm.DB {
 			OR LOWER(title) LIKE ?
 			OR LOWER(description) LIKE ?
 			OR LOWER(description) LIKE ?
+			OR title LIKE ?
+			OR title LIKE ?
+			OR title LIKE ?
+			OR description LIKE ?
+			OR description LIKE ?
+			OR description LIKE ?
 		) AND LOWER(COALESCE(property_type, '')) <> ?
 			AND LOWER(title) NOT LIKE ?
 			AND LOWER(description) NOT LIKE ?`,
 			"house", "maison", "home", "duplex", "townhouse", "residential",
 			"%house%", "%maison%", "%house%", "%maison%",
+			"%منزل%", "%دار%", "%بيت%",
+			"%منزل%", "%دار%", "%بيت%",
 			"villa", "%villa%", "%villa%")
 	case "appartement", "apartment", "flat", "studio":
 		return q.Where("(LOWER(property_type) IN (?, ?, ?, ?) OR LOWER(title) LIKE ? OR LOWER(title) LIKE ? OR LOWER(description) LIKE ? OR LOWER(description) LIKE ?)",

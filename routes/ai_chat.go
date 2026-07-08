@@ -65,7 +65,7 @@ func SendAIChatMessage(ctx iris.Context) {
 		p := req.SharedProperty
 		lines := []string{
 			"Property context (shared from app card):",
-			"- internal_ref: hidden",
+			"- internal_ref: redacted",
 		}
 		if p.Title != "" {
 			lines = append(lines, fmt.Sprintf("- title: %s", p.Title))
@@ -302,6 +302,7 @@ func SendAIChatMessage(ctx iris.Context) {
 	var quickReplies []map[string]string
 	recs := []models.AIPropertyRecommendation{}
 	var interactionID uint
+	var chatEscalation *ai.EscalationInfo
 
 	// If MeskenyGPT is available, delegate the smart part to it.
 	if MeskenyGPTService != nil {
@@ -318,6 +319,16 @@ func SendAIChatMessage(ctx iris.Context) {
 		} else {
 			aiResponse = sanitizeAIOutput(out.Message.Content)
 			interactionID = out.InteractionID
+			if out.Escalation != nil {
+				chatEscalation = out.Escalation
+				var uid *uint
+				if userID > 0 {
+					uid = &userID
+				}
+				if row, err := ai.GetEscalation(context.Background(), storage.DB, out.Escalation.ID); err == nil {
+					services.NotifyEscalationCreated(context.Background(), row, uid, fmt.Sprintf("%d", session.ID))
+				}
+			}
 			fmt.Printf("🤖 MeskenyGPT (user %d, session %d) final message: %q\n", userID, session.ID, aiResponse)
 
 			// Map MeskenyGPT quick replies to legacy shape
@@ -383,14 +394,17 @@ func SendAIChatMessage(ctx iris.Context) {
 		"success":    true,
 		"session_id": session.ID,
 		"message": iris.Map{
-			"id":        aiMessage.ID,
-			"role":      aiMessage.Role,
-			"content":   aiMessage.Content,
-			"timestamp": aiMessage.CreatedAt.UnixMilli(),
-			"quick_replies":         quickReplies,
+			"id":                      aiMessage.ID,
+			"role":                    aiMessage.Role,
+			"content":                 aiMessage.Content,
+			"timestamp":               aiMessage.CreatedAt.UnixMilli(),
+			"quick_replies":           quickReplies,
 			"propertyRecommendations": recs,
-			"interaction_id":        interactionID,
+			"interaction_id":          interactionID,
 		},
+	}
+	if chatEscalation != nil {
+		resp["escalation"] = chatEscalation
 	}
 
 	if payload, err := json.MarshalIndent(resp, "", "  "); err == nil {

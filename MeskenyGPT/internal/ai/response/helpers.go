@@ -257,14 +257,149 @@ func buildSearchSummaryText(ctx lang.MessageContext, count int) string {
 	if count <= 0 {
 		return buildNoResultsText(ctx)
 	}
+	place := searchPlaceLabel(ctx)
+	txLabel := searchTransactionLabel(ctx)
+	typeLabel := searchTypeLabel(ctx)
+
 	switch ctx.Lang {
 	case lang.LangAR:
-		return fmt.Sprintf("✅ عثرت على %d عقارًا حقيقيًا في قاعدة بيانات Meskeny يطابق طلبك تقريبًا.\nاستعرض الخيارات في البطاقات أسفل هذه الرسالة واضغط على أي عقار لعرض التفاصيل الكاملة.", count)
+		head := fmt.Sprintf("وجدت %d", count)
+		if count == 1 {
+			head += " خيارًا"
+		} else {
+			head += " خيارات"
+		}
+		if txLabel != "" {
+			head += " لل" + txLabel
+		}
+		if typeLabel != "" {
+			head += " (" + typeLabel + ")"
+		}
+		if place != "" {
+			head += " في " + place
+		}
+		head += "."
+		return head + "\nاضغط على البطاقة لعرض التفاصيل والتواصل مع المضيف."
 	case lang.LangEN:
-		return fmt.Sprintf("✅ I found %d real properties in Meskeny that roughly match your request.\nBrowse them in the cards below and tap any property to open full details.", count)
+		head := fmt.Sprintf("Found %d", count)
+		if count == 1 {
+			head += " listing"
+		} else {
+			head += " listings"
+		}
+		if txLabel != "" {
+			head += " to " + txLabel
+		}
+		if typeLabel != "" {
+			head += " (" + typeLabel + ")"
+		}
+		if place != "" {
+			head += " in " + place
+		}
+		head += "."
+		return head + "\nTap a card below for full details."
 	default:
-		return fmt.Sprintf("✅ J'ai trouvé %d biens réels dans Meskeny qui correspondent à ta demande.\nParcours-les dans les cartes ci-dessous et appuie sur un bien pour voir la fiche complète.", count)
+		head := fmt.Sprintf("J'ai trouvé %d annonce", count)
+		if count > 1 {
+			head += "s"
+		}
+		if txLabel != "" {
+			head += " en " + txLabel
+		}
+		if typeLabel != "" {
+			head += " (" + typeLabel + ")"
+		}
+		if place != "" {
+			head += " à " + place
+		}
+		head += "."
+		return head + "\nAppuie sur une carte pour voir la fiche complète."
 	}
+}
+
+func searchPlaceLabel(ctx lang.MessageContext) string {
+	if q := strings.TrimSpace(ctx.Quartier); q != "" {
+		return q
+	}
+	if z := strings.TrimSpace(ctx.Zone); z != "" {
+		if i := strings.Index(z, "|"); i > 0 {
+			return z[:i]
+		}
+		return z
+	}
+	if c := strings.TrimSpace(ctx.City); c != "" {
+		return c
+	}
+	return ""
+}
+
+func searchTransactionLabel(ctx lang.MessageContext) string {
+	switch ctx.Lang {
+	case lang.LangAR:
+		switch ctx.Intent {
+		case lang.IntentSearchRent:
+			return "كراء"
+		case lang.IntentSearchBuy, lang.IntentSearchLand, lang.IntentSearchCommercial:
+			return "شراء"
+		}
+	case lang.LangEN:
+		switch ctx.Intent {
+		case lang.IntentSearchRent:
+			return "rent"
+		case lang.IntentSearchBuy, lang.IntentSearchLand, lang.IntentSearchCommercial:
+			return "buy"
+		}
+	default:
+		switch ctx.Intent {
+		case lang.IntentSearchRent:
+			return "location"
+		case lang.IntentSearchBuy, lang.IntentSearchLand, lang.IntentSearchCommercial:
+			return "vente"
+		}
+	}
+	return ""
+}
+
+func searchTypeLabel(ctx lang.MessageContext) string {
+	t := strings.ToLower(strings.TrimSpace(ctx.Type))
+	switch ctx.Lang {
+	case lang.LangAR:
+		switch t {
+		case "house", "maison", "home":
+			return "منزل"
+		case "appartement", "apartment", "flat", "studio":
+			return "شقة"
+		case "villa":
+			return "فيلا"
+		case "land", "terrain":
+			return "أرض"
+		}
+	case lang.LangEN:
+		switch t {
+		case "house", "maison", "home":
+			return "house"
+		case "appartement", "apartment", "flat":
+			return "apartment"
+		case "studio":
+			return "studio"
+		case "villa":
+			return "villa"
+		case "land", "terrain":
+			return "land"
+		}
+	default:
+		switch t {
+		case "house", "maison", "home":
+			return "maison"
+		case "appartement", "apartment", "flat", "studio":
+			return "appartement"
+		case "villa":
+			return "villa"
+		case "land", "terrain":
+			return "terrain"
+		}
+	}
+	return ""
 }
 
 func buildNoResultsText(ctx lang.MessageContext) string {

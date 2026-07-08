@@ -20,6 +20,7 @@ type (
 	Service               = internal.Service
 	SessionFilterContext  = internal.SessionFilterContext
 	SessionFilterPatch    = internal.SessionFilterPatch
+	EscalationInfo        = internal.EscalationInfo
 )
 
 const (

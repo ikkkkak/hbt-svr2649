@@ -26,6 +26,7 @@ type Property struct {
 type Filters struct {
 	City       string
 	Zone       string
+	ZoneIDs    []uint
 	Quartier   string
 	QuartierID uint
 	PlotNumber string
@@ -33,6 +34,7 @@ type Filters struct {
 	Purpose    string
 	BudgetMin  float64
 	BudgetMax  float64
+	Bedrooms   int
 	Query      string // Raw user message for title/description matching (landmarks)
 }
 

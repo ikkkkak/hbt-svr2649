@@ -152,8 +152,8 @@ func (s *service) HandleAgentRun(
 		}
 	}
 
-	// Greeting / help — instant reply (no 30s LLM wait)
-	if msgCtx.Intent == lang.IntentGreeting || msgCtx.Intent == lang.IntentHelp {
+	// Greeting / help — instant reply (no 30s LLM wait); skip for shared property / valuation
+	if (msgCtx.Intent == lang.IntentGreeting || msgCtx.Intent == lang.IntentHelp) && !sharedPropertyMode {
 		msg := response.GreetingMessage(msgCtx.Lang)
 		out := ChatOutput{
 			Message:      msg,
@@ -166,6 +166,10 @@ func (s *service) HandleAgentRun(
 			[]string{"Instant greeting — no listing search"}, nil, stepPlan)
 		emitFinal(emit, runID, out, runStart, stepPlan, msgCtx.Lang)
 		return out, nil
+	}
+
+	if sharedPropertyMode && valuationMode {
+		return s.agentRunPropertySearch(ctx, in, emit, runID, runStart, msgCtx, stepPlan, valuationMode)
 	}
 
 	// Clarify before any empty geo search (enterprise: no city= zone= → 0 rows)
@@ -252,6 +256,7 @@ func (s *service) agentRunPropertySearch(
 	rules.ApplyAdminSearchRules(s.gdb, &msgCtx)
 	f := property.FiltersFromContext(msgCtx)
 	f.Query = in.Text
+	property.EnrichFiltersFromCatalog(s.gdb, &f)
 	toolName := "search_properties"
 	if msgCtx.Intent == lang.IntentSearchLand {
 		toolName = "search_landmarks"

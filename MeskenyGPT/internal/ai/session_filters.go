@@ -16,7 +16,9 @@ func (s *service) hydrateSessionFilters(ctx context.Context, sessionID string, m
 		return msgCtx
 	}
 	msgCtx = session.MergeIntoContext(msgCtx, fc)
-	return lang.ClearStaleQuartier(msgCtx, msgCtx.RawText)
+	msgCtx = lang.ClearStaleQuartier(msgCtx, msgCtx.RawText)
+	msgCtx = lang.ClearStaleType(msgCtx, msgCtx.RawText)
+	return msgCtx
 }
 
 func (s *service) persistSessionFilters(ctx context.Context, sessionID string, msgCtx lang.MessageContext) {

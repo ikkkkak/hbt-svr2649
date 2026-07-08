@@ -13,10 +13,17 @@ import (
 	"apartments-clone-server/models"
 	"apartments-clone-server/realtime"
 	pushsvc "apartments-clone-server/services/push"
+	"apartments-clone-server/services"
 	"apartments-clone-server/storage"
 
 	"github.com/kataras/iris/v12"
 )
+
+type dmConversationPartner struct {
+	OtherUserID   uint
+	LastMessageID uint
+	LastMessageAt time.Time
+}
 
 // BlockUserForDM - Block a user for direct messages
 func BlockUserForDM(ctx iris.Context) {
@@ -373,13 +380,15 @@ func GetDirectMessages(ctx iris.Context) {
 		return
 	}
 
-	// Check if either user has blocked the other
-	var blockCheck models.UserBlock
-	if err := storage.DB.Where("(blocker_id = ? AND blocked_id = ?) OR (blocker_id = ? AND blocked_id = ?) AND deleted_at IS NULL",
-		uid, otherUserID, otherUserID, uid).First(&blockCheck).Error; err == nil {
-		ctx.StatusCode(http.StatusForbidden)
-		ctx.JSON(iris.Map{"error": "cannot access messages with this user"})
-		return
+	// Check if either user has blocked the other — Meskeny Team is always reachable
+	if !services.IsMeskenyTeamUser(otherUserID) && !services.IsMeskenyTeamUser(uid) {
+		var blockCheck models.UserBlock
+		if err := storage.DB.Where("(blocker_id = ? AND blocked_id = ?) OR (blocker_id = ? AND blocked_id = ?) AND deleted_at IS NULL",
+			uid, otherUserID, otherUserID, uid).First(&blockCheck).Error; err == nil {
+			ctx.StatusCode(http.StatusForbidden)
+			ctx.JSON(iris.Map{"error": "cannot access messages with this user"})
+			return
+		}
 	}
 
 	var messages []models.DirectMessage
@@ -425,8 +434,9 @@ func GetDirectMessages(ctx iris.Context) {
 	}
 
 	ctx.JSON(iris.Map{
-		"messages": response,
-		"total":    len(response),
+		"messages":        response,
+		"total":           len(response),
+		"is_meskeny_team": services.IsMeskenyTeamUser(otherUserID),
 	})
 }
 
@@ -554,6 +564,7 @@ func ListDirectMessageConversations(ctx iris.Context) {
 		OtherUserAvatar string                `json:"other_user_avatar"`
 		LastMessage     *models.DirectMessage `json:"last_message"`
 		UnreadCount     int                   `json:"unread_count"`
+		IsMeskenyTeam   bool                  `json:"is_meskeny_team"`
 	}
 
 	// Helper to return empty but valid response
@@ -613,63 +624,26 @@ func ListDirectMessageConversations(ctx iris.Context) {
 
 	log.Printf("🔍 ListDirectMessageConversations: User %d, cursor=%s, limit=%d", uid, cursor, limit)
 
-	// PERFORMANCE: Optimized single query to get all conversation partners
-	type ConversationPartner struct {
-		OtherUserID   uint      `gorm:"column:other_user_id"`
-		LastMessageID uint      `gorm:"column:last_message_id"`
-		LastMessageAt time.Time `gorm:"column:last_message_at"`
-	}
+	type ConversationPartner = dmConversationPartner
 
-	var partners []ConversationPartner
-
-	// ROBUST QUERY: Works on PostgreSQL with DISTINCT ON
-	// Fallback for other databases uses subquery approach
-	err := storage.DB.Raw(`
-		SELECT DISTINCT ON (other_user_id)
-			other_user_id,
-			last_message_id,
-			last_message_at
-		FROM (
-			SELECT 
-				CASE 
-					WHEN sender_id = ? THEN receiver_id
-					ELSE sender_id
-				END as other_user_id,
-				id as last_message_id,
-				created_at as last_message_at,
-				ROW_NUMBER() OVER (
-					PARTITION BY 
-						CASE 
-							WHEN sender_id = ? THEN receiver_id
-							ELSE sender_id
-						END 
-					ORDER BY created_at DESC
-				) as rn
-			FROM direct_messages
-			WHERE (sender_id = ? OR receiver_id = ?) 
-				AND deleted_at IS NULL
-		) ranked
-		WHERE rn = 1
-		ORDER BY other_user_id, last_message_at DESC
-	`, uid, uid, uid, uid).Scan(&partners).Error
-
+	partners, err := listDirectMessagePartners(uid)
 	if err != nil {
 		log.Printf("❌ ListDirectMessageConversations: Error querying partners: %v", err)
-		// ZERO DISAPPEARANCE: Return empty valid response, not error
 		sendEmptyResponse()
 		return
 	}
 
 	log.Printf("✅ ListDirectMessageConversations: Found %d unique conversation partners for user %d", len(partners), uid)
 
-	// SECURITY: Filter out blocked users
-	// Get all blocks where user is either blocker or blocked
+	teamID, _ := services.EnsureMeskenyTeamUser()
+	_ = teamID // used for logging elsewhere if needed
+
+	// Filter blocked users — never hide official Meskeny Team thread
 	var blocks []models.UserBlock
 	storage.DB.Where("(blocker_id = ? OR blocked_id = ?) AND deleted_at IS NULL", uid, uid).Find(&blocks)
 
 	blockedMap := make(map[uint]bool)
 	for _, block := range blocks {
-		// Determine which user is blocked (the other one)
 		if block.BlockerID == uid {
 			blockedMap[block.BlockedID] = true
 		} else {
@@ -679,6 +653,10 @@ func ListDirectMessageConversations(ctx iris.Context) {
 
 	var filteredPartners []ConversationPartner
 	for _, p := range partners {
+		if services.IsMeskenyTeamUser(p.OtherUserID) {
+			filteredPartners = append(filteredPartners, p)
+			continue
+		}
 		if !blockedMap[p.OtherUserID] {
 			filteredPartners = append(filteredPartners, p)
 		}
@@ -805,41 +783,60 @@ func ListDirectMessageConversations(ctx iris.Context) {
 		}
 
 		for _, partner := range paginatedPartners {
-			otherUser, ok := userByID[partner.OtherUserID]
+			isTeam := services.IsMeskenyTeamUser(partner.OtherUserID)
+
+			lastMessage, ok := lastMessageByID[partner.LastMessageID]
 			if !ok {
+				// Reload single message if batch missed it (shouldn't happen)
+				var lm models.DirectMessage
+				if err := storage.DB.First(&lm, partner.LastMessageID).Error; err != nil {
+					log.Printf("⚠️ ListDirectMessageConversations: Last message %d not found for partner %d", partner.LastMessageID, partner.OtherUserID)
+					if !isTeam {
+						continue
+					}
+				} else {
+					lastMessage = lm
+					ok = true
+				}
+			}
+
+			otherUser, hasUser := userByID[partner.OtherUserID]
+			otherUserName := services.MeskenyTeamDisplayName()
+			avatarURL := services.MeskenyTeamAvatarURL()
+
+			if hasUser && !isTeam {
+				otherUserName = fmt.Sprintf("%s %s", otherUser.FirstName, otherUser.LastName)
+				if strings.TrimSpace(otherUserName) == "" {
+					otherUserName = otherUser.Email
+				}
+				avatarURL = otherUser.AvatarURL
+				if organization, exists := orgByOwner[partner.OtherUserID]; exists {
+					if organization.BannerImage != "" {
+						avatarURL = organization.BannerImage
+					} else if organization.Logo != "" {
+						avatarURL = organization.Logo
+					}
+					if organization.Name != "" {
+						otherUserName = organization.Name
+					}
+				}
+			} else if !hasUser && !isTeam {
 				log.Printf("⚠️ ListDirectMessageConversations: User %d not found, skipping", partner.OtherUserID)
 				continue
 			}
 
-			lastMessage, ok := lastMessageByID[partner.LastMessageID]
 			if !ok {
-				log.Printf("⚠️ ListDirectMessageConversations: Last message %d not found for partner %d, skipping", partner.LastMessageID, partner.OtherUserID)
 				continue
 			}
 
-			otherUserName := fmt.Sprintf("%s %s", otherUser.FirstName, otherUser.LastName)
-			if strings.TrimSpace(otherUserName) == "" {
-				otherUserName = otherUser.Email
-			}
-
-			avatarURL := otherUser.AvatarURL
-			if organization, exists := orgByOwner[partner.OtherUserID]; exists {
-				if organization.BannerImage != "" {
-					avatarURL = organization.BannerImage
-				} else if organization.Logo != "" {
-					avatarURL = organization.Logo
-				}
-				if organization.Name != "" {
-					otherUserName = organization.Name
-				}
-			}
-
+			lm := lastMessage
 			summaries = append(summaries, ConversationSummary{
 				OtherUserID:     partner.OtherUserID,
 				OtherUserName:   otherUserName,
 				OtherUserAvatar: avatarURL,
-				LastMessage:     &lastMessage,
+				LastMessage:     &lm,
 				UnreadCount:     int(unreadBySender[partner.OtherUserID]),
+				IsMeskenyTeam:   isTeam,
 			})
 		}
 	}
@@ -859,6 +856,37 @@ func ListDirectMessageConversations(ctx iris.Context) {
 		"total":           len(summaries),
 		"status":          "ok",
 	})
+}
+
+// listDirectMessagePartners returns the latest message per conversation partner (reliable Go-side grouping).
+func listDirectMessagePartners(uid uint) ([]dmConversationPartner, error) {
+	var rows []models.DirectMessage
+	if err := storage.DB.
+		Where("(sender_id = ? OR receiver_id = ?) AND deleted_at IS NULL", uid, uid).
+		Order("created_at DESC").
+		Limit(5000).
+		Find(&rows).Error; err != nil {
+		return nil, err
+	}
+
+	seen := make(map[uint]bool)
+	partners := make([]dmConversationPartner, 0, len(rows))
+	for _, m := range rows {
+		other := m.SenderID
+		if m.SenderID == uid {
+			other = m.ReceiverID
+		}
+		if other == 0 || other == uid || seen[other] {
+			continue
+		}
+		seen[other] = true
+		partners = append(partners, dmConversationPartner{
+			OtherUserID:   other,
+			LastMessageID: m.ID,
+			LastMessageAt: m.CreatedAt,
+		})
+	}
+	return partners, nil
 }
 
 // AddMessageReaction - Add a reaction (emoji) to a direct message

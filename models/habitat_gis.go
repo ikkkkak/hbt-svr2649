@@ -79,7 +79,7 @@ type HabitatPlan struct {
 	Name          string         `json:"name" gorm:"size:100;not null"`
 	NameAr        string         `json:"name_ar" gorm:"size:100;not null"`
 	Color         string         `json:"color" gorm:"size:20;default:'#2a5298'"`
-	BoundsGeoJSON datatypes.JSON `json:"bounds_geojson,omitempty" gorm:"type:jsonb"`
+	BoundsGeoJSON datatypes.JSON `json:"bounds_geojson,omitempty" gorm:"column:bounds_geojson;type:jsonb"`
 	CentroidLat   *float64       `json:"centroid_lat,omitempty"`
 	CentroidLng   *float64       `json:"centroid_lng,omitempty"`
 	SectorCount   int            `json:"sector_count" gorm:"default:0"`
@@ -104,7 +104,7 @@ type HabitatSector struct {
 	Name          string         `json:"name" gorm:"size:200;not null;uniqueIndex:idx_habitat_sector_plan_name,composite:plan_id"`
 	NameAr        string         `json:"name_ar" gorm:"size:200"`
 	Code          string         `json:"code" gorm:"size:100"`
-	BoundsGeoJSON datatypes.JSON `json:"bounds_geojson,omitempty" gorm:"type:jsonb"`
+	BoundsGeoJSON datatypes.JSON `json:"bounds_geojson,omitempty" gorm:"column:bounds_geojson;type:jsonb"`
 	CentroidLat   *float64       `json:"centroid_lat,omitempty"`
 	CentroidLng   *float64       `json:"centroid_lng,omitempty"`
 	PlotCount     int            `json:"plot_count" gorm:"default:0"`
@@ -142,7 +142,7 @@ type HabitatPlot struct {
 	ILValue          *float64       `json:"il_value,omitempty" gorm:"column:il_value"`
 	ELValue          *float64       `json:"el_value,omitempty" gorm:"column:el_value"`
 	RESValue         *float64       `json:"res_value,omitempty" gorm:"column:res_value"`
-	GeomGeoJSON      datatypes.JSON `json:"geom_geojson,omitempty" gorm:"type:jsonb"`
+	GeomGeoJSON      datatypes.JSON `json:"geom_geojson,omitempty" gorm:"column:geom_geojson;type:jsonb"`
 	CentroidLat      *float64       `json:"centroid_lat,omitempty"`
 	CentroidLng      *float64       `json:"centroid_lng,omitempty"`
 	Corners          datatypes.JSON `json:"corners,omitempty" gorm:"type:jsonb"`

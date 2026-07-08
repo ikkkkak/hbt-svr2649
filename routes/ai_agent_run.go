@@ -62,7 +62,7 @@ func SendAIAgentRun(ctx iris.Context) {
 	effectiveMessage := req.Message
 	if req.SharedProperty != nil && req.SharedProperty.ID > 0 {
 		p := req.SharedProperty
-		lines := []string{"Property context (shared from app card):", "- internal_ref: hidden"}
+		lines := []string{"Property context (shared from app card):", "- internal_ref: redacted"}
 		if p.Title != "" {
 			lines = append(lines, fmt.Sprintf("- title: %s", p.Title))
 		}

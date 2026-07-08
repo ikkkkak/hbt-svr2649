@@ -1,4 +1,4 @@
-package routes
+﻿package routes
 
 import (
 	"encoding/json"
@@ -49,12 +49,12 @@ func habitatBulkExampleDocument() iris.Map {
 			{
 				"code":     "TEV",
 				"name":     "Tevergh Zeina",
-				"name_ar":  "تفرغ زينة",
+				"name_ar":  "ØªÙØ±Øº Ø²ÙŠÙ†Ø©",
 				"color":    "#2a5298",
 				"sectors": []iris.Map{
 					{
 						"name":    "Aghnewdert",
-						"name_ar": "أغنويدرت",
+						"name_ar": "Ø£ØºÙ†ÙˆÙŠØ¯Ø±Øª",
 						"plots": []iris.Map{
 							{
 								"plot_number":        "501",
@@ -83,14 +83,14 @@ func habitatBulkExampleDocument() iris.Map {
 					},
 				},
 			},
-			{"code": "ARF", "name": "Arafat", "name_ar": "عرفات"},
-			{"code": "DNM", "name": "Dar Naim", "name_ar": "دار النعيم"},
-			{"code": "MNA", "name": "El Mina", "name_ar": "الميناء"},
-			{"code": "RYD", "name": "Riyad", "name_ar": "الرياض"},
-			{"code": "SBK", "name": "Sebkha", "name_ar": "السبخة"},
-			{"code": "TYR", "name": "Teyarett", "name_ar": "تيارت"},
-			{"code": "TJN", "name": "Toujounine", "name_ar": "تجكجة"},
-			{"code": "KSR", "name": "Ksar", "name_ar": "لكصر"},
+			{"code": "ARF", "name": "Arafat", "name_ar": "Ø¹Ø±ÙØ§Øª"},
+			{"code": "DNM", "name": "Dar Naim", "name_ar": "Ø¯Ø§Ø± Ø§Ù„Ù†Ø¹ÙŠÙ…"},
+			{"code": "MNA", "name": "El Mina", "name_ar": "Ø§Ù„Ù…ÙŠÙ†Ø§Ø¡"},
+			{"code": "RYD", "name": "Riyad", "name_ar": "Ø§Ù„Ø±ÙŠØ§Ø¶"},
+			{"code": "SBK", "name": "Sebkha", "name_ar": "Ø§Ù„Ø³Ø¨Ø®Ø©"},
+			{"code": "TYR", "name": "Teyarett", "name_ar": "ØªÙŠØ§Ø±Øª"},
+			{"code": "TJN", "name": "Toujounine", "name_ar": "ØªØ¬ÙƒØ¬Ø©"},
+			{"code": "KSR", "name": "Ksar", "name_ar": "Ù„ÙƒØµØ±"},
 		},
 	}
 }
@@ -192,7 +192,7 @@ func AdminHabitatBulkImport(ctx iris.Context) {
 		}
 		id, err := resolveCityID(0, cityName)
 		if err != nil {
-			id, err = findOrCreateCityOnly(cityName, "نواكشوط")
+			id, err = findOrCreateCityOnly(cityName, "Ù†ÙˆØ§ÙƒØ´ÙˆØ·")
 			if err != nil {
 				ctx.StatusCode(http.StatusBadRequest)
 				ctx.JSON(iris.Map{"error": "listings_city", "message": err.Error()})
@@ -271,7 +271,7 @@ func findOrCreateCityOnly(name, nameAr string) (uint, error) {
 	if err == nil {
 		return c.ID, nil
 	}
-	c = models.City{Name: name, NameAr: nameAr, Country: "Mauritania", CountryAr: "موريتانيا", IsActive: true}
+	c = models.City{Name: name, NameAr: nameAr, Country: "Mauritania", CountryAr: "Ù…ÙˆØ±ÙŠØªØ§Ù†ÙŠØ§", IsActive: true}
 	if err := storage.DB.Create(&c).Error; err != nil {
 		return 0, err
 	}
@@ -640,9 +640,11 @@ func GetHabitatSectorsByPlan(ctx iris.Context) {
 
 // GET /api/habitat/sectors/{sectorId}/plots
 // Query: page, limit (max 1000), or all=true to return every plot in the sector (max 20000).
+// map=true omits heavy JSON columns for faster map rendering.
 func GetHabitatPlotsBySector(ctx iris.Context) {
 	sectorID, _ := strconv.ParseUint(ctx.Params().Get("sectorId"), 10, 32)
 	fetchAll := ctx.URLParam("all") == "true" || ctx.URLParam("all") == "1"
+	mapMode := ctx.URLParam("map") == "true" || ctx.URLParam("map") == "1"
 
 	var total int64
 	storage.DB.Model(&models.HabitatPlot{}).Where("sector_id = ?", uint(sectorID)).Count(&total)
@@ -658,6 +660,13 @@ func GetHabitatPlotsBySector(ctx iris.Context) {
 			  AND status = 'verified'
 		) lm ON lm.habitat_plot_id = habitat_plots.id
 	`
+	forSaleExpr := "CASE WHEN lm.habitat_plot_id IS NULL THEN FALSE ELSE TRUE END AS is_for_sale"
+	plotSelect := "habitat_plots.*, " + forSaleExpr
+	if mapMode {
+		plotSelect = `habitat_plots.id, habitat_plots.plan_id, habitat_plots.sector_id, habitat_plots.plot_number,
+			habitat_plots.area_m2, habitat_plots.area_rounded, habitat_plots.geom_geojson,
+			habitat_plots.centroid_lat, habitat_plots.centroid_lng, habitat_plots.corners, ` + forSaleExpr
+	}
 
 	if fetchAll {
 		const maxAll = 20000
@@ -665,10 +674,7 @@ func GetHabitatPlotsBySector(ctx iris.Context) {
 		q := storage.DB.Model(&models.HabitatPlot{}).
 			Joins(forSaleJoin).
 			Where("sector_id = ?", uint(sectorID)).
-			Select(
-				"habitat_plots.*",
-				"CASE WHEN lm.habitat_plot_id IS NULL THEN FALSE ELSE TRUE END AS is_for_sale",
-			).
+			Select(plotSelect).
 			Order("plot_number ASC")
 		if total > int64(maxAll) {
 			q = q.Limit(maxAll)
@@ -704,10 +710,7 @@ func GetHabitatPlotsBySector(ctx iris.Context) {
 	if err := storage.DB.Model(&models.HabitatPlot{}).
 		Joins(forSaleJoin).
 		Where("sector_id = ?", uint(sectorID)).
-		Select(
-			"habitat_plots.*",
-			"CASE WHEN lm.habitat_plot_id IS NULL THEN FALSE ELSE TRUE END AS is_for_sale",
-		).
+		Select(plotSelect).
 		Order("plot_number ASC").
 		Offset(offset).Limit(limit).
 		Find(&plots).Error; err != nil {
@@ -726,6 +729,7 @@ func GetHabitatPlotsBySector(ctx iris.Context) {
 		},
 	})
 }
+
 
 // GET /api/habitat/plots/bbox?min_lng=&min_lat=&max_lng=&max_lat=&zoom=&plan_id=&sector_id=
 func GetHabitatPlotsInBBox(ctx iris.Context) {
@@ -766,7 +770,7 @@ func GetHabitatPlotsInBBox(ctx iris.Context) {
 		IsForSale bool `json:"is_for_sale" gorm:"column:is_for_sale"`
 	}
 
-	// Landmarks (land for sale) — we only mark plots that are verified + published and linked
+	// Landmarks (land for sale) â€” we only mark plots that are verified + published and linked
 	// by habitat_plot_id (host-confirmed cadastre plot).
 	forSaleJoin := `
 		LEFT JOIN (
@@ -880,7 +884,7 @@ func GetHabitatPlotsInBBox(ctx iris.Context) {
 }
 
 // GET /api/habitat/plots/lookup?quartier_id=&plot_number=
-// Resolves listings quartier → habitat sector by name, then finds one plot (fast).
+// Resolves listings quartier â†’ habitat sector by name, then finds one plot (fast).
 func LookupHabitatPlotForListing(ctx iris.Context) {
 	quartierID, err := strconv.ParseUint(strings.TrimSpace(ctx.URLParam("quartier_id")), 10, 32)
 	if err != nil || quartierID == 0 {
@@ -1008,7 +1012,7 @@ func GetForSaleLandmarkByPlot(ctx iris.Context) {
 }
 
 // resolveHabitatSectorIDForQuartier maps a listings quartier to a habitat_sectors row.
-// Listings: City → Zone → Quartier. Cadastre: Plan → Sector → Plot.
+// Listings: City â†’ Zone â†’ Quartier. Cadastre: Plan â†’ Sector â†’ Plot.
 // IDs are not shared; matching is by zone/plan name and quartier/sector name.
 func resolveHabitatSectorIDForQuartier(quartierID uint) (sectorID uint, meta iris.Map, err error) {
 	meta = iris.Map{}
@@ -1224,7 +1228,7 @@ func GetHabitatPlot(ctx iris.Context) {
 	ctx.JSON(iris.Map{"success": true, "data": plot})
 }
 
-// GET /api/habitat/search?q= — plans, sectors (quartiers), and plots
+// GET /api/habitat/search?q= â€” plans, sectors (quartiers), and plots
 func SearchHabitatPlots(ctx iris.Context) {
 	q := strings.TrimSpace(ctx.URLParam("q"))
 	if len(q) < 2 {

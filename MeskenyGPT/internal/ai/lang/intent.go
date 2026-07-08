@@ -14,8 +14,9 @@ func AnalyzeMessage(msg string) MessageContext {
 	lower := strings.ToLower(msg)
 
 	ctx := MessageContext{
-		Lang:   l,
-		Intent: IntentUnknown,
+		Lang:    l,
+		Intent:  IntentUnknown,
+		RawText: strings.TrimSpace(msg),
 	}
 
 	// ── Deterministic picker tag parsing ─────────────────────────────────────
@@ -41,9 +42,10 @@ func AnalyzeMessage(msg string) MessageContext {
 		return ctx
 	}
 
-	// Greetings — Arabic, French, English
-	if hasAny(lower, msg, "bonjour", "salut", "bonsoir", "coucou", "hey", "hello", "hi", "howdy",
-		"السلام", "سلام", "سلام عليكم", "عليكم السلام", "مرحبا", "أهلا", "مرحباً", "كيف حالك", "ازيك", "كيفك") {
+	// Greetings — Arabic, French, English (word-boundary for short EN tokens)
+	if hasAny(lower, msg, "bonjour", "salut", "bonsoir", "coucou", "hello", "howdy",
+		"السلام", "سلام", "سلام عليكم", "عليكم السلام", "مرحبا", "أهلا", "مرحباً", "كيف حالك", "ازيك", "كيفك") ||
+		hasWord(lower, "hey") || hasWord(lower, "hi") {
 		ctx.Intent = IntentGreeting
 		return ctx
 	}
@@ -54,19 +56,14 @@ func AnalyzeMessage(msg string) MessageContext {
 		return ctx
 	}
 
-	// Rent
-	if hasAny(lower, msg, "للايجار", "للإيجار", "إيجار", "اجار", "à louer", "location", "rent", "rental", "for rent") {
-		if ctx.Intent == IntentUnknown {
-			ctx.Intent = IntentSearchRent
-		}
+	// Rent — Mauritanian Hassaniya incl. للإجاره / كراء (checked before buy; rent wins on conflict).
+	if MessageSignalsRent(msg) {
+		ctx.Intent = IntentSearchRent
 	}
 
 	// Buy (incl. Hassaniya / dialect: تنباع، تنبيع، نبيع، ينباع)
-	if hasAny(lower, msg, "للبيع", "بيع", "شراء", "à vendre", "acheter", "buy", "achat", "for sale", "sale", "vente", "sell", "selling",
-		"تنباع", "تنبيع", "نبيع", "تبيع", "ينباع") {
-		if ctx.Intent == IntentUnknown {
-			ctx.Intent = IntentSearchBuy
-		}
+	if ctx.Intent != IntentSearchRent && MessageSignalsBuy(msg) {
+		ctx = applyBuyFamilyIntent(ctx)
 	}
 
 	// Property type hints
@@ -119,9 +116,12 @@ func AnalyzeMessage(msg string) MessageContext {
 	// City/zone detection — Nouakchott zones
 	// Use pipe-separated OR patterns so Tevragh + الصحراوي in one message are not overwritten.
 	var zoneOR []string
-	if strings.Contains(msg, "تفرغ زينة") || strings.Contains(lower, "tevragh") {
+	if strings.Contains(msg, "تفرغ زينة") || strings.Contains(lower, "tevragh") || strings.Contains(lower, "tevragh-zeina") {
 		ctx.City = "nouakchott"
-		zoneOR = append(zoneOR, "tevragh zeina", "tevragh", "تفرغ", "زينة")
+		zoneOR = append(zoneOR,
+			"tevragh zeina", "tevragh-zeina", "tevraghzeina", "tevragh", "zeina",
+			"تفرغ زينة", "تفرغ", "زينة",
+		)
 	}
 	if strings.Contains(msg, "الصحراوي") || strings.Contains(msg, "صحراوي") || strings.Contains(msg, "البوادي") || strings.Contains(lower, "station africa") {
 		if ctx.City == "" {
@@ -178,6 +178,11 @@ func AnalyzeMessage(msg string) MessageContext {
 	if hasAny(lower, msg, "نواكشوط", "nouakchott") {
 		if ctx.City == "" {
 			ctx.City = "nouakchott"
+		}
+	}
+	if ctx.City == "" {
+		if city := matchCityTypo(lower); city != "" {
+			ctx.City = city
 		}
 	}
 	// "طريق انواذيبو" is usually a Nouakchott road reference, not city Nouadhibou.
@@ -255,6 +260,7 @@ func AnalyzeMessage(msg string) MessageContext {
 		ctx.PlotNumber = pn
 	}
 
+	ResolveTransactionIntent(&ctx, msg)
 	return SanitizeBudgetContext(ctx, msg)
 }
 
@@ -449,6 +455,32 @@ func hasAny(lower, raw string, needles ...string) bool {
 		}
 	}
 	return false
+}
+
+func hasWord(lower, word string) bool {
+	if word == "" {
+		return false
+	}
+	re := regexp.MustCompile(`(?i)(^|[^a-z])` + regexp.QuoteMeta(word) + `([^a-z]|$)`)
+	return re.MatchString(lower)
+}
+
+func matchCityTypo(lower string) string {
+	typos := map[string]string{
+		"noualchott": "nouakchott",
+		"nouakchot":  "nouakchott",
+		"nuakchott":  "nouakchott",
+		"nwakchott":  "nouakchott",
+		"nouakchott": "nouakchott",
+		"nouadhibou": "nouadhibou",
+		"nouadhibo":  "nouadhibou",
+	}
+	for typo, canonical := range typos {
+		if strings.Contains(lower, typo) {
+			return canonical
+		}
+	}
+	return ""
 }
 
 func looksLikeTypeOnlySearch(raw, lower string) bool {

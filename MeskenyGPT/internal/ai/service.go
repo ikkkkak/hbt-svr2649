@@ -9,12 +9,14 @@ import (
 
 	"apartments-clone-server/MeskenyGPT/internal/ai/capture"
 	"apartments-clone-server/MeskenyGPT/internal/ai/client"
+	"apartments-clone-server/MeskenyGPT/internal/ai/escalation"
 	"apartments-clone-server/MeskenyGPT/internal/ai/lang"
 	"apartments-clone-server/MeskenyGPT/internal/ai/property"
 	"apartments-clone-server/MeskenyGPT/internal/ai/rag"
 	"apartments-clone-server/MeskenyGPT/internal/ai/response"
 	"apartments-clone-server/MeskenyGPT/internal/ai/rules"
 	"apartments-clone-server/MeskenyGPT/internal/ai/safety"
+	"apartments-clone-server/MeskenyGPT/internal/ai/vector"
 
 	"github.com/go-redis/redis/v8"
 	"gorm.io/gorm"
@@ -38,6 +40,14 @@ type ChatOutput struct {
 	QuickReplies            []response.QuickReply `json:"quick_replies,omitempty"`
 	SessionID               string            `json:"session_id,omitempty"`
 	InteractionID           uint              `json:"interaction_id,omitempty"`
+	Escalation              *EscalationInfo   `json:"escalation,omitempty"`
+}
+
+type EscalationInfo struct {
+	ID      uint   `json:"id"`
+	Status  string `json:"status"`
+	Urgency string `json:"urgency"`
+	Reason  string `json:"reason"`
 }
 
 // Service is the public AI interface used by HTTP handlers.
@@ -57,6 +67,8 @@ type service struct {
 	retriever rag.Retriever
 	gdb      *gorm.DB
 	rdb      *redis.Client
+	vector     *vector.Engine
+	escalation *escalation.Engine
 }
 
 const lastCardsKeyPrefix = "meskenygpt:last_cards:"
@@ -211,15 +223,18 @@ func NewService(cfg Config, db any, cache any) Service {
 	if rdb, ok := cache.(*redis.Client); ok && rdb != nil {
 		rdbRef = rdb
 	}
+	orClient := client.NewOpenRouterClient(cfg.APIKey, cfg.Model, cfg.TimeoutSeconds)
 	return &service{
 		cfg:       cfg,
-		or:        client.NewOpenRouterClient(cfg.APIKey, cfg.Model, cfg.TimeoutSeconds),
+		or:        orClient,
 		props:     property.NewStore(db),
 		guard:     safety.NewGuard(),
 		logger:    capture.NewDBLogger(),
 		retriever: retr,
-		gdb:      gdbRef,
-		rdb:      rdbRef,
+		gdb:       gdbRef,
+		rdb:       rdbRef,
+		vector:    vector.NewEngine(gdbRef),
+		escalation: escalation.NewEngine(gdbRef),
 	}
 }
 
@@ -281,10 +296,20 @@ func (s *service) HandleChatTurn(ctx context.Context, in ChatInput) (ChatOutput,
 		f.Query = in.Text
 		var props []property.Property
 		var err error
-		if msgCtx.Intent == lang.IntentSearchLand {
-			props, err = s.props.FindLandmarks(ctx, f)
-		} else {
-			props, err = s.props.Find(ctx, f)
+		usedSemantic := false
+		if s.vector != nil && s.vector.Enabled() && msgCtx.Intent != lang.IntentSearchLand {
+			semProps, _, semErr := s.vector.Search(ctx, in.Text, f, 12)
+			if semErr == nil && len(semProps) > 0 {
+				props = semProps
+				usedSemantic = true
+			}
+		}
+		if !usedSemantic {
+			if msgCtx.Intent == lang.IntentSearchLand {
+				props, err = s.props.FindLandmarks(ctx, f)
+			} else {
+				props, err = s.props.Find(ctx, f)
+			}
 		}
 		if err != nil {
 			fmt.Printf("❌ MeskenyGPT property/landmark search error: %v\n", err)
@@ -346,7 +371,7 @@ func (s *service) HandleChatTurn(ctx context.Context, in ChatInput) (ChatOutput,
 
 		out.InteractionID = s.recordTurn(ctx, capture.TurnPathDBSearch, in.SessionID, in.UserID,
 			len(in.History)/2, msgCtx, in.Text, msg.Content, len(cards), elapsed)
-		return out, nil
+		return s.withEscalation(ctx, in, out), nil
 	}
 
 	// Follow-up: user asks to pick best among previous DB cards (needs session cache).
@@ -421,12 +446,12 @@ func (s *service) HandleChatTurn(ctx context.Context, in ChatInput) (ChatOutput,
 	interactionID := s.recordTurn(ctx, capture.TurnPathLLM, in.SessionID, in.UserID,
 		len(in.History)/2, msgCtx, in.Text, msg.Content, -1, elapsed)
 
-	return ChatOutput{
+	return s.withEscalation(ctx, in, ChatOutput{
 		Message:       msg,
 		QuickReplies:  qr,
 		SessionID:     in.SessionID,
 		InteractionID: interactionID,
-	}, nil
+	}), nil
 }
 
 func (s *service) GetGreeting(ctx context.Context, l lang.Lang) (ChatOutput, error) {
@@ -651,4 +676,34 @@ func lastUserLangFromHistory(h []ChatMessage) (lang.Lang, bool) {
 		return lang.DetectLang(content), true
 	}
 	return 0, false
+}
+
+func (s *service) withEscalation(ctx context.Context, in ChatInput, out ChatOutput) ChatOutput {
+	if s.escalation == nil {
+		return out
+	}
+	msgs := make([]escalation.Message, 0, len(in.History)+1)
+	for _, h := range in.History {
+		msgs = append(msgs, escalation.Message{Role: h.Role, Content: h.Content})
+	}
+	msgs = append(msgs, escalation.Message{Role: "user", Content: in.Text})
+	trig := s.escalation.Evaluate(ctx, msgs)
+	if trig == nil {
+		return out
+	}
+	var uid *uint
+	if in.UserID > 0 {
+		uid = &in.UserID
+	}
+	row, err := s.escalation.Execute(ctx, trig, in.SessionID, uid)
+	if err != nil {
+		return out
+	}
+	out.Escalation = &EscalationInfo{
+		ID:      row.ID,
+		Status:  row.Status,
+		Urgency: row.Urgency,
+		Reason:  row.Reason,
+	}
+	return out
 }
