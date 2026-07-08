@@ -672,6 +672,7 @@ func GetHabitatPlotsBySector(ctx iris.Context) {
 			ctx.JSON(iris.Map{"error": "Failed to fetch plots"})
 			return
 		}
+		fillHabitatPlotsDerivedFields(plots)
 		enrichHabitatPlotsWithPlanSector(plots, uint(sectorID))
 		ctx.JSON(iris.Map{
 			"success": true,
@@ -707,6 +708,7 @@ func GetHabitatPlotsBySector(ctx iris.Context) {
 		ctx.JSON(iris.Map{"error": "Failed to fetch plots"})
 		return
 	}
+	fillHabitatPlotsDerivedFields(plots)
 	enrichHabitatPlotsWithPlanSector(plots, uint(sectorID))
 	ctx.JSON(iris.Map{
 		"success": true,
@@ -806,6 +808,7 @@ func GetHabitatPlotsInBBox(ctx iris.Context) {
 				ctx.JSON(iris.Map{"error": "Failed to fetch sector plots"})
 				return
 			}
+			fillHabitatPlotsDerivedFields(sectorPlots)
 			enrichHabitatPlotsWithPlanSector(sectorPlots, uint(sectorID))
 			ctx.JSON(iris.Map{
 				"success": true,
@@ -1189,6 +1192,7 @@ func GetHabitatPlot(ctx iris.Context) {
 		return
 	}
 	ensureHabitatPlotPlanSector(&plot)
+	fillHabitatPlotDerivedFields(&plot)
 	ctx.JSON(iris.Map{"success": true, "data": plot})
 }
 
