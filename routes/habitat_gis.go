@@ -1177,9 +1177,11 @@ func GetHabitatPlot(ctx iris.Context) {
 		return
 	}
 	ensureHabitatPlotPlanSector(&plot)
+	before := plot
 	plots := []models.HabitatPlot{plot}
 	fillHabitatPlotsDerivedFields(storage.DB, plots)
 	plot = plots[0]
+	logHabitatPlotAPI("GET /api/habitat/plots/{plotId}", &before, &plot)
 	ctx.JSON(iris.Map{"success": true, "data": plot})
 }
 
@@ -1232,6 +1234,15 @@ func GetHabitatPlotGeometryBatch(ctx iris.Context) {
 
 	fillHabitatPlotsDerivedFields(storage.DB, plots)
 
+	beforePlots := append([]models.HabitatPlot(nil), plots...)
+	logHabitatPlotAPIBatch("GET /api/habitat/plots/geometry", beforePlots, 5)
+	for i := range plots {
+		p := &plots[i]
+		if p.ID == 396474 || strings.TrimSpace(p.PlotNumber) == "501" {
+			logHabitatPlotAPI("GET /api/habitat/plots/geometry [watch]", &beforePlots[i], p)
+		}
+	}
+
 	ctx.JSON(iris.Map{"success": true, "data": plots})
 }
 
@@ -1274,6 +1285,13 @@ func SearchHabitatPlots(ctx iris.Context) {
 	))
 	plotDB.Limit(40).Find(&plots)
 	fillHabitatPlotsDerivedFields(storage.DB, plots)
+	logHabitatPlotAPIBatch("GET /api/habitat/search", plots, 5)
+	for i := range plots {
+		p := &plots[i]
+		if p.ID == 396474 || strings.TrimSpace(p.PlotNumber) == "501" {
+			logHabitatPlotAPI("GET /api/habitat/search [watch]", p, p)
+		}
+	}
 
 	ctx.JSON(iris.Map{
 		"success": true,
