@@ -21,6 +21,13 @@ func extractHabitatPlotFromRawProperties(plot *models.HabitatPlot) bool {
 	if err := json.Unmarshal(plot.RawProperties, &props); err != nil || len(props) == 0 {
 		return false
 	}
+	return applyHabitatPropsToPlot(plot, props)
+}
+
+func applyHabitatPropsToPlot(plot *models.HabitatPlot, props map[string]any) bool {
+	if plot == nil || len(props) == 0 {
+		return false
+	}
 	changed := false
 
 	if plot.PlotNumber == "" {
@@ -115,7 +122,64 @@ func extractHabitatPlotFromRawProperties(plot *models.HabitatPlot) bool {
 			changed = true
 		}
 	}
+	changed = scanLooseHabitatProps(plot, props) || changed
 	return changed
+}
+
+func scanLooseHabitatProps(plot *models.HabitatPlot, props map[string]any) bool {
+	if plot == nil || len(props) == 0 {
+		return false
+	}
+	changed := false
+	for key, val := range props {
+		if val == nil {
+			continue
+		}
+		kl := strings.ToLower(strings.TrimSpace(key))
+		switch {
+		case plot.ELValue == nil && (kl == "el" || kl == "el_value" || kl == "elevation" || kl == "elev" || strings.HasSuffix(kl, "_el")):
+			if f, ok := anyToFloat(val); ok {
+				plot.ELValue = &f
+				changed = true
+			}
+		case plot.ILValue == nil && (kl == "il" || kl == "il_value" || strings.HasSuffix(kl, "_il")):
+			if f, ok := anyToFloat(val); ok {
+				plot.ILValue = &f
+				changed = true
+			}
+		case plot.RESValue == nil && (kl == "res" || kl == "res_value" || strings.HasSuffix(kl, "_res")):
+			if f, ok := anyToFloat(val); ok {
+				plot.RESValue = &f
+				changed = true
+			}
+		case plot.DimensionsString == "" && (strings.Contains(kl, "dimension") || kl == "dim" || kl == "cotes"):
+			if s := strings.TrimSpace(fmt.Sprint(val)); s != "" && dimensionPartCount(s) >= 3 {
+				plot.DimensionsString = normalizeDimensionsString(s)
+				changed = true
+			}
+		}
+	}
+	return changed
+}
+
+func anyToFloat(v any) (float64, bool) {
+	switch t := v.(type) {
+	case float64:
+		return t, true
+	case float32:
+		return float64(t), true
+	case int:
+		return float64(t), true
+	case int64:
+		return float64(t), true
+	case json.Number:
+		f, err := t.Float64()
+		return f, err == nil
+	case string:
+		return parseFloatString(t)
+	default:
+		return 0, false
+	}
 }
 
 func plotNeedsRawHydration(plot *models.HabitatPlot) bool {
@@ -127,6 +191,8 @@ func plotNeedsRawHydration(plot *models.HabitatPlot) bool {
 		plot.RESValue == nil ||
 		plot.DimensionsString == "" ||
 		len(plot.SidesM) == 0 ||
+		plot.LengthM == nil ||
+		plot.WidthM == nil ||
 		plotAreaMissing(plot.AreaM2, plot.AreaRounded)
 }
 
@@ -159,6 +225,7 @@ func hydrateHabitatPlotsFromRawProperties(db *gorm.DB, plots []models.HabitatPlo
 
 	for i := range plots {
 		extractHabitatPlotFromRawProperties(&plots[i])
+		extractHabitatPlotFromCorners(&plots[i])
 	}
 }
 
@@ -291,9 +358,14 @@ func backfillHabitatPlotColumnsFromRaw(db *gorm.DB, batchSize int) (updated int,
 	for {
 		var batch []models.HabitatPlot
 		q := db.Select("id", "plot_number", "l_value", "i_value", "area_m2", "area_rounded",
-			"dimensions_string", "length_m", "width_m", "sides_m",
-			"il_value", "el_value", "res_value", "raw_properties").
-			Where("raw_properties IS NOT NULL AND raw_properties::text NOT IN ('null', '{}')").
+			"dimensions_string", "length_m", "width_m", "sides_m", "perimeter_m",
+			"il_value", "el_value", "res_value", "raw_properties",
+			"geom_geojson", "corners").
+			Where(`(
+				(raw_properties IS NOT NULL AND raw_properties::text NOT IN ('null', '{}'))
+				OR (geom_geojson IS NOT NULL AND geom_geojson::text NOT IN ('null', '{}'))
+				OR (corners IS NOT NULL AND corners::text NOT IN ('null', '{}'))
+			)`).
 			Order("id ASC").
 			Limit(batchSize)
 		if lastID > 0 {
@@ -307,7 +379,10 @@ func backfillHabitatPlotColumnsFromRaw(db *gorm.DB, batchSize int) (updated int,
 		}
 		for i := range batch {
 			p := batch[i]
-			if !extractHabitatPlotFromRawProperties(&p) {
+			fillHabitatPlotDerivedFields(&p)
+			if p.PlotNumber == "" && p.DimensionsString == "" && len(p.SidesM) == 0 &&
+				p.ELValue == nil && p.ILValue == nil && p.RESValue == nil &&
+				plotAreaMissing(p.AreaM2, p.AreaRounded) {
 				continue
 			}
 			if err := db.Model(&models.HabitatPlot{}).Where("id = ?", p.ID).Updates(map[string]interface{}{
@@ -316,6 +391,7 @@ func backfillHabitatPlotColumnsFromRaw(db *gorm.DB, batchSize int) (updated int,
 				"i_value":            p.IValue,
 				"area_m2":            p.AreaM2,
 				"area_rounded":       p.AreaRounded,
+				"perimeter_m":        p.PerimeterM,
 				"dimensions_string":  p.DimensionsString,
 				"length_m":           p.LengthM,
 				"width_m":            p.WidthM,

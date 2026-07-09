@@ -94,18 +94,101 @@ func plotAreaMissing(area *float64, rounded *int) bool {
 	return true
 }
 
+func ringNearlyEqual(a, b geoLatLng, eps float64) bool {
+	return math.Abs(a.Lat-b.Lat) <= eps && math.Abs(a.Lng-b.Lng) <= eps
+}
+
+func sideLengthsFromRing(ring []geoLatLng) []float64 {
+	if len(ring) < 2 {
+		return nil
+	}
+	pts := ring
+	if len(ring) > 3 && ringNearlyEqual(ring[0], ring[len(ring)-1], 1e-9) {
+		pts = ring[:len(ring)-1]
+	}
+	if len(pts) < 2 {
+		return nil
+	}
+	sides := make([]float64, 0, len(pts))
+	for i := range pts {
+		j := (i + 1) % len(pts)
+		d := haversineMeters(pts[i], pts[j])
+		if d > 0.01 {
+			sides = append(sides, d)
+		}
+	}
+	return sides
+}
+
+func primaryRingFromPlot(plot *models.HabitatPlot) []geoLatLng {
+	if plot == nil {
+		return nil
+	}
+	if len(plot.GeomGeoJSON) > 0 {
+		if ring := primaryRingFromGeoJSON(plot.GeomGeoJSON); len(ring) >= 3 {
+			return ring
+		}
+	}
+	if len(plot.Corners) > 0 {
+		if ring := primaryRingFromCornersJSON(plot.Corners); len(ring) >= 3 {
+			return ring
+		}
+	}
+	return nil
+}
+
+func fillSidesFromRing(plot *models.HabitatPlot, ring []geoLatLng) {
+	if plot == nil || len(ring) < 3 {
+		return
+	}
+	if len(plot.SidesM) > 0 && dimensionPartCount(plot.DimensionsString) >= 3 {
+		return
+	}
+	sides := sideLengthsFromRing(ring)
+	if len(sides) < 3 {
+		return
+	}
+	plot.SidesM = models.Float64Slice(sides)
+	if plot.DimensionsString == "" || dimensionPartCount(plot.DimensionsString) < 3 {
+		plot.DimensionsString = formatSideLengths(sides)
+	}
+	if plot.LengthM == nil || plot.WidthM == nil {
+		minSide, maxSide := sides[0], sides[0]
+		for _, s := range sides[1:] {
+			if s < minSide {
+				minSide = s
+			}
+			if s > maxSide {
+				maxSide = s
+			}
+		}
+		if plot.LengthM == nil && maxSide > 0 {
+			plot.LengthM = &maxSide
+		}
+		if plot.WidthM == nil && minSide > 0 {
+			plot.WidthM = &minSide
+		}
+	}
+	if plot.PerimeterM == nil {
+		var perimeter float64
+		for _, s := range sides {
+			perimeter += s
+		}
+		if perimeter > 0 {
+			plot.PerimeterM = &perimeter
+		}
+	}
+}
+
 func fillHabitatPlotDerivedFields(plot *models.HabitatPlot) {
 	if plot == nil {
 		return
 	}
 
 	extractHabitatPlotFromRawProperties(plot)
+	extractHabitatPlotFromCorners(plot)
 
-	if len(plot.GeomGeoJSON) == 0 {
-		return
-	}
-
-	ring := primaryRingFromGeoJSON(plot.GeomGeoJSON)
+	ring := primaryRingFromPlot(plot)
 	if len(ring) < 3 {
 		return
 	}
@@ -121,6 +204,8 @@ func fillHabitatPlotDerivedFields(plot *models.HabitatPlot) {
 			}
 		}
 	}
+
+	fillSidesFromRing(plot, ring)
 }
 
 func fillHabitatPlotsDerivedFields(db *gorm.DB, plots []models.HabitatPlot) {

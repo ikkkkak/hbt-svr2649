@@ -1230,6 +1230,8 @@ func GetHabitatPlotGeometryBatch(ctx iris.Context) {
 		return
 	}
 
+	fillHabitatPlotsDerivedFields(storage.DB, plots)
+
 	ctx.JSON(iris.Map{"success": true, "data": plots})
 }
 
@@ -1283,7 +1285,7 @@ func SearchHabitatPlots(ctx iris.Context) {
 }
 
 // POST /api/admin/habitat/backfill-plot-fields
-// Copies el_value, dimensions, sides_m, area, etc. from raw_properties into plot columns.
+// Copies el_value, dimensions, sides_m, area, etc. from raw_properties, corners, and geometry.
 func AdminHabitatBackfillPlotFields(ctx iris.Context) {
 	updated, err := backfillHabitatPlotColumnsFromRaw(storage.DB, 500)
 	if err != nil {
@@ -1294,6 +1296,6 @@ func AdminHabitatBackfillPlotFields(ctx iris.Context) {
 	ctx.JSON(iris.Map{
 		"success": true,
 		"updated": updated,
-		"message": fmt.Sprintf("Backfilled %d plots from raw_properties", updated),
+		"message": fmt.Sprintf("Backfilled %d plots from raw_properties, corners, and geometry", updated),
 	})
 }
