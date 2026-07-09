@@ -121,7 +121,10 @@ func bootstrapBuildPropertySales(userID uint, deviceID string, page, limit int, 
 			Where("NOT EXISTS (SELECT 1 FROM user_blocked_organizations ubo WHERE ubo.user_id = ? AND ubo.organization_id = property_sales.organization_id AND ubo.status = 'active')", userID)
 	}
 
-	properties, totalCount, hasMore, nextCursor := buildSmartPropertyFeedPage(q, userID, deviceID, page, limit)
+	properties, totalCount, hasMore, nextCursor := fetchPropertySalesPageNewestFirst(q, page, limit)
+	if len(properties) > 0 {
+		go markPropertyFeedSeen(properties, userID, deviceID)
+	}
 	for i := range properties {
 		p := &properties[i]
 		p.Title = utils.ResolveLocalizedText(p.Title, p.TitleTranslations, lang)
@@ -137,7 +140,7 @@ func bootstrapBuildPropertySales(userID uint, deviceID string, page, limit int, 
 		"hasMore":    hasMore,
 		"nextCursor": nextCursor,
 		"meta":       iris.Map{"total": totalCount, "page": page, "limit": limit},
-		"source":     "smart_feed",
+		"source":     "database",
 	}
 
 	if userID == 0 && page == 1 && len(properties) > 0 {

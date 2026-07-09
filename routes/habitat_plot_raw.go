@@ -68,14 +68,15 @@ func extractHabitatPlotFromRawProperties(plot *models.HabitatPlot) bool {
 			changed = true
 		}
 	}
-	if len(plot.SidesM) == 0 {
+	if len(plot.SidesM) == 0 || dimensionPartCount(plot.DimensionsString) < 3 {
 		if sides := firstFloatSlice(props, "sides_m", "sides", "SIDES", "sidesM", "cotes", "COTES"); len(sides) >= 3 {
 			plot.SidesM = models.Float64Slice(sides)
+			plot.DimensionsString = formatSideLengths(sides)
 			changed = true
 		}
 	}
-	if plot.DimensionsString == "" {
-		if s := firstString(props, "dimensions_string", "dimensions", "DIMENSIONS", "Dimensions", "dim", "DIM"); s != "" {
+	if plot.DimensionsString == "" || dimensionPartCount(plot.DimensionsString) < 3 {
+		if s := firstString(props, "dimensions_string", "dimensions", "DIMENSIONS", "Dimensions", "dim", "DIM"); s != "" && dimensionPartCount(s) >= 3 {
 			plot.DimensionsString = normalizeDimensionsString(s)
 			changed = true
 		}

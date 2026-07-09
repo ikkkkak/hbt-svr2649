@@ -22,16 +22,17 @@ import (
 // in `videos` actually surfaces on discovery cards before/without admin action.
 // rentDiscoveryFilters holds optional query filters for GET …/criteria/:id/properties (rent listings).
 type rentDiscoveryFilters struct {
-	PropertyType string
-	CityID       *uint
-	ZoneID       *uint
-	QuartierID   *uint
-	MinPrice     *float64
-	MaxPrice     *float64
+	PropertyType         string
+	PropertyCategoryID   *uint
+	CityID               *uint
+	ZoneID               *uint
+	QuartierID           *uint
+	MinPrice             *float64
+	MaxPrice             *float64
 }
 
 func (f rentDiscoveryFilters) active() bool {
-	return f.PropertyType != "" || f.CityID != nil || f.ZoneID != nil || f.QuartierID != nil ||
+	return f.PropertyType != "" || f.PropertyCategoryID != nil || f.CityID != nil || f.ZoneID != nil || f.QuartierID != nil ||
 		f.MinPrice != nil || f.MaxPrice != nil
 }
 
@@ -44,6 +45,15 @@ func parseRentDiscoveryFilters(ctx iris.Context) rentDiscoveryFilters {
 	pt = strings.ToLower(strings.TrimSpace(pt))
 	if pt != "" && pt != "all" {
 		f.PropertyType = pt
+	}
+	for _, key := range []string{"property_category_id", "category_id", "categoryId"} {
+		if v := strings.TrimSpace(ctx.URLParam(key)); v != "" {
+			if n, err := strconv.ParseUint(v, 10, 32); err == nil && n > 0 {
+				u := uint(n)
+				f.PropertyCategoryID = &u
+				break
+			}
+		}
 	}
 	if v := strings.TrimSpace(ctx.URLParam("city_id")); v != "" {
 		if n, err := strconv.ParseUint(v, 10, 32); err == nil && n > 0 {
@@ -80,6 +90,11 @@ func propertyMatchesRentDiscovery(p models.Property, f rentDiscoveryFilters) boo
 	if f.PropertyType != "" {
 		pt := strings.ToLower(strings.TrimSpace(p.PropertyType))
 		if pt != f.PropertyType {
+			return false
+		}
+	}
+	if f.PropertyCategoryID != nil {
+		if p.PropertyCategoryID == nil || *p.PropertyCategoryID != *f.PropertyCategoryID {
 			return false
 		}
 	}

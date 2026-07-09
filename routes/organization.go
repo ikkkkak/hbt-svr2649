@@ -701,6 +701,165 @@ func AdminCreateOrganization(ctx iris.Context) {
 	})
 }
 
+// AdminUpdateOrganization updates organization details (admin only). Bypasses owner 30-day edit cooldowns.
+func AdminUpdateOrganization(ctx iris.Context) {
+	adminUID, ok := ctx.Values().Get("userID").(uint)
+	if !ok || adminUID == 0 {
+		ctx.StatusCode(http.StatusUnauthorized)
+		ctx.JSON(iris.Map{"error": "User ID not found in token"})
+		return
+	}
+
+	orgID, err := strconv.ParseUint(ctx.Params().Get("orgID"), 10, 32)
+	if err != nil || orgID == 0 {
+		ctx.StatusCode(http.StatusBadRequest)
+		ctx.JSON(iris.Map{"error": "Invalid organization ID"})
+		return
+	}
+
+	var organization models.Organization
+	if err := storage.DB.First(&organization, orgID).Error; err != nil {
+		ctx.StatusCode(http.StatusNotFound)
+		ctx.JSON(iris.Map{"error": "Organization not found"})
+		return
+	}
+
+	var input struct {
+		Name          *string `json:"name"`
+		Description   *string `json:"description"`
+		Logo          *string `json:"logo"`
+		BannerImage   *string `json:"banner_image"`
+		Website       *string `json:"website"`
+		Phone         *string `json:"phone"`
+		Email         *string `json:"email"`
+		Address       *string `json:"address"`
+		City          *string `json:"city"`
+		State         *string `json:"state"`
+		Country       *string `json:"country"`
+		PostalCode    *string `json:"postal_code"`
+		LicenseNumber *string `json:"license_number"`
+		TaxID         *string `json:"tax_id"`
+		BusinessType  *string `json:"business_type"`
+		OwnerUserID   *uint   `json:"owner_user_id"`
+		Status        *string `json:"status"`
+		IsActive      *bool   `json:"is_active"`
+	}
+
+	if err := ctx.ReadJSON(&input); err != nil {
+		ctx.StatusCode(http.StatusBadRequest)
+		ctx.JSON(iris.Map{"error": "Invalid JSON"})
+		return
+	}
+
+	if input.Name != nil {
+		name := strings.TrimSpace(*input.Name)
+		if name == "" {
+			ctx.StatusCode(http.StatusBadRequest)
+			ctx.JSON(iris.Map{"error": "Name cannot be empty"})
+			return
+		}
+		organization.Name = name
+	}
+	if input.Description != nil {
+		organization.Description = strings.TrimSpace(*input.Description)
+	}
+	if input.Logo != nil {
+		organization.Logo = strings.TrimSpace(*input.Logo)
+	}
+	if input.BannerImage != nil {
+		organization.BannerImage = strings.TrimSpace(*input.BannerImage)
+	}
+	if input.Website != nil {
+		organization.Website = strings.TrimSpace(*input.Website)
+	}
+	if input.Phone != nil {
+		phone := strings.TrimSpace(*input.Phone)
+		if phone == "" {
+			ctx.StatusCode(http.StatusBadRequest)
+			ctx.JSON(iris.Map{"error": "Phone cannot be empty"})
+			return
+		}
+		phoneCanon, phoneOK := canonicalMauritanianPhone(phone)
+		if !phoneOK {
+			ctx.StatusCode(http.StatusBadRequest)
+			ctx.JSON(iris.Map{
+				"error": "Invalid Mauritanian phone: use 8 digits (e.g. 45123456) or +22245123456",
+			})
+			return
+		}
+		organization.Phone = phoneCanon
+	}
+	if input.Email != nil {
+		organization.Email = strings.TrimSpace(*input.Email)
+	}
+	if input.Address != nil {
+		organization.Address = strings.TrimSpace(*input.Address)
+	}
+	if input.City != nil {
+		organization.City = strings.TrimSpace(*input.City)
+	}
+	if input.State != nil {
+		organization.State = strings.TrimSpace(*input.State)
+	}
+	if input.Country != nil {
+		organization.Country = strings.TrimSpace(*input.Country)
+	}
+	if input.PostalCode != nil {
+		organization.PostalCode = strings.TrimSpace(*input.PostalCode)
+	}
+	if input.LicenseNumber != nil {
+		organization.LicenseNumber = strings.TrimSpace(*input.LicenseNumber)
+	}
+	if input.TaxID != nil {
+		organization.TaxID = strings.TrimSpace(*input.TaxID)
+	}
+	if input.BusinessType != nil {
+		organization.BusinessType = strings.TrimSpace(*input.BusinessType)
+	}
+	if input.OwnerUserID != nil && *input.OwnerUserID != 0 {
+		var ownerUser models.User
+		if err := storage.DB.First(&ownerUser, *input.OwnerUserID).Error; err != nil {
+			ctx.StatusCode(http.StatusBadRequest)
+			ctx.JSON(iris.Map{"error": "owner_user_id does not match an existing user"})
+			return
+		}
+		organization.OwnerID = *input.OwnerUserID
+	}
+	if input.Status != nil {
+		status := strings.TrimSpace(*input.Status)
+		switch status {
+		case "pending", "approved", "rejected", "suspended":
+			organization.Status = status
+		default:
+			ctx.StatusCode(http.StatusBadRequest)
+			ctx.JSON(iris.Map{"error": "Invalid status"})
+			return
+		}
+	}
+	if input.IsActive != nil {
+		organization.IsActive = *input.IsActive
+	}
+
+	if err := storage.DB.Save(&organization).Error; err != nil {
+		ctx.StatusCode(http.StatusInternalServerError)
+		ctx.JSON(iris.Map{"error": "Failed to update organization"})
+		return
+	}
+
+	if err := storage.DB.Preload("Owner").First(&organization, organization.ID).Error; err != nil {
+		ctx.StatusCode(http.StatusInternalServerError)
+		ctx.JSON(iris.Map{"error": "Updated but failed to reload organization"})
+		return
+	}
+
+	orgmember.LogOrganizationAudit(organization.ID, adminUID, models.ActionOrgSettingsUpdated, models.ActionTypeOrganizationSettings, "organization", &organization.ID, "Organization updated by admin", "", "")
+
+	ctx.JSON(iris.Map{
+		"message":      "Organization updated successfully",
+		"organization": organization,
+	})
+}
+
 // AdminUpdateOrganizationStatus updates organization status (admin only)
 func AdminUpdateOrganizationStatus(ctx iris.Context) {
 	orgID, _ := strconv.ParseUint(ctx.Params().Get("orgID"), 10, 32)

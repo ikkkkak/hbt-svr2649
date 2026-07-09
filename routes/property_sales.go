@@ -2026,7 +2026,7 @@ func GetPublishedProperties(ctx iris.Context) {
 		ctx.URLParam("max_area") != "" || ctx.URLParam("quartier_id") != "" ||
 		ctx.URLParam("min_price") != "" || ctx.URLParam("max_price") != "" ||
 		ctx.URLParam("investment_opportunity") != "" || ctx.URLParam("property_type") != ""
-	smartFeedMode := strings.ToLower(strings.TrimSpace(ctx.URLParamDefault("feed_mode", "smart"))) != "legacy"
+	smartFeedMode := strings.ToLower(strings.TrimSpace(ctx.URLParamDefault("feed_mode", "legacy"))) == "smart"
 
 	// Card feed omits heavy columns — default to card unless client asks for full payload.
 	fieldsParam := strings.TrimSpace(ctx.URLParamDefault("fields", "card"))
@@ -2348,120 +2348,9 @@ type smartInterestProfile struct {
 	InvestInterest bool // from device/user preference "investment"
 }
 
-func buildSmartPropertyFeedPage(q *gorm.DB, userID uint, deviceID string, page, limit int) ([]models.PropertySale, int64, bool, string) {
-	// Request salt: ensures stable "random" tie-breaking between reloads.
-	// This prevents the feed from looking identical when multiple properties
-	// share the same score/timestamps (common on fresh installs or small datasets).
-	reqSalt := uint64(time.Now().UnixNano())
-	jitterForID := func(id uint) float64 {
-		// Deterministic small jitter in [0, ~1e-6]
-		// Using modulus keeps it tiny so it only breaks ties.
-		x := (uint64(id) * 11400714819323198485) ^ (reqSalt + uint64(id<<1))
-		return float64(x%1000) / 1e9
-	}
-
-	// poolTarget controls candidate pool size for ranking (smaller = faster on weak networks).
-	poolTarget := maxInt(150, limit*20)
-	if poolTarget > 400 {
-		poolTarget = 400
-	}
-
-	candidatesLimit := poolTarget
-	var candidates []models.PropertySale
-	candQ := q.Session(&gorm.Session{}).Limit(candidatesLimit)
-	// Smart feed always skips huge text/json columns — detail screen loads full record.
-	candQ = candQ.Omit(
-		"Description", "DescriptionTranslations",
-		"FloorPlans", "Neighborhood",
-		"Features", "Amenities", "HostPrivateNote", "VerificationNotes", "VirtualTour",
-	)
-	if err := candQ.Find(&candidates).Error; err != nil {
-		return []models.PropertySale{}, 0, false, ""
-	}
-	if len(candidates) == 0 {
-		return []models.PropertySale{}, 0, false, ""
-	}
-
-	profile := loadSmartInterestProfile(userID, deviceID)
-
-	// IMPORTANT UX RULE:
-	// Never "hide" properties from the feed just because they were seen before.
-	// We only deprioritize recently-seen items so the feed feels fresh,
-	// but pagination must always be able to reach all available properties.
-	lastSeen := loadLastSeenMap(userID, deviceID, 30*24*time.Hour)
-	working := candidates
-
-	sort.SliceStable(working, func(i, j int) bool {
-		pi := working[i]
-		pj := working[j]
-
-		si := smartPropertyScore(pi, profile)
-		sj := smartPropertyScore(pj, profile)
-
-		// Prefer listings with images (faster engagement, better UX).
-		if len(pi.Images) > 0 {
-			si += 8
-		}
-		if len(pj.Images) > 0 {
-			sj += 8
-		}
-
-		// Verified broker listings rank higher in search/feed.
-		if saleListingHasVerifiedBroker(pi) {
-			si += 15
-		}
-		if saleListingHasVerifiedBroker(pj) {
-			sj += 15
-		}
-
-		// Deprioritize recently seen items (but never exclude them).
-		// This keeps the feed fresh while still allowing pagination to reach everything.
-		// Gold listings recover visibility faster (admin-promoted distribution).
-		if ts, ok := lastSeen[pi.ID]; ok {
-			hours := time.Since(ts).Hours()
-			pen := 0.0
-			if hours < 1 {
-				pen = 25
-			} else if hours < 24 {
-				pen = 14
-			} else if hours < 72 {
-				pen = 6
-			}
-			if pi.IsGold {
-				pen *= 0.38
-			}
-			si -= pen
-		}
-		if ts, ok := lastSeen[pj.ID]; ok {
-			hours := time.Since(ts).Hours()
-			pen := 0.0
-			if hours < 1 {
-				pen = 25
-			} else if hours < 24 {
-				pen = 14
-			} else if hours < 72 {
-				pen = 6
-			}
-			if pj.IsGold {
-				pen *= 0.38
-			}
-			sj -= pen
-		}
-
-		// Tie-break / jitter: if scores are equal (or nearly equal),
-		// requestSalt rotates results without changing eligibility.
-		si += jitterForID(pi.ID)
-		sj += jitterForID(pj.ID)
-		return si > sj
-	})
-
-	mixed := smartDiversityMix(working, poolTarget)
-	if len(mixed) == 0 {
-		mixed = working
-	}
-
-	// Real pagination window: page N must return a non-overlapping slice
-	// so clients can append reliably without dedupe stall.
+// fetchPropertySalesPageNewestFirst paginates property sales newest-first (created_at DESC).
+// Gold status does not affect ordering.
+func fetchPropertySalesPageNewestFirst(q *gorm.DB, page, limit int) ([]models.PropertySale, int64, bool, string) {
 	if page < 1 {
 		page = 1
 	}
@@ -2469,36 +2358,37 @@ func buildSmartPropertyFeedPage(q *gorm.DB, userID uint, deviceID string, page, 
 		limit = 10
 	}
 	offset := (page - 1) * limit
-	if offset >= len(mixed) {
-		return []models.PropertySale{}, int64(len(mixed)), false, ""
-	}
-	end := offset + limit
-	if end > len(mixed) {
-		end = len(mixed)
-	}
-	items := mixed[offset:end]
 
-	// DEBUG (temporary): log returned IDs per page to verify pagination correctness.
-	// Safe to remove once verified in production logs.
-	if len(items) > 0 {
-		head := make([]uint, 0, len(items))
-		for _, it := range items {
-			head = append(head, it.ID)
-		}
-		log.Printf("[smart_feed] page=%d limit=%d returned=%d ids=%v", page, limit, len(items), head)
-	} else {
-		log.Printf("[smart_feed] page=%d limit=%d returned=0", page, limit)
+	var totalCount int64
+	if err := q.Session(&gorm.Session{}).Count(&totalCount).Error; err != nil {
+		totalCount = int64(offset + limit + 1)
 	}
 
-	// Never block feed response on seen-tracking writes.
-	go markPropertyFeedSeen(items, userID, deviceID)
+	var properties []models.PropertySale
+	pageQ := q.Session(&gorm.Session{}).
+		Order("property_sales.created_at DESC, property_sales.id DESC").
+		Offset(offset).
+		Limit(limit)
+	if err := pageQ.Find(&properties).Error; err != nil {
+		return []models.PropertySale{}, 0, false, ""
+	}
 
-	hasMore := end < len(mixed)
+	hasMore := int64(offset+len(properties)) < totalCount
 	next := ""
 	if hasMore {
 		next = strconv.Itoa(page + 1)
 	}
-	return items, int64(len(mixed)), hasMore, next
+	return properties, totalCount, hasMore, next
+}
+
+func buildSmartPropertyFeedPage(q *gorm.DB, userID uint, deviceID string, page, limit int) ([]models.PropertySale, int64, bool, string) {
+	// Smart feed currently uses the same newest-first ordering as legacy mode.
+	// Gold badges remain on cards; ranking boosts can be reintroduced later without pinning gold.
+	items, totalCount, hasMore, next := fetchPropertySalesPageNewestFirst(q, page, limit)
+	if len(items) > 0 {
+		go markPropertyFeedSeen(items, userID, deviceID)
+	}
+	return items, totalCount, hasMore, next
 }
 
 func loadLastSeenMap(userID uint, deviceID string, within time.Duration) map[uint]time.Time {
@@ -2649,9 +2539,6 @@ func smartPropertyScore(p models.PropertySale, profile smartInterestProfile) flo
 	now := time.Now()
 	age := now.Sub(p.CreatedAt)
 
-	if p.IsGold {
-		score += 78
-	}
 	if profile.InvestInterest && p.IsInvestmentOpportunity {
 		score += 20
 	}

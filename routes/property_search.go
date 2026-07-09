@@ -142,10 +142,20 @@ func SearchProperties(ctx iris.Context) {
 		q = q.Where("property_type = ?", pTypeParam)
 	}
 
-	// Property category filter
-	if categoryID := strings.TrimSpace(ctx.URLParam("categoryId")); categoryID != "" {
+	// Property category filter (column + legacy property_categories join)
+	categoryID := strings.TrimSpace(ctx.URLParam("categoryId"))
+	if categoryID == "" {
+		categoryID = strings.TrimSpace(ctx.URLParam("category_id"))
+	}
+	if categoryID == "" {
+		categoryID = strings.TrimSpace(ctx.URLParam("property_category_id"))
+	}
+	if categoryID != "" {
 		fmt.Printf("🔍 Applying category filter: %s\n", categoryID)
-		q = q.Where("property_category_id = ?", categoryID)
+		q = q.Where(
+			"properties.property_category_id = ? OR properties.id IN (SELECT property_id FROM property_categories WHERE category_id = ?)",
+			categoryID, categoryID,
+		)
 	}
 	if minPrice, err := ctx.URLParamInt("minPrice"); err == nil && minPrice > 0 {
 		fmt.Printf("🔍 Applying min price filter: %d\n", minPrice)

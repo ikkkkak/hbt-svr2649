@@ -1478,6 +1478,7 @@ func main() {
 	{
 		adminOrganizations.Get("/", routes.AdminGetOrganizations)
 		adminOrganizations.Post("/", routes.AdminCreateOrganization)
+		adminOrganizations.Patch("/{orgID:uint}", routes.AdminUpdateOrganization)
 		adminOrganizations.Patch("/{orgID:uint}/status", routes.AdminUpdateOrganizationStatus)
 	}
 
@@ -1522,6 +1523,7 @@ func main() {
 		habitat.Get("/plans/{planId:uint}/sectors", routes.GetHabitatSectorsByPlan)
 		habitat.Get("/sectors/{sectorId:uint}/plots", routes.GetHabitatPlotsBySector)
 		habitat.Get("/plots/bbox", routes.GetHabitatPlotsInBBox)
+		habitat.Get("/plots/geometry", routes.GetHabitatPlotGeometryBatch)
 		habitat.Get("/plots/lookup", routes.LookupHabitatPlotForListing)
 		habitat.Get("/plots/lookup_in_sector", routes.LookupHabitatPlotInSector)
 		habitat.Get("/plots/{plotId:uint}/for_sale_landmark", routes.GetForSaleLandmarkByPlot)

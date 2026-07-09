@@ -641,10 +641,12 @@ func GetHabitatSectorsByPlan(ctx iris.Context) {
 // GET /api/habitat/sectors/{sectorId}/plots
 // Query: page, limit (max 1000), or all=true to return every plot in the sector (max 20000).
 // map=true omits raw_properties/sides_m but includes all fields needed for the plot callout card.
+// lite=true omits geometry — use for bulk quartier index; fetch geometry separately for visible plots.
 func GetHabitatPlotsBySector(ctx iris.Context) {
 	sectorID, _ := strconv.ParseUint(ctx.Params().Get("sectorId"), 10, 32)
 	fetchAll := ctx.URLParam("all") == "true" || ctx.URLParam("all") == "1"
 	mapMode := ctx.URLParam("map") == "true" || ctx.URLParam("map") == "1"
+	liteMode := ctx.URLParam("lite") == "true" || ctx.URLParam("lite") == "1"
 
 	var total int64
 	storage.DB.Model(&models.HabitatPlot{}).Where("sector_id = ?", uint(sectorID)).Count(&total)
@@ -652,7 +654,10 @@ func GetHabitatPlotsBySector(ctx iris.Context) {
 	forSaleJoin := habitatForSaleJoinSQL
 	forSaleExpr := habitatForSaleSelectExpr()
 	plotSelect := "habitat_plots.*, " + forSaleExpr
-	if mapMode {
+	switch {
+	case liteMode:
+		plotSelect = habitatPlotLiteSelect(forSaleExpr)
+	case mapMode:
 		plotSelect = habitatPlotMapModeSelect(forSaleExpr)
 	}
 
@@ -744,17 +749,19 @@ func GetHabitatPlotsInBBox(ctx iris.Context) {
 	zoom := ctx.URLParamIntDefault("zoom", 14)
 	limit := 200
 	switch {
-	case zoom >= 16:
-		limit = 800
-	case zoom >= 15:
-		limit = 500
-	case zoom >= 14:
-		limit = 300
-	default:
+	case zoom >= 17:
 		limit = 150
+	case zoom >= 16:
+		limit = 120
+	case zoom >= 15:
+		limit = 80
+	case zoom >= 14:
+		limit = 50
+	default:
+		limit = 30
 	}
-	if limit > 1000 {
-		limit = 1000
+	if limit > 200 {
+		limit = 200
 	}
 
 	type plotRow struct {
@@ -773,71 +780,32 @@ func GetHabitatPlotsInBBox(ctx iris.Context) {
 		Where("centroid_lat BETWEEN ? AND ?", minLat, maxLat).
 		Where("centroid_lng BETWEEN ? AND ?", minLng, maxLng)
 
+	var sectorTotal int64
 	if planIDStr := strings.TrimSpace(ctx.URLParam("plan_id")); planIDStr != "" {
 		if planID, err := strconv.ParseUint(planIDStr, 10, 32); err == nil {
 			q = q.Where("plan_id = ?", uint(planID))
 		}
 	}
-	
+
 	if sectorIDStr := strings.TrimSpace(ctx.URLParam("sector_id")); sectorIDStr != "" {
 		if sectorID, err := strconv.ParseUint(sectorIDStr, 10, 32); err == nil {
 			q = q.Where("sector_id = ?", uint(sectorID))
-			// Full sector filter: return all plots in sector (no bbox cap).
-			var sectorTotal int64
-			q.Count(&sectorTotal)
-			const sectorMax = 20000
-			includeGeom := zoom >= 14
-			var sectorPlots []models.HabitatPlot
-			sq := storage.DB.Model(&models.HabitatPlot{}).
-				Joins(forSaleJoin).
+			storage.DB.Model(&models.HabitatPlot{}).
 				Where("sector_id = ?", uint(sectorID)).
-				Order(habitatPlotNaturalOrderSQL)
-			if sectorTotal > int64(sectorMax) {
-				sq = sq.Limit(sectorMax)
-			}
-			if !includeGeom {
-				sq = sq.Select(habitatPlotCardSelect(forSaleExpr))
-			} else {
-				sq = sq.Select(
-					"habitat_plots.*",
-					forSaleExpr,
-				)
-			}
-			if err := sq.Find(&sectorPlots).Error; err != nil {
-				ctx.StatusCode(500)
-				ctx.JSON(iris.Map{"error": "Failed to fetch sector plots"})
-				return
-			}
-			fillHabitatPlotsDerivedFields(storage.DB, sectorPlots)
-			enrichHabitatPlotsWithPlanSector(sectorPlots, uint(sectorID))
-			ctx.JSON(iris.Map{
-				"success": true,
-				"data":    sectorPlots,
-				"meta": iris.Map{
-					"count":         len(sectorPlots),
-					"total_in_bbox": sectorTotal,
-					"truncated":     int64(len(sectorPlots)) < sectorTotal,
-					"include_geom":  includeGeom,
-					"sector_filter": true,
-				},
-			})
-			return
+				Count(&sectorTotal)
 		}
 	}
 
 	var total int64
 	q.Count(&total)
 
-	includeGeom := zoom >= 14
+	includeGeom := zoom >= 15
 	var plots []plotRow
 	query := q.Order(habitatPlotNaturalOrderSQL).Limit(limit)
 	if !includeGeom {
 		query = query.Select(habitatPlotCardSelect(forSaleExpr))
 	} else {
-		query = query.Select(
-			"habitat_plots.*",
-			forSaleExpr,
-		)
+		query = query.Select(habitatPlotMapModeSelect(forSaleExpr))
 	}
 	if err := query.Find(&plots).Error; err != nil {
 		ctx.StatusCode(500)
@@ -845,15 +813,32 @@ func GetHabitatPlotsInBBox(ctx iris.Context) {
 		return
 	}
 
+	out := make([]models.HabitatPlot, len(plots))
+	for i := range plots {
+		out[i] = plots[i].HabitatPlot
+		out[i].IsForSale = plots[i].IsForSale
+	}
+	fillHabitatPlotsDerivedFields(storage.DB, out)
+	if sectorTotal > 0 && len(out) > 0 {
+		if sectorID, err := strconv.ParseUint(strings.TrimSpace(ctx.URLParam("sector_id")), 10, 32); err == nil && sectorID > 0 {
+			enrichHabitatPlotsWithPlanSector(out, uint(sectorID))
+		}
+	}
+
+	meta := iris.Map{
+		"count":         len(out),
+		"total_in_bbox": total,
+		"truncated":     int64(len(out)) < total,
+		"include_geom":  includeGeom,
+	}
+	if sectorTotal > 0 {
+		meta["sector_total"] = sectorTotal
+	}
+
 	ctx.JSON(iris.Map{
 		"success": true,
-		"data":    plots,
-		"meta": iris.Map{
-			"count":        len(plots),
-			"total_in_bbox": total,
-			"truncated":    int64(len(plots)) < total,
-			"include_geom": includeGeom,
-		},
+		"data":    out,
+		"meta":    meta,
 	})
 }
 
@@ -1196,6 +1181,56 @@ func GetHabitatPlot(ctx iris.Context) {
 	fillHabitatPlotsDerivedFields(storage.DB, plots)
 	plot = plots[0]
 	ctx.JSON(iris.Map{"success": true, "data": plot})
+}
+
+// GET /api/habitat/plots/geometry?ids=1,2,3 — batch geometry for map rendering (max 150 ids).
+func GetHabitatPlotGeometryBatch(ctx iris.Context) {
+	idsParam := strings.TrimSpace(ctx.URLParam("ids"))
+	if idsParam == "" {
+		ctx.StatusCode(400)
+		ctx.JSON(iris.Map{"error": "ids is required"})
+		return
+	}
+
+	const maxIDs = 150
+	parts := strings.Split(idsParam, ",")
+	ids := make([]uint, 0, len(parts))
+	seen := make(map[uint]struct{}, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		id64, err := strconv.ParseUint(part, 10, 32)
+		if err != nil || id64 == 0 {
+			continue
+		}
+		id := uint(id64)
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+		if len(ids) >= maxIDs {
+			break
+		}
+	}
+	if len(ids) == 0 {
+		ctx.JSON(iris.Map{"success": true, "data": []models.HabitatPlot{}})
+		return
+	}
+
+	var plots []models.HabitatPlot
+	if err := storage.DB.Model(&models.HabitatPlot{}).
+		Select(habitatPlotGeometrySelect()).
+		Where("id IN ?", ids).
+		Find(&plots).Error; err != nil {
+		ctx.StatusCode(500)
+		ctx.JSON(iris.Map{"error": "Failed to fetch plot geometry"})
+		return
+	}
+
+	ctx.JSON(iris.Map{"success": true, "data": plots})
 }
 
 // GET /api/habitat/search?q= â€” plans, sectors (quartiers), and plots
