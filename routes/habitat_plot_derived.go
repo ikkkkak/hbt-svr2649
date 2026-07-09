@@ -209,6 +209,34 @@ func fillHabitatPlotDerivedFields(plot *models.HabitatPlot) {
 	syncCentroidFromGeometry(plot, ring)
 }
 
+func centroidValidForMauritania(lat, lng *float64) bool {
+	if lat == nil || lng == nil {
+		return false
+	}
+	nlat, nlng := normalizeMauritaniaLatLng(*lat, *lng)
+	return nlat >= 10 && nlat <= 35 && nlng <= -5 && nlng >= -25
+}
+
+func syncCentroidFromGeometry(plot *models.HabitatPlot, ring []geoLatLng) {
+	if plot == nil || len(ring) < 3 {
+		return
+	}
+	// Prefer cadastre DB centroid when already valid — imported columns beat derived geometry.
+	if centroidValidForMauritania(plot.CentroidLat, plot.CentroidLng) {
+		lat, lng := normalizeMauritaniaLatLng(*plot.CentroidLat, *plot.CentroidLng)
+		plot.CentroidLat = &lat
+		plot.CentroidLng = &lng
+		return
+	}
+	lat, lng, ok := ringCentroid(ring)
+	if !ok {
+		return
+	}
+	lat, lng = normalizeMauritaniaLatLng(lat, lng)
+	plot.CentroidLat = &lat
+	plot.CentroidLng = &lng
+}
+
 // normalizeMauritaniaLatLng fixes common lat/lng column swaps (Nouakchott ~18°N, ~−16°W).
 func normalizeMauritaniaLatLng(lat, lng float64) (float64, float64) {
 	latOk := lat >= 10 && lat <= 35
@@ -220,19 +248,6 @@ func normalizeMauritaniaLatLng(lat, lng float64) (float64, float64) {
 		return lng, lat
 	}
 	return lat, lng
-}
-
-func syncCentroidFromGeometry(plot *models.HabitatPlot, ring []geoLatLng) {
-	if plot == nil || len(ring) < 3 {
-		return
-	}
-	lat, lng, ok := ringCentroid(ring)
-	if !ok {
-		return
-	}
-	lat, lng = normalizeMauritaniaLatLng(lat, lng)
-	plot.CentroidLat = &lat
-	plot.CentroidLng = &lng
 }
 
 func fillHabitatPlotsDerivedFields(db *gorm.DB, plots []models.HabitatPlot) {

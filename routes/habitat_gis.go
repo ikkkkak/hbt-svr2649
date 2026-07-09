@@ -1102,6 +1102,10 @@ func findHabitatPlotInSector(sectorID uint, plotNumber string) (*models.HabitatP
 		Where("LOWER(REPLACE(TRIM(plot_number), ' ', '')) = ?", norm).
 		First(&plot).Error
 	if err == nil {
+		ensureHabitatPlotPlanSector(&plot)
+		plots := []models.HabitatPlot{plot}
+		fillHabitatPlotsDerivedFields(storage.DB, plots)
+		plot = plots[0]
 		return &plot, "exact", nil
 	}
 	if err != gorm.ErrRecordNotFound {
@@ -1119,6 +1123,10 @@ func findHabitatPlotInSector(sectorID uint, plotNumber string) (*models.HabitatP
 		Where("LOWER(TRIM(plot_number)) = LOWER(TRIM(?))", pn).
 		First(&plot).Error
 	if err == nil {
+		ensureHabitatPlotPlanSector(&plot)
+		plots := []models.HabitatPlot{plot}
+		fillHabitatPlotsDerivedFields(storage.DB, plots)
+		plot = plots[0]
 		return &plot, "exact_trim", nil
 	}
 	if err == gorm.ErrRecordNotFound {

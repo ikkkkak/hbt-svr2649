@@ -43,7 +43,8 @@ func habitatPlotLiteSelect(forSaleExpr string) string {
 
 // habitatPlotGeometrySelect returns only fields needed to render parcel polygons.
 func habitatPlotGeometrySelect() string {
-	return `habitat_plots.id, habitat_plots.geom_geojson, habitat_plots.corners,
+	return `habitat_plots.id, habitat_plots.plan_id, habitat_plots.sector_id, habitat_plots.plot_number,
+		habitat_plots.geom_geojson, habitat_plots.corners,
 		habitat_plots.centroid_lat, habitat_plots.centroid_lng,
 		habitat_plots.area_m2, habitat_plots.area_rounded, habitat_plots.sides_m,
 		habitat_plots.dimensions_string, habitat_plots.length_m, habitat_plots.width_m,
