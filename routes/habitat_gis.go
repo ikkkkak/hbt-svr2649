@@ -1273,6 +1273,7 @@ func SearchHabitatPlots(ctx iris.Context) {
 		exact, exact,
 	))
 	plotDB.Limit(40).Find(&plots)
+	fillHabitatPlotsDerivedFields(storage.DB, plots)
 
 	ctx.JSON(iris.Map{
 		"success": true,

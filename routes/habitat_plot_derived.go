@@ -206,6 +206,33 @@ func fillHabitatPlotDerivedFields(plot *models.HabitatPlot) {
 	}
 
 	fillSidesFromRing(plot, ring)
+	syncCentroidFromGeometry(plot, ring)
+}
+
+// normalizeMauritaniaLatLng fixes common lat/lng column swaps (Nouakchott ~18°N, ~−16°W).
+func normalizeMauritaniaLatLng(lat, lng float64) (float64, float64) {
+	latOk := lat >= 10 && lat <= 35
+	lngOk := lng <= -5 && lng >= -25
+	if latOk && lngOk {
+		return lat, lng
+	}
+	if lng >= 10 && lng <= 35 && lat <= -5 && lat >= -25 {
+		return lng, lat
+	}
+	return lat, lng
+}
+
+func syncCentroidFromGeometry(plot *models.HabitatPlot, ring []geoLatLng) {
+	if plot == nil || len(ring) < 3 {
+		return
+	}
+	lat, lng, ok := ringCentroid(ring)
+	if !ok {
+		return
+	}
+	lat, lng = normalizeMauritaniaLatLng(lat, lng)
+	plot.CentroidLat = &lat
+	plot.CentroidLng = &lng
 }
 
 func fillHabitatPlotsDerivedFields(db *gorm.DB, plots []models.HabitatPlot) {
