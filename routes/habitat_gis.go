@@ -919,6 +919,10 @@ func LookupHabitatPlotInSector(ctx iris.Context) {
 		return
 	}
 
+	if plot != nil {
+		logHabitatPlotAPI("GET /api/habitat/plots/lookup_in_sector", plot, plot)
+	}
+
 	ctx.JSON(iris.Map{
 		"success": true,
 		"data":    plot,
