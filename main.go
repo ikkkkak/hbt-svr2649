@@ -1432,6 +1432,7 @@ func main() {
 	{
 		landmarks.Post("/", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.CreateLandmark)
 		landmarks.Get("/organization", accessTokenVerifierMiddleware, utils.UserIDFromTokenMiddleware, routes.GetOrganizationLandmarks)
+		landmarks.Get("/public/map", routes.GetPublicLandmarksMap)
 		landmarks.Get("/public", routes.GetPublicLandmarks)
 		landmarks.Get("/videos/feed", optionalAuthMiddleware, routes.GetLandmarkVideosFeed)
 		landmarks.Get("/{id:uint}", optionalAuthMiddleware, routes.GetLandmarkByID)
@@ -1522,6 +1523,8 @@ func main() {
 		habitat.Get("/plans", routes.GetHabitatPlans)
 		habitat.Get("/plans/{planId:uint}/sectors", routes.GetHabitatSectorsByPlan)
 		habitat.Get("/sectors/{sectorId:uint}/plots", routes.GetHabitatPlotsBySector)
+		habitat.Get("/sectors/{sectorId:uint}/tiles.json", routes.GetHabitatSectorTileJSON)
+		habitat.Get("/sectors/{sectorId:uint}/tiles/{z:int}/{x:int}/{y:int}.pbf", routes.GetHabitatSectorVectorTile)
 		habitat.Get("/plots/bbox", routes.GetHabitatPlotsInBBox)
 		habitat.Get("/plots/geometry", routes.GetHabitatPlotGeometryBatch)
 		habitat.Get("/plots/lookup", routes.LookupHabitatPlotForListing)

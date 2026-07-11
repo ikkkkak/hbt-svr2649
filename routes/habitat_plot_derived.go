@@ -257,6 +257,59 @@ func fillHabitatPlotsDerivedFields(db *gorm.DB, plots []models.HabitatPlot) {
 	}
 }
 
+// habitatPlotMapRing returns the best polygon ring for map overlays (geom → corners → rectangle).
+func habitatPlotMapRing(plot *models.HabitatPlot) []geoLatLng {
+	if plot == nil {
+		return nil
+	}
+	if ring := primaryRingFromGeoJSON(plot.GeomGeoJSON); len(ring) >= 3 {
+		return ring
+	}
+	if ring := primaryRingFromCornersJSON(plot.Corners); len(ring) >= 3 {
+		return ring
+	}
+	lat, lng := plot.CentroidLat, plot.CentroidLng
+	if lat == nil || lng == nil {
+		return nil
+	}
+
+	lengthM, widthM := 0.0, 0.0
+	if plot.LengthM != nil && plot.WidthM != nil && *plot.LengthM > 0 && *plot.WidthM > 0 {
+		lengthM, widthM = *plot.LengthM, *plot.WidthM
+	} else if len(plot.SidesM) >= 2 && plot.SidesM[0] > 0 && plot.SidesM[1] > 0 {
+		lengthM, widthM = plot.SidesM[0], plot.SidesM[1]
+	} else if plot.AreaM2 != nil && *plot.AreaM2 > 0 {
+		side := math.Sqrt(*plot.AreaM2)
+		lengthM, widthM = side, side
+	} else if plot.AreaRounded != nil && *plot.AreaRounded > 0 {
+		side := math.Sqrt(float64(*plot.AreaRounded))
+		lengthM, widthM = side, side
+	}
+	if lengthM <= 0 || widthM <= 0 {
+		return nil
+	}
+	return rectangleRingFromCentroid(*lat, *lng, lengthM, widthM)
+}
+
+func rectangleRingFromCentroid(lat, lng, lengthM, widthM float64) []geoLatLng {
+	if lengthM <= 0 || widthM <= 0 {
+		return nil
+	}
+	dLat := lengthM / 2 / 111_320
+	cosLat := math.Cos(lat * math.Pi / 180)
+	if math.Abs(cosLat) < 1e-6 {
+		return nil
+	}
+	dLng := widthM / 2 / (111_320 * cosLat)
+	return []geoLatLng{
+		{Lat: lat - dLat, Lng: lng - dLng},
+		{Lat: lat - dLat, Lng: lng + dLng},
+		{Lat: lat + dLat, Lng: lng + dLng},
+		{Lat: lat + dLat, Lng: lng - dLng},
+		{Lat: lat - dLat, Lng: lng - dLng},
+	}
+}
+
 const habitatPlotNaturalOrderSQL = `
 	CASE WHEN plot_number ~ '^[0-9]+$' THEN plot_number::bigint END ASC NULLS LAST,
 	plot_number ASC

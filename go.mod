@@ -12,11 +12,13 @@ require (
 	github.com/aws/aws-sdk-go-v2/credentials v1.19.24
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.103.3
 	github.com/cloudinary/cloudinary-go/v2 v2.15.0
+	github.com/disintegration/imaging v1.6.2
 	github.com/golang-jwt/jwt/v5 v5.3.0
 	github.com/gorilla/websocket v1.5.3
 	github.com/joho/godotenv v1.4.0
 	github.com/kataras/iris/v12 v12.2.0-beta4
 	github.com/oliveroneill/exponent-server-sdk-golang v0.0.0-20210823140141-d050598be512
+	github.com/paulmach/orb v0.13.0
 	golang.org/x/exp v0.0.0-20220916125017-b168a2c6b86b
 	google.golang.org/api v0.254.0
 	gorm.io/driver/postgres v1.3.7
@@ -38,7 +40,6 @@ require (
 	github.com/GoogleCloudPlatform/opentelemetry-operations-go/internal/resourcemapping v0.51.0 // indirect
 	github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.7.13 // indirect
 	github.com/aws/aws-sdk-go-v2/feature/ec2/imds v1.18.29 // indirect
-	github.com/aws/aws-sdk-go-v2/feature/s3/manager v1.22.27 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/configsources v1.4.29 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/endpoints/v2 v2.7.29 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/v4a v1.4.30 // indirect
@@ -55,7 +56,6 @@ require (
 	github.com/cncf/xds/go v0.0.0-20250501225837-2ac532fd4443 // indirect
 	github.com/creasty/defaults v1.7.0 // indirect
 	github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f // indirect
-	github.com/disintegration/imaging v1.6.2 // indirect
 	github.com/envoyproxy/go-control-plane/envoy v1.32.4 // indirect
 	github.com/envoyproxy/protoc-gen-validate v1.2.1 // indirect
 	github.com/felixge/httpsnoop v1.0.4 // indirect
@@ -63,15 +63,18 @@ require (
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/go-sql-driver/mysql v1.6.0 // indirect
+	github.com/gogo/protobuf v1.3.2 // indirect
 	github.com/golang/protobuf v1.5.4 // indirect
 	github.com/google/s2a-go v0.1.9 // indirect
 	github.com/googleapis/enterprise-certificate-proxy v0.3.6 // indirect
 	github.com/googleapis/gax-go/v2 v2.15.0 // indirect
 	github.com/gorilla/schema v1.4.1 // indirect
 	github.com/kataras/jwt v0.1.8 // indirect
+	github.com/paulmach/protoscan v0.2.1 // indirect
 	github.com/planetscale/vtprotobuf v0.6.1-0.20240319094008-0393e58bdf10 // indirect
 	github.com/spiffe/go-spiffe/v2 v2.5.0 // indirect
 	github.com/zeebo/errs v1.4.0 // indirect
+	go.mongodb.org/mongo-driver/v2 v2.5.0 // indirect
 	go.opentelemetry.io/auto/sdk v1.1.0 // indirect
 	go.opentelemetry.io/contrib/detectors/gcp v1.36.0 // indirect
 	go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc v0.61.0 // indirect
@@ -130,7 +133,7 @@ require (
 	github.com/kataras/pio v0.0.10 // indirect
 	github.com/kataras/sitemap v0.0.5 // indirect
 	github.com/kataras/tunnel v0.0.4 // indirect
-	github.com/klauspost/compress v1.15.8 // indirect
+	github.com/klauspost/compress v1.17.6 // indirect
 	github.com/leodido/go-urn v1.2.1 // indirect
 	github.com/mailgun/raymond/v2 v2.0.46 // indirect
 	github.com/mailru/easyjson v0.7.7 // indirect

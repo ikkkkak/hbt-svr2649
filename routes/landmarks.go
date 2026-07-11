@@ -19,6 +19,7 @@ import (
 
 	"github.com/kataras/iris/v12"
 	jwt "github.com/kataras/iris/v12/middleware/jwt"
+	"gorm.io/datatypes"
 )
 
 // landmarkPublisherContactForAPI builds guest-facing publisher contact (organization or individual owner).
@@ -669,6 +670,236 @@ func GetPublicLandmarks(ctx iris.Context) {
 	}
 
 	ctx.JSON(iris.Map{"landmarks": landmarks})
+}
+
+func landmarkPrimaryImageURL(raw datatypes.JSON) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var images []string
+	if err := json.Unmarshal(raw, &images); err != nil {
+		return ""
+	}
+	for _, img := range images {
+		if s := strings.TrimSpace(img); s != "" {
+			return s
+		}
+	}
+	return ""
+}
+
+func landmarkHasCornerPoints(lm *models.Landmark) bool {
+	points := []*float64{lm.Point1Lat, lm.Point2Lat, lm.Point3Lat, lm.Point4Lat}
+	lngs := []*float64{lm.Point1Lng, lm.Point2Lng, lm.Point3Lng, lm.Point4Lng}
+	n := 0
+	for i := 0; i < 4; i++ {
+		if points[i] != nil && lngs[i] != nil && *points[i] != 0 && *lngs[i] != 0 {
+			n++
+		}
+	}
+	return n >= 3
+}
+
+func landmarkCentroidFromPoints(lm *models.Landmark) (lat, lng float64, ok bool) {
+	type pt struct{ lat, lng float64 }
+	var pts []pt
+	add := func(la, ln *float64) {
+		if la == nil || ln == nil || *la == 0 || *ln == 0 {
+			return
+		}
+		pts = append(pts, pt{*la, *ln})
+	}
+	add(lm.Point1Lat, lm.Point1Lng)
+	add(lm.Point2Lat, lm.Point2Lng)
+	add(lm.Point3Lat, lm.Point3Lng)
+	add(lm.Point4Lat, lm.Point4Lng)
+	if len(pts) == 0 {
+		return 0, 0, false
+	}
+	var sumLat, sumLng float64
+	for _, p := range pts {
+		sumLat += p.lat
+		sumLng += p.lng
+	}
+	return sumLat / float64(len(pts)), sumLng / float64(len(pts)), true
+}
+
+func landmarkPlotRingToAPI(ring []geoLatLng) []iris.Map {
+	if len(ring) < 3 {
+		return nil
+	}
+	out := make([]iris.Map, 0, len(ring))
+	for _, p := range ring {
+		out = append(out, iris.Map{"lat": p.Lat, "lng": p.Lng})
+	}
+	return out
+}
+
+// GET /api/landmarks/public/map
+// Lightweight map pins — all verified lands with coordinates (ignores list filters).
+func GetPublicLandmarksMap(ctx iris.Context) {
+	lang := strings.ToLower(strings.TrimSpace(ctx.URLParamDefault("lang", "en")))
+
+	var landmarks []models.Landmark
+	if err := storage.DB.Model(&models.Landmark{}).
+		Select(
+			"landmarks.id",
+			"landmarks.title",
+			"landmarks.title_translations",
+			"landmarks.price",
+			"landmarks.currency",
+			"landmarks.area",
+			"landmarks.area_unit",
+			"landmarks.images",
+			"landmarks.district",
+			"landmarks.region",
+			"landmarks.land_type",
+			"landmarks.zoning",
+			"landmarks.point1_lat",
+			"landmarks.point1_lng",
+			"landmarks.point2_lat",
+			"landmarks.point2_lng",
+			"landmarks.point3_lat",
+			"landmarks.point3_lng",
+			"landmarks.point4_lat",
+			"landmarks.point4_lng",
+			"landmarks.sides",
+			"landmarks.habitat_plot_id",
+			"landmarks.is_verified",
+			"landmarks.is_published",
+			"landmarks.status",
+			"landmarks.is_gold",
+		).
+		Where(
+			"landmarks.is_verified = ? AND landmarks.is_published = ? AND landmarks.status = ?",
+			true, true, "verified",
+		).
+		Order("landmarks.is_gold DESC, landmarks.updated_at DESC").
+		Find(&landmarks).Error; err != nil {
+		ctx.StatusCode(http.StatusInternalServerError)
+		ctx.JSON(iris.Map{"error": "Failed to fetch map landmarks"})
+		return
+	}
+
+	plotIDs := make([]uint, 0)
+	plotIDSeen := make(map[uint]struct{})
+	for i := range landmarks {
+		lm := &landmarks[i]
+		if lm.HabitatPlotID != nil && *lm.HabitatPlotID > 0 {
+			if _, ok := plotIDSeen[*lm.HabitatPlotID]; ok {
+				continue
+			}
+			plotIDSeen[*lm.HabitatPlotID] = struct{}{}
+			plotIDs = append(plotIDs, *lm.HabitatPlotID)
+		}
+	}
+
+	plotByID := map[uint]models.HabitatPlot{}
+	if len(plotIDs) > 0 {
+		var plots []models.HabitatPlot
+		_ = storage.DB.Model(&models.HabitatPlot{}).
+			Select(habitatPlotGeometrySelect()).
+			Where("id IN ?", plotIDs).
+			Find(&plots).Error
+		fillHabitatPlotsDerivedFields(storage.DB, plots)
+		for i := range plots {
+			plotByID[plots[i].ID] = plots[i]
+		}
+	}
+
+	plotRings := map[uint][]geoLatLng{}
+	for id, plot := range plotByID {
+		if ring := habitatPlotMapRing(&plot); len(ring) >= 3 {
+			plotRings[id] = ring
+		}
+	}
+
+	data := make([]iris.Map, 0, len(landmarks))
+	for i := range landmarks {
+		lm := &landmarks[i]
+		var lat, lng float64
+		var ok bool
+		if lat, lng, ok = landmarkCentroidFromPoints(lm); !ok {
+			if lm.HabitatPlotID != nil {
+				if ring, found := plotRings[*lm.HabitatPlotID]; found {
+					if clat, clng, cok := ringCentroid(ring); cok {
+						lat, lng, ok = clat, clng, true
+					}
+				}
+				if !ok {
+					if plot, found := plotByID[*lm.HabitatPlotID]; found {
+						if plot.CentroidLat != nil && plot.CentroidLng != nil {
+							lat, lng, ok = *plot.CentroidLat, *plot.CentroidLng, true
+						}
+					}
+				}
+			}
+		}
+		if !ok {
+			continue
+		}
+
+		title := utils.ResolveLocalizedText(lm.Title, lm.TitleTranslations, lang)
+		zoneName := strings.TrimSpace(lm.District)
+		if zoneName == "" {
+			zoneName = strings.TrimSpace(lm.Region)
+		}
+		primaryImage := landmarkPrimaryImageURL(lm.Images)
+
+		entry := iris.Map{
+			"id":                lm.ID,
+			"title":             title,
+			"price":             lm.Price,
+			"currency":          lm.Currency,
+			"area":              lm.Area,
+			"area_unit":         lm.AreaUnit,
+			"land_type":         lm.LandType,
+			"zoning":            lm.Zoning,
+			"zone_name":         zoneName,
+			"images":            lm.Images,
+			"primary_image_url": primaryImage,
+			"point1_lat":        lm.Point1Lat,
+			"point1_lng":        lm.Point1Lng,
+			"point2_lat":        lm.Point2Lat,
+			"point2_lng":        lm.Point2Lng,
+			"point3_lat":        lm.Point3Lat,
+			"point3_lng":        lm.Point3Lng,
+			"point4_lat":        lm.Point4Lat,
+			"point4_lng":        lm.Point4Lng,
+			"centroid_lat":      lat,
+			"centroid_lng":      lng,
+			"is_verified":       lm.IsVerified,
+			"is_published":      lm.IsPublished,
+			"status":            lm.Status,
+			"is_gold":           lm.IsGold,
+		}
+		if lm.HabitatPlotID != nil && *lm.HabitatPlotID > 0 {
+			entry["habitat_plot_id"] = *lm.HabitatPlotID
+			if !landmarkHasCornerPoints(lm) {
+				if ring, found := plotRings[*lm.HabitatPlotID]; found {
+					if apiRing := landmarkPlotRingToAPI(ring); len(apiRing) > 0 {
+						entry["plot_ring"] = apiRing
+					}
+				}
+			}
+		}
+		if len(lm.Sides) > 0 {
+			var sides []string
+			if err := json.Unmarshal(lm.Sides, &sides); err == nil && len(sides) > 0 {
+				entry["sides"] = sides
+			}
+		}
+		data = append(data, entry)
+	}
+
+	ctx.Header("Cache-Control", "public, max-age=120")
+	ctx.JSON(iris.Map{
+		"success": true,
+		"data":    data,
+		"meta": iris.Map{
+			"count": len(data),
+		},
+	})
 }
 
 // GetLandmarkVideosFeed returns paginated landmark videos for the video feed tab
