@@ -1524,7 +1524,12 @@ func main() {
 		habitat.Get("/plans/{planId:uint}/sectors", routes.GetHabitatSectorsByPlan)
 		habitat.Get("/sectors/{sectorId:uint}/plots", routes.GetHabitatPlotsBySector)
 		habitat.Get("/sectors/{sectorId:uint}/tiles.json", routes.GetHabitatSectorTileJSON)
-		habitat.Get("/sectors/{sectorId:uint}/tiles/{z:int}/{x:int}/{y:int}.pbf", routes.GetHabitatSectorVectorTile)
+		// No ".pbf" suffix: Iris's typed macros (":int") don't match a literal
+		// suffix glued onto the same path segment (verified directly against
+		// this Iris version — {y:int}.pbf never matches, 404s every time).
+		// MapLibre doesn't need the extension; it reads Content-Type instead.
+		habitat.Get("/sectors/{sectorId:uint}/tiles/{z:int}/{x:int}/{y:int}", routes.GetHabitatSectorVectorTile)
+		habitat.Get("/tiles/{z:int}/{x:int}/{y:int}", routes.GetHabitatNationwideVectorTile)
 		habitat.Get("/plots/bbox", routes.GetHabitatPlotsInBBox)
 		habitat.Get("/plots/geometry", routes.GetHabitatPlotGeometryBatch)
 		habitat.Get("/plots/lookup", routes.LookupHabitatPlotForListing)

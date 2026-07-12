@@ -241,6 +241,7 @@ func performMigrations(db *gorm.DB) {
 	ensureSlideshowVideoSystem(db)
 
 	ensureHabitatGISRelations(db)
+	ensureHabitatPostGIS(db)
 	ensureLandmarkWishlistTables(db)
 
 	// CRITICAL: Ensure smart-feed seen table exists even if AutoMigrate partially fails.
@@ -965,6 +966,114 @@ func ensureHabitatGISRelations(db *gorm.DB) {
 	`)
 
 	ensurePerformanceIndexes(db)
+}
+
+// HabitatPostGISReady is true once habitat_plots.geom (a real PostGIS geometry
+// column) and its GIST index are confirmed present. routes.GetHabitatSectorVectorTile
+// checks this to pick the fast ST_AsMVT query path over the legacy per-row
+// Go/orb JSON-decode fallback. Read from multiple goroutines (HTTP handlers);
+// only ever written once during startup, so a plain bool is safe here.
+var HabitatPostGISReady bool
+
+// ensureHabitatPostGIS enables PostGIS and adds a real geometry column + GIST
+// index on habitat_plots so vector tiles can be generated inside Postgres
+// (ST_AsMVT) instead of decoded from JSONB and re-encoded in Go on every
+// request — the standard Mapbox/Mapnik tile-serving pattern, and the only way
+// this scales to 10K+ plot sectors / nationwide cadastre data.
+//
+// Additive and idempotent — safe to run on every boot. If the environment
+// can't CREATE EXTENSION (some restricted managed Postgres hosts), this logs
+// a warning and the tile handler keeps using the existing JSON fallback.
+func ensureHabitatPostGIS(db *gorm.DB) {
+	if !db.Migrator().HasTable(&models.HabitatPlot{}) {
+		return
+	}
+
+	if err := db.Exec(`CREATE EXTENSION IF NOT EXISTS postgis`).Error; err != nil {
+		log.Printf("⚠️ habitat: PostGIS extension unavailable, staying on JSON tile fallback: %v", err)
+		return
+	}
+
+	var hasGeomColumn bool
+	db.Raw(`
+		SELECT EXISTS (
+			SELECT 1 FROM information_schema.columns
+			WHERE table_name = 'habitat_plots' AND column_name = 'geom'
+		)
+	`).Scan(&hasGeomColumn)
+
+	if !hasGeomColumn {
+		if err := db.Exec(`ALTER TABLE habitat_plots ADD COLUMN geom geometry(Geometry, 4326)`).Error; err != nil {
+			log.Printf("⚠️ habitat: failed to add geom column, staying on JSON tile fallback: %v", err)
+			return
+		}
+		log.Println("✅ habitat_plots.geom column added")
+	}
+
+	// CONCURRENTLY cannot run inside a transaction block; plain db.Exec here
+	// autocommits (gorm only wraps Create/Update/Delete helpers, not raw Exec),
+	// so this is safe. IF NOT EXISTS makes subsequent boots an instant no-op.
+	if err := db.Exec(`CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_habitat_plots_geom ON habitat_plots USING GIST(geom)`).Error; err != nil {
+		log.Printf("⚠️ habitat: failed to create GIST index on geom (will retry next boot): %v", err)
+		return
+	}
+
+	HabitatPostGISReady = true
+	log.Println("✅ habitat PostGIS ready — vector tiles now use ST_AsMVT")
+
+	// Bounded per boot and idempotent (only touches geom IS NULL rows), so a
+	// large backlog catches up over a few restarts without blocking startup.
+	go backfillHabitatPlotGeom(db)
+}
+
+// backfillHabitatPlotGeom populates geom from the existing geom_geojson JSONB
+// column. Runs per-row inside a PL/pgSQL loop with exception handling so one
+// malformed geometry doesn't abort the whole batch — those rows are simply
+// skipped and the tile handler keeps serving them from the legacy fallback.
+func backfillHabitatPlotGeom(db *gorm.DB) {
+	var pending int64
+	db.Raw(`
+		SELECT COUNT(*) FROM habitat_plots
+		WHERE geom IS NULL AND geom_geojson IS NOT NULL AND geom_geojson::text NOT IN ('null', '{}')
+	`).Scan(&pending)
+	if pending == 0 {
+		return
+	}
+	log.Printf("🔧 habitat: backfilling geom for %d plots from geom_geojson...", pending)
+
+	if err := db.Exec(`
+		DO $$
+		DECLARE
+			r RECORD;
+		BEGIN
+			FOR r IN
+				SELECT id, geom_geojson FROM habitat_plots
+				WHERE geom IS NULL AND geom_geojson IS NOT NULL AND geom_geojson::text NOT IN ('null', '{}')
+				LIMIT 300000
+			LOOP
+				BEGIN
+					UPDATE habitat_plots
+					SET geom = ST_SetSRID(
+						ST_GeomFromGeoJSON(
+							CASE
+								WHEN r.geom_geojson->>'type' = 'Feature' THEN r.geom_geojson->'geometry'
+								WHEN r.geom_geojson->>'type' = 'FeatureCollection' THEN r.geom_geojson->'features'->0->'geometry'
+								ELSE r.geom_geojson
+							END
+						), 4326)
+					WHERE id = r.id;
+				EXCEPTION WHEN OTHERS THEN
+					-- Malformed geometry for this row — skip it; tile handler falls
+					-- back to geom_geojson decode for rows where geom stays NULL.
+					CONTINUE;
+				END;
+			END LOOP;
+		END $$;
+	`).Error; err != nil {
+		log.Printf("⚠️ habitat: geom backfill batch error: %v", err)
+		return
+	}
+	log.Println("✅ habitat: geom backfill batch complete")
 }
 
 // ensurePerformanceIndexes adds indexes for hot paths that were stalling the DB pool.
