@@ -21,9 +21,20 @@ import (
 )
 
 const (
-	habitatTileMinZoom     = 12
-	habitatTileMaxZoom     = 20
+	habitatTileMinZoom = 12
+	habitatTileMaxZoom = 20
+
+	// habitatTileMaxFeatures bounds the legacy Go/orb fallback only, where
+	// every row costs real per-request Go-side JSON decode + polygon
+	// construction — a genuine cost that needs a conservative cap.
 	habitatTileMaxFeatures = 4096
+
+	// habitatPostGISTileMaxFeatures bounds the ST_AsMVT path (GIST-indexed,
+	// set-based, computed entirely inside Postgres). The real limiting
+	// factor there is the tile's geographic extent, not row count, so this
+	// is a generous sanity ceiling — not a functional cap — high enough
+	// that no real quartier (7-8K+ plots) ever gets silently truncated.
+	habitatPostGISTileMaxFeatures = 20000
 )
 
 // habitatForSaleTileJoinSQL mirrors habitatForSaleJoinSQL (habitat_plot_response.go)
@@ -261,12 +272,13 @@ func habitatSectorTilePostGIS(sectorID uint, z, x, y int) ([]byte, error) {
 			WHERE p.sector_id = ?
 			  AND p.geom IS NOT NULL
 			  AND p.geom && ST_Transform(bounds.tile, 4326)
+			ORDER BY p.id
 			LIMIT ?
 		)
 		SELECT ST_AsMVT(features.*, 'plots', 4096, 'mvtgeom') FROM features WHERE mvtgeom IS NOT NULL
 	`
 	var data []byte
-	if err := storage.DB.Raw(sql, z, x, y, sectorID, habitatTileMaxFeatures).Row().Scan(&data); err != nil {
+	if err := storage.DB.Raw(sql, z, x, y, sectorID, habitatPostGISTileMaxFeatures).Row().Scan(&data); err != nil {
 		return nil, err
 	}
 	return data, nil
@@ -291,12 +303,13 @@ func habitatNationwideTilePostGIS(z, x, y int) ([]byte, error) {
 			` + habitatForSaleTileJoinSQL + `
 			WHERE p.geom IS NOT NULL
 			  AND p.geom && ST_Transform(bounds.tile, 4326)
+			ORDER BY p.id
 			LIMIT ?
 		)
 		SELECT ST_AsMVT(features.*, 'plots', 4096, 'mvtgeom') FROM features WHERE mvtgeom IS NOT NULL
 	`
 	var data []byte
-	if err := storage.DB.Raw(sql, z, x, y, habitatTileMaxFeatures).Row().Scan(&data); err != nil {
+	if err := storage.DB.Raw(sql, z, x, y, habitatPostGISTileMaxFeatures).Row().Scan(&data); err != nil {
 		return nil, err
 	}
 	return data, nil
