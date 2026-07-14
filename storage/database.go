@@ -229,6 +229,7 @@ func performMigrations(db *gorm.DB) {
 		&models.WhatsAppShareUsageEvent{},
 		&models.HabitatPlan{},
 		&models.HabitatSector{},
+		&models.HabitatSubSector{},
 		&models.HabitatPlot{},
 		&models.MusicTrack{},
 		&models.PropertyVideoGenerationJob{},

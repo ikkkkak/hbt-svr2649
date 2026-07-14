@@ -61,7 +61,7 @@ func habitatBulkExampleDocument() iris.Map {
 								"area_m2":            250.5,
 								"area_rounded":       251,
 								"dimensions_string":  "12.5 x 20",
-								"il_value":           1.0,
+								"il_value":           "1.5",
 								"el_value":           2.0,
 								"res_value":          0.6,
 								"centroid_lat":       18.085,
@@ -146,7 +146,7 @@ type habitatBulkPlot struct {
 	DimensionsString string          `json:"dimensions_string"`
 	LengthM          *float64        `json:"length_m"`
 	WidthM           *float64        `json:"width_m"`
-	ILValue          *float64        `json:"il_value"`
+	ILValue          string          `json:"il_value"`
 	ELValue          *float64        `json:"el_value"`
 	RESValue         *float64        `json:"res_value"`
 	GeomGeoJSON      json.RawMessage `json:"geom_geojson"`
@@ -874,7 +874,7 @@ func LookupHabitatPlotForListing(ctx iris.Context) {
 		return
 	}
 
-	plot, matchKind, findErr := findHabitatPlotInSector(sectorID, plotNumber)
+	plot, matchKind, findErr := findHabitatPlotInSector(sectorID, plotNumber, nil)
 	if findErr != nil {
 		ctx.StatusCode(http.StatusInternalServerError)
 		ctx.JSON(iris.Map{"error": "Failed to look up plot"})
@@ -912,7 +912,15 @@ func LookupHabitatPlotInSector(ctx iris.Context) {
 		return
 	}
 
-	plot, matchKind, findErr := findHabitatPlotInSector(uint(sectorID), plotNumber)
+	var subSectorID *uint
+	if raw := strings.TrimSpace(ctx.URLParam("sub_sector_id")); raw != "" {
+		if id, err := strconv.ParseUint(raw, 10, 32); err == nil && id > 0 {
+			v := uint(id)
+			subSectorID = &v
+		}
+	}
+
+	plot, matchKind, findErr := findHabitatPlotInSector(uint(sectorID), plotNumber, subSectorID)
 	if findErr != nil {
 		ctx.StatusCode(http.StatusInternalServerError)
 		ctx.JSON(iris.Map{"error": "Failed to look up plot"})
@@ -923,15 +931,21 @@ func LookupHabitatPlotInSector(ctx iris.Context) {
 		logHabitatPlotAPI("GET /api/habitat/plots/lookup_in_sector", plot, plot)
 	}
 
+	reason := "no plot with this number in this sector"
+	if subSectorID != nil {
+		reason = "no plot with this number in this sub-sector"
+	}
+
 	ctx.JSON(iris.Map{
 		"success": true,
 		"data":    plot,
 		"meta": iris.Map{
-			"sector_id":   sectorID,
-			"plot_number": plotNumber,
-			"resolved":    plot != nil,
-			"match_kind":  matchKind,
-			"reason":      "no plot with this number in this sector",
+			"sector_id":     sectorID,
+			"sub_sector_id": subSectorID,
+			"plot_number":   plotNumber,
+			"resolved":      plot != nil,
+			"match_kind":    matchKind,
+			"reason":        reason,
 		},
 	})
 }
@@ -1076,7 +1090,12 @@ func resolveHabitatSectorIDForQuartier(quartierID uint) (sectorID uint, meta iri
 	return sector.ID, meta, nil
 }
 
-func findHabitatPlotInSector(sectorID uint, plotNumber string) (*models.HabitatPlot, string, error) {
+// findHabitatPlotInSector looks up a plot by number within a sector. When
+// subSectorID is non-nil, the match is additionally scoped to that
+// sub-sector — without it, a sector that has Ilot subdivisions can return a
+// plot number that exists in a *different* sub-sector than the one the user
+// is actually browsing, which reads as a random/wrong result.
+func findHabitatPlotInSector(sectorID uint, plotNumber string, subSectorID *uint) (*models.HabitatPlot, string, error) {
 	pn := strings.TrimSpace(plotNumber)
 	if pn == "" {
 		return nil, "", nil
@@ -1095,15 +1114,22 @@ func findHabitatPlotInSector(sectorID uint, plotNumber string) (*models.HabitatP
 		) lm ON lm.habitat_plot_id = habitat_plots.id
 	`
 
-	err := storage.DB.Model(&models.HabitatPlot{}).
+	applySubSectorScope := func(q *gorm.DB) *gorm.DB {
+		if subSectorID != nil && *subSectorID > 0 {
+			return q.Where("sub_sector_id = ?", *subSectorID)
+		}
+		return q
+	}
+
+	err := applySubSectorScope(storage.DB.Model(&models.HabitatPlot{}).
 		Joins(forSaleJoin).
 		Select(
 			"habitat_plots.*",
 			"CASE WHEN lm.habitat_plot_id IS NULL THEN FALSE ELSE TRUE END AS is_for_sale",
 		).
-		Preload("Sector").Preload("Plan").
+		Preload("Sector").Preload("Plan").Preload("SubSector").
 		Where("sector_id = ?", sectorID).
-		Where("LOWER(REPLACE(TRIM(plot_number), ' ', '')) = ?", norm).
+		Where("LOWER(REPLACE(TRIM(plot_number), ' ', '')) = ?", norm)).
 		First(&plot).Error
 	if err == nil {
 		ensureHabitatPlotPlanSector(&plot)
@@ -1116,15 +1142,15 @@ func findHabitatPlotInSector(sectorID uint, plotNumber string) (*models.HabitatP
 		return nil, "", err
 	}
 
-	err = storage.DB.Model(&models.HabitatPlot{}).
+	err = applySubSectorScope(storage.DB.Model(&models.HabitatPlot{}).
 		Joins(forSaleJoin).
 		Select(
 			"habitat_plots.*",
 			"CASE WHEN lm.habitat_plot_id IS NULL THEN FALSE ELSE TRUE END AS is_for_sale",
 		).
-		Preload("Sector").Preload("Plan").
+		Preload("Sector").Preload("Plan").Preload("SubSector").
 		Where("sector_id = ?", sectorID).
-		Where("LOWER(TRIM(plot_number)) = LOWER(TRIM(?))", pn).
+		Where("LOWER(TRIM(plot_number)) = LOWER(TRIM(?))", pn)).
 		First(&plot).Error
 	if err == nil {
 		ensureHabitatPlotPlanSector(&plot)
@@ -1183,6 +1209,7 @@ func GetHabitatPlot(ctx iris.Context) {
 		).
 		Preload("Sector").
 		Preload("Plan").
+		Preload("SubSector").
 		First(&plot, uint(plotID)).Error; err != nil {
 		ctx.StatusCode(404)
 		ctx.JSON(iris.Map{"error": "Plot not found"})
@@ -1285,11 +1312,35 @@ func SearchHabitatPlots(ctx iris.Context) {
 		Limit(40).
 		Find(&sectors)
 
+	var subSectors []models.HabitatSubSector
+	storage.DB.
+		Preload("Sector").
+		Preload("Sector.Plan").
+		Where("plot_count > 0 AND (name ILIKE ? OR name_ar ILIKE ? OR code ILIKE ?)", like, like, like).
+		Order("name ASC").
+		Limit(40).
+		Find(&subSectors)
+
 	var plots []models.HabitatPlot
 	plotDB := storage.DB.
 		Preload("Sector").
 		Preload("Plan").
+		Preload("SubSector").
 		Where("plot_number ILIKE ? OR l_value ILIKE ?", like, like)
+	// Optional scope — narrows a plot-number search to the area the user is
+	// actually browsing instead of matching that number anywhere
+	// nationwide (a sector with Ilot subdivisions can otherwise return a
+	// plot from a different sub-sector than the one being searched).
+	if sectorIDStr := strings.TrimSpace(ctx.URLParam("sector_id")); sectorIDStr != "" {
+		if sectorID, err := strconv.ParseUint(sectorIDStr, 10, 32); err == nil && sectorID > 0 {
+			plotDB = plotDB.Where("sector_id = ?", uint(sectorID))
+		}
+	}
+	if subSectorIDStr := strings.TrimSpace(ctx.URLParam("sub_sector_id")); subSectorIDStr != "" {
+		if subSectorID, err := strconv.ParseUint(subSectorIDStr, 10, 32); err == nil && subSectorID > 0 {
+			plotDB = plotDB.Where("sub_sector_id = ?", uint(subSectorID))
+		}
+	}
 	exact := strings.TrimSpace(q)
 	plotDB = plotDB.Order(gorm.Expr(
 		"CASE WHEN plot_number ILIKE ? THEN 0 WHEN plot_number = ? THEN 1 ELSE 2 END, plot_number ASC",
@@ -1308,9 +1359,10 @@ func SearchHabitatPlots(ctx iris.Context) {
 	ctx.JSON(iris.Map{
 		"success": true,
 		"data": iris.Map{
-			"plans":   plans,
-			"sectors": sectors,
-			"plots":   plots,
+			"plans":       plans,
+			"sectors":     sectors,
+			"sub_sectors": subSectors,
+			"plots":       plots,
 		},
 	})
 }

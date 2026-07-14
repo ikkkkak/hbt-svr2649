@@ -1523,6 +1523,9 @@ func main() {
 		habitat.Get("/plans", routes.GetHabitatPlans)
 		habitat.Get("/plans/{planId:uint}/sectors", routes.GetHabitatSectorsByPlan)
 		habitat.Get("/sectors/{sectorId:uint}/plots", routes.GetHabitatPlotsBySector)
+		habitat.Get("/sectors/{sectorId:uint}/sub-sectors", routes.GetHabitatSubSectorsBySector)
+		habitat.Get("/sub-sectors/{subSectorId:uint}", routes.GetHabitatSubSector)
+		habitat.Get("/sub-sectors/{subSectorId:uint}/plots", routes.GetHabitatPlotsBySubSector)
 		habitat.Get("/sectors/{sectorId:uint}/tiles.json", routes.GetHabitatSectorTileJSON)
 		// No ".pbf" suffix: Iris's typed macros (":int") don't match a literal
 		// suffix glued onto the same path segment (verified directly against
@@ -1530,6 +1533,11 @@ func main() {
 		// MapLibre doesn't need the extension; it reads Content-Type instead.
 		habitat.Get("/sectors/{sectorId:uint}/tiles/{z:int}/{x:int}/{y:int}", routes.GetHabitatSectorVectorTile)
 		habitat.Get("/tiles/{z:int}/{x:int}/{y:int}", routes.GetHabitatNationwideVectorTile)
+		// Raster (PNG) plot overlay for native MapView (Apple/Google Maps via
+		// react-native-maps <UrlTile>), which can't render the MVT vector layer
+		// above. Same no-extension routing reasoning as the .pbf routes.
+		habitat.Get("/sectors/{sectorId:uint}/raster-tiles/{z:int}/{x:int}/{y:int}", routes.GetHabitatSectorRasterTile)
+		habitat.Get("/sectors/{sectorId:uint}/plot-at-point", routes.GetHabitatPlotAtPoint)
 		habitat.Get("/plots/bbox", routes.GetHabitatPlotsInBBox)
 		habitat.Get("/plots/geometry", routes.GetHabitatPlotGeometryBatch)
 		habitat.Get("/plots/lookup", routes.LookupHabitatPlotForListing)

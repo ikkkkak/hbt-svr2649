@@ -57,9 +57,9 @@ func applyHabitatPropsToPlot(plot *models.HabitatPlot, props map[string]any) boo
 			changed = true
 		}
 	}
-	if plot.ILValue == nil {
-		if v, ok := firstFloat(props, "il_value", "IL", "il", "IL_value"); ok {
-			plot.ILValue = &v
+	if plot.ILValue == "" {
+		if v := firstString(props, "il_value", "IL", "il", "IL_value"); v != "" {
+			plot.ILValue = v
 			changed = true
 		}
 	}
@@ -142,9 +142,9 @@ func scanLooseHabitatProps(plot *models.HabitatPlot, props map[string]any) bool 
 				plot.ELValue = &f
 				changed = true
 			}
-		case plot.ILValue == nil && (kl == "il" || kl == "il_value" || strings.HasSuffix(kl, "_il")):
-			if f, ok := anyToFloat(val); ok {
-				plot.ILValue = &f
+		case plot.ILValue == "" && (kl == "il" || kl == "il_value" || strings.HasSuffix(kl, "_il")):
+			if s := strings.TrimSpace(fmt.Sprint(val)); s != "" {
+				plot.ILValue = s
 				changed = true
 			}
 		case plot.RESValue == nil && (kl == "res" || kl == "res_value" || strings.HasSuffix(kl, "_res")):
@@ -187,7 +187,7 @@ func plotNeedsRawHydration(plot *models.HabitatPlot) bool {
 		return false
 	}
 	return plot.ELValue == nil ||
-		plot.ILValue == nil ||
+		plot.ILValue == "" ||
 		plot.RESValue == nil ||
 		plot.DimensionsString == "" ||
 		len(plot.SidesM) == 0 ||
@@ -381,7 +381,7 @@ func backfillHabitatPlotColumnsFromRaw(db *gorm.DB, batchSize int) (updated int,
 			p := batch[i]
 			fillHabitatPlotDerivedFields(&p)
 			if p.PlotNumber == "" && p.DimensionsString == "" && len(p.SidesM) == 0 &&
-				p.ELValue == nil && p.ILValue == nil && p.RESValue == nil &&
+				p.ELValue == nil && p.ILValue == "" && p.RESValue == nil &&
 				plotAreaMissing(p.AreaM2, p.AreaRounded) {
 				continue
 			}

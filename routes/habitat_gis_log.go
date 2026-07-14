@@ -37,7 +37,7 @@ type habitatPlotAPIDebug struct {
 	DimensionsString    string  `json:"dimensions_string,omitempty"`
 	SidesM              []float64 `json:"sides_m,omitempty"`
 	ELValue             *float64 `json:"el_value,omitempty"`
-	ILValue             *float64 `json:"il_value,omitempty"`
+	ILValue             string  `json:"il_value,omitempty"`
 	RESValue            *float64 `json:"res_value,omitempty"`
 	RawLat              *float64 `json:"raw_props_lat,omitempty"`
 	RawLng              *float64 `json:"raw_props_lng,omitempty"`
@@ -174,7 +174,7 @@ func logHabitatPlotAPI(endpoint string, before, after *models.HabitatPlot) {
 		d.DimensionsString,
 		d.SidesM,
 		ptrFloat(d.ELValue),
-		ptrFloat(d.ILValue),
+		d.ILValue,
 		ptrFloat(d.RESValue),
 		ptrFloat(d.RawLat),
 		ptrFloat(d.RawLng),

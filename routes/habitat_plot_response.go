@@ -23,7 +23,7 @@ func habitatForSaleSelectExpr() string {
 // habitatPlotMapModeSelect returns plot columns needed for map rendering and the plot callout card.
 // Omits raw_properties to keep payloads smaller.
 func habitatPlotMapModeSelect(forSaleExpr string) string {
-	return `habitat_plots.id, habitat_plots.plan_id, habitat_plots.sector_id, habitat_plots.plot_number,
+	return `habitat_plots.id, habitat_plots.plan_id, habitat_plots.sector_id, habitat_plots.sub_sector_id, habitat_plots.sub_sector_code, habitat_plots.plot_number,
 		habitat_plots.l_value, habitat_plots.i_value,
 		habitat_plots.area_m2, habitat_plots.area_rounded, habitat_plots.area_hectares,
 		habitat_plots.perimeter_m, habitat_plots.sides_m,
@@ -34,7 +34,7 @@ func habitatPlotMapModeSelect(forSaleExpr string) string {
 
 // habitatPlotLiteSelect returns metadata only — no geometry (bulk quartier index).
 func habitatPlotLiteSelect(forSaleExpr string) string {
-	return `habitat_plots.id, habitat_plots.plan_id, habitat_plots.sector_id, habitat_plots.plot_number,
+	return `habitat_plots.id, habitat_plots.plan_id, habitat_plots.sector_id, habitat_plots.sub_sector_id, habitat_plots.sub_sector_code, habitat_plots.plot_number,
 		habitat_plots.area_m2, habitat_plots.area_rounded, habitat_plots.sides_m,
 		habitat_plots.dimensions_string, habitat_plots.length_m, habitat_plots.width_m,
 		habitat_plots.il_value, habitat_plots.el_value, habitat_plots.res_value,
@@ -43,7 +43,7 @@ func habitatPlotLiteSelect(forSaleExpr string) string {
 
 // habitatPlotGeometrySelect returns only fields needed to render parcel polygons.
 func habitatPlotGeometrySelect() string {
-	return `habitat_plots.id, habitat_plots.plan_id, habitat_plots.sector_id, habitat_plots.plot_number,
+	return `habitat_plots.id, habitat_plots.plan_id, habitat_plots.sector_id, habitat_plots.sub_sector_id, habitat_plots.sub_sector_code, habitat_plots.plot_number,
 		habitat_plots.geom_geojson, habitat_plots.corners,
 		habitat_plots.centroid_lat, habitat_plots.centroid_lng,
 		habitat_plots.area_m2, habitat_plots.area_rounded, habitat_plots.sides_m,
@@ -54,7 +54,7 @@ func habitatPlotGeometrySelect() string {
 
 // habitatPlotCardSelect returns plot columns for low-zoom bbox tiles (no geometry).
 func habitatPlotCardSelect(forSaleExpr string) string {
-	return `habitat_plots.id, habitat_plots.plan_id, habitat_plots.sector_id, habitat_plots.plot_number,
+	return `habitat_plots.id, habitat_plots.plan_id, habitat_plots.sector_id, habitat_plots.sub_sector_id, habitat_plots.sub_sector_code, habitat_plots.plot_number,
 		habitat_plots.area_m2, habitat_plots.area_rounded, habitat_plots.sides_m,
 		habitat_plots.dimensions_string, habitat_plots.length_m, habitat_plots.width_m,
 		habitat_plots.il_value, habitat_plots.el_value, habitat_plots.res_value,

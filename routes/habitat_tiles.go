@@ -480,7 +480,11 @@ type habitatTileCacheEntry struct {
 	expiresAt time.Time
 }
 
-const habitatTileCacheTTL = 5 * time.Minute
+// habitatTileCacheTTL matches the client Cache-Control lifetime (see
+// writeHabitatRasterTile) — a short in-process TTL was causing the server to
+// silently re-render+re-query tiles that had already been generated minutes
+// earlier, adding avoidable render latency right when a user is mid-zoom.
+const habitatTileCacheTTL = 24 * time.Hour
 const habitatSectorVersionTTL = 60 * time.Second
 const habitatTileCacheMaxEntries = 20000
 

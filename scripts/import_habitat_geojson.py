@@ -186,7 +186,12 @@ def insert_plot(
     dims = dimensions_string_from_props(props, sides)
     length_m = as_float(props.get("length_m") or props.get("length") or props.get("longueur"))
     width_m = as_float(props.get("width_m") or props.get("width") or props.get("largeur"))
-    il_value = as_float(props.get("il_value") or props.get("IL") or props.get("il"))
+    # Overloaded source field: usually a numeric front-height measurement,
+    # but for sectors with Ilot (city-block) subdivisions it's an alphanumeric
+    # code like "08_NC" — as_float() here used to silently drop those to
+    # NULL. Column is VARCHAR in the DB; keep it as a plain string.
+    il_raw = props.get("il_value") or props.get("IL") or props.get("il")
+    il_value = str(il_raw).strip() if il_raw is not None else None
     el_value = as_float(props.get("el_value") or props.get("EL") or props.get("el") or props.get("elevation"))
     res_value = as_float(props.get("res_value") or props.get("RES") or props.get("res"))
     l_value = props.get("l_value") or props.get("L") or props.get("l")

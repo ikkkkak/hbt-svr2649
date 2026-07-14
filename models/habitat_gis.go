@@ -123,11 +123,43 @@ type HabitatSector struct {
 
 func (HabitatSector) TableName() string { return "habitat_sectors" }
 
+// HabitatSubSector is an "Ilot" (city block) subdivision within a sector —
+// e.g. "08_NC" inside quartier ANCIEN_AEROPORT. Not every sector has any:
+// the source cadastre data only carries this subdivision for some quartiers,
+// so plots without a matching Ilot code simply have a nil SubSectorID and
+// the UI falls back straight from sector to plots.
+type HabitatSubSector struct {
+	ID          uint           `json:"id" gorm:"primaryKey"`
+	SectorID    uint           `json:"sector_id" gorm:"not null;index:idx_habitat_sub_sectors_sector;uniqueIndex:idx_habitat_sub_sector_sector_name,composite:name;constraint:OnUpdate:CASCADE,OnDelete:CASCADE"`
+	Name        string         `json:"name" gorm:"size:200;not null;uniqueIndex:idx_habitat_sub_sector_sector_name,composite:sector_id"`
+	NameAr      string         `json:"name_ar,omitempty" gorm:"size:200"`
+	Code        string         `json:"code,omitempty" gorm:"size:100"`
+	PlotCount   int            `json:"plot_count" gorm:"default:0"`
+	TotalAreaM2 float64        `json:"total_area_m2" gorm:"default:0"`
+	CentroidLat *float64       `json:"centroid_lat,omitempty"`
+	CentroidLng *float64       `json:"centroid_lng,omitempty"`
+	CreatedAt   time.Time      `json:"created_at"`
+	UpdatedAt   time.Time      `json:"updated_at"`
+	DeletedAt   gorm.DeletedAt `json:"deleted_at,omitempty" gorm:"index"`
+
+	// constraint:- — production has no FK from habitat_plots.sub_sector_id to
+	// this table (verified via \d habitat_plots), only an index. Letting GORM
+	// add one on AutoMigrate would risk failing against existing data.
+	Sector HabitatSector `json:"sector,omitempty" gorm:"foreignKey:SectorID;references:ID;constraint:OnUpdate:CASCADE,OnDelete:CASCADE"`
+	Plots  []HabitatPlot `json:"plots,omitempty" gorm:"foreignKey:SubSectorID;constraint:-"`
+}
+
+func (HabitatSubSector) TableName() string { return "habitat_sub_sectors" }
+
 // HabitatPlot is an individual land parcel.
 type HabitatPlot struct {
 	ID               uint           `json:"id" gorm:"primaryKey"`
 	PlanID           uint           `json:"plan_id" gorm:"not null;index:idx_habitat_plots_plan;constraint:OnUpdate:CASCADE,OnDelete:CASCADE"`
 	SectorID         uint           `json:"sector_id" gorm:"not null;index:idx_habitat_plots_sector"`
+	SubSectorID      *uint          `json:"sub_sector_id,omitempty" gorm:"index:idx_habitat_plots_sub_sector"`
+	// Denormalized copy of the linked sub-sector's name — production has this
+	// as a plain column (idx_plots_sub_sector_code), separate from the FK.
+	SubSectorCode    string         `json:"sub_sector_code,omitempty" gorm:"size:100"`
 	PlotNumber       string         `json:"plot_number" gorm:"size:100;not null;index:idx_habitat_plots_number"`
 	LValue           string         `json:"l_value,omitempty" gorm:"size:100"`
 	IValue           *int           `json:"i_value,omitempty"`
@@ -139,7 +171,11 @@ type HabitatPlot struct {
 	DimensionsString string         `json:"dimensions_string,omitempty" gorm:"size:200"`
 	LengthM          *float64       `json:"length_m,omitempty"`
 	WidthM           *float64       `json:"width_m,omitempty"`
-	ILValue          *float64       `json:"il_value,omitempty" gorm:"column:il_value"`
+	// Overloaded column in the source data: for most plots this is a numeric
+	// front-height/level measurement (as a string, e.g. "1.5"); for plots in
+	// a sector that has Ilot subdivisions, it's the Ilot code itself (e.g.
+	// "08_NC") — same string this plot's SubSectorCode/SubSector.Name holds.
+	ILValue          string         `json:"il_value,omitempty" gorm:"column:il_value;size:100"`
 	ELValue          *float64       `json:"el_value,omitempty" gorm:"column:el_value"`
 	RESValue         *float64       `json:"res_value,omitempty" gorm:"column:res_value"`
 	GeomGeoJSON      datatypes.JSON `json:"geom_geojson,omitempty" gorm:"column:geom_geojson;type:jsonb"`
@@ -158,6 +194,8 @@ type HabitatPlot struct {
 
 	Plan   HabitatPlan   `json:"plan,omitempty" gorm:"foreignKey:PlanID;references:ID;constraint:OnUpdate:CASCADE,OnDelete:CASCADE"`
 	Sector HabitatSector `json:"sector,omitempty" gorm:"foreignKey:SectorID;references:ID;constraint:OnUpdate:CASCADE,OnDelete:CASCADE"`
+	// constraint:- — no real FK in production (see HabitatSubSector.Plots note above).
+	SubSector *HabitatSubSector `json:"sub_sector,omitempty" gorm:"foreignKey:SubSectorID;references:ID;constraint:-"`
 }
 
 func (HabitatPlot) TableName() string { return "habitat_plots" }
