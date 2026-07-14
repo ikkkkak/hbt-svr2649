@@ -42,6 +42,32 @@ var (
 	rasterForSaleStroke = color.RGBA{220, 38, 38, 220}
 )
 
+// habitatRasterRenderVersion must be bumped any time a change is made to how
+// a tile is drawn (colors, stroke width, clipping/projection math, etc.) —
+// NOT when plot data changes (habitatSectorDataVersion already covers that).
+// Both the server-side in-process cache (24h TTL) and the client's own HTTP
+// cache (Cache-Control: max-age=86400 below) are keyed off values that only
+// change with the underlying data, never with the rendering code itself —
+// confirmed in production: a tile fetched fresh from the live server still
+// came back with stroke colors that don't exist anywhere in this file
+// anymore (found via direct pixel inspection of the PNG), meaning a
+// rendering change shipped at some point and every cache layer kept serving
+// the pre-change tile indefinitely, with no way for it to ever self-correct.
+// Bumping this string forces a new cache key server-side AND — because the
+// frontend embeds it in the tile URL query string (habitatRasterOverlay.ts)
+// — a genuinely new URL client-side, so old cached bitmaps are abandoned
+// instead of being served forever.
+const habitatRasterRenderVersion = "2"
+
+// habitatRasterCacheVersion combines the data version (bumps whenever a
+// sector's plot rows change) with habitatRasterRenderVersion (bumped by hand
+// whenever this file's drawing logic changes) so either kind of change
+// invalidates the server-side cache — data-only versioning was the gap that
+// let a stale render survive indefinitely.
+func habitatRasterCacheVersion(sectorID uint) string {
+	return habitatSectorDataVersion(sectorID) + ":" + habitatRasterRenderVersion
+}
+
 // lngLatToGlobalPixel converts a geographic coordinate to Web Mercator pixel
 // space at the given zoom — same projection every XYZ tile scheme (Google/
 // Apple/OSM/Esri) uses, just carried through to pixels instead of tile
@@ -289,7 +315,7 @@ func prewarmSectorRasterTiles(sectorID uint) {
 		return
 	}
 
-	version := habitatSectorDataVersion(sectorID)
+	version := habitatRasterCacheVersion(sectorID)
 	dedupeKey := fmt.Sprintf("%d:%s", sectorID, version)
 	if _, alreadyRunning := habitatPrewarmInFlight.LoadOrStore(dedupeKey, struct{}{}); alreadyRunning {
 		return
@@ -395,7 +421,7 @@ func GetHabitatSectorRasterTile(ctx iris.Context) {
 	cacheKey := habitatTileCacheKey(
 		"raster-sector:"+strconv.FormatUint(sectorID, 10),
 		z, x, y,
-		habitatSectorDataVersion(uint(sectorID)),
+		habitatRasterCacheVersion(uint(sectorID)),
 	)
 	if cached, hit := habitatTileCacheGet(cacheKey); hit {
 		writeHabitatRasterTile(ctx, cached)
