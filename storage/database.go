@@ -242,6 +242,7 @@ func performMigrations(db *gorm.DB) {
 	ensureSlideshowVideoSystem(db)
 
 	ensureHabitatGISRelations(db)
+	ensureHabitatSubSectorColumns(db)
 	ensureHabitatPostGIS(db)
 	ensureLandmarkWishlistTables(db)
 
@@ -967,6 +968,29 @@ func ensureHabitatGISRelations(db *gorm.DB) {
 	`)
 
 	ensurePerformanceIndexes(db)
+}
+
+// ensureHabitatSubSectorColumns defends against habitat_sub_sectors having
+// been created directly in the database (ahead of this model landing here)
+// without the deleted_at column GORM's soft-delete support requires —
+// every query GORM builds for a gorm.DeletedAt-bearing model appends
+// "WHERE deleted_at IS NULL", so a missing column turns into a hard 500
+// (SQLSTATE 42703) on literally every request, not just deletes. AutoMigrate
+// above is supposed to add missing columns to existing tables on its own,
+// but this runs unconditionally as a safety net, same pattern as the
+// refresh_tokens/notification_preferences/videos checks above.
+func ensureHabitatSubSectorColumns(db *gorm.DB) {
+	if !db.Migrator().HasTable(&models.HabitatSubSector{}) {
+		return
+	}
+	if !db.Migrator().HasColumn(&models.HabitatSubSector{}, "DeletedAt") {
+		log.Println("⚠️ habitat_sub_sectors.deleted_at missing, adding it...")
+		if err := db.Migrator().AddColumn(&models.HabitatSubSector{}, "DeletedAt"); err != nil {
+			log.Printf("❌ GORM AddColumn deleted_at on habitat_sub_sectors failed: %v — trying raw SQL fallback", err)
+			db.Exec(`ALTER TABLE habitat_sub_sectors ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ`)
+			db.Exec(`CREATE INDEX IF NOT EXISTS idx_habitat_sub_sectors_deleted_at ON habitat_sub_sectors(deleted_at)`)
+		}
+	}
 }
 
 // HabitatPostGISReady is true once habitat_plots.geom (a real PostGIS geometry
