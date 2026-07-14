@@ -68,6 +68,17 @@ func habitatRasterCacheVersion(sectorID uint) string {
 	return habitatSectorDataVersion(sectorID) + ":" + habitatRasterRenderVersion
 }
 
+// habitatRasterTileCacheKey — single source of truth for the raster tile
+// cache key so the request path and the prewarm sweep can never disagree.
+// scale is part of the key: a 256px (scale=1) and a 512px @2x (scale=2)
+// render of the same z/x/y are different bitmaps and must cache separately.
+func habitatRasterTileCacheKey(sectorID uint, z, x, y, scale int, version string) string {
+	return habitatTileCacheKey(
+		fmt.Sprintf("raster-sector:%d:s%d", sectorID, scale),
+		z, x, y, version,
+	)
+}
+
 // lngLatToGlobalPixel converts a geographic coordinate to Web Mercator pixel
 // space at the given zoom — same projection every XYZ tile scheme (Google/
 // Apple/OSM/Esri) uses, just carried through to pixels instead of tile
@@ -113,19 +124,50 @@ type rasterPlotRing struct {
 	isForSale bool
 }
 
+// rasterMaxScale caps the retina multiplier a client can request, so a
+// crafted ?scale= can't blow up the canvas (memory) or the render cost.
+// 2 (i.e. 512px tiles) is the only value the app actually uses.
+const rasterMaxScale = 2
+
+// parseRasterScale reads the retina factor from ?scale= (1 = classic 256px,
+// 2 = 512px @2x). Anything out of range clamps to 1 — the projection/tile
+// addressing is unaffected either way; scale only changes output resolution.
+func parseRasterScale(ctx iris.Context) int {
+	s := ctx.URLParamIntDefault("scale", 1)
+	if s < 1 {
+		s = 1
+	}
+	if s > rasterMaxScale {
+		s = rasterMaxScale
+	}
+	return s
+}
+
 // renderPlotRingsToTile draws every ring onto a padded canvas, then crops
 // back to the true tile size — shared by both query paths so the
-// padding/crop logic only exists once.
-func renderPlotRingsToTile(rings []rasterPlotRing, z, x, y int) ([]byte, error) {
-	dc := gg.NewContext(rasterCanvasSize, rasterCanvasSize)
+// padding/crop logic only exists once. scale is the retina multiplier: the
+// PROJECTION stays in standard 256-pixel tile space (so z/x/y addressing is
+// unchanged and identical to what the client requests), but the output
+// bitmap is rendered at rasterTileSize*scale so a 2x/3x phone screen — and
+// the native map's live pinch-zoom scaling — has real pixels to work with
+// instead of upscaling a 256px bitmap (which is what made plot edges look
+// soft and corners "deform" mid-gesture).
+func renderPlotRingsToTile(rings []rasterPlotRing, z, x, y, scale int) ([]byte, error) {
+	if scale < 1 {
+		scale = 1
+	}
+	canvas := rasterCanvasSize * scale
+	dc := gg.NewContext(canvas, canvas)
 	dc.SetColor(color.RGBA{0, 0, 0, 0})
 	dc.Clear()
 
+	// Origin stays in unscaled 256-pixel tile space; drawPlotRing multiplies
+	// the final local coordinates by scale when emitting to the context.
 	originX := float64(x)*rasterTileSize - rasterTilePadding
 	originY := float64(y)*rasterTileSize - rasterTilePadding
 
 	for _, r := range rings {
-		drawPlotRing(dc, r.ring, z, originX, originY, r.isForSale)
+		drawPlotRing(dc, r.ring, z, originX, originY, r.isForSale, scale)
 	}
 
 	// gg.NewContext always backs onto an *image.RGBA (see fogleman/gg's
@@ -135,10 +177,10 @@ func renderPlotRingsToTile(rings []rasterPlotRing, z, x, y int) ([]byte, error) 
 		return nil, errors.New("habitat raster tile: unexpected image type from gg.Context")
 	}
 	cropped := full.SubImage(image.Rect(
-		rasterTilePadding,
-		rasterTilePadding,
-		rasterTilePadding+rasterTileSize,
-		rasterTilePadding+rasterTileSize,
+		rasterTilePadding*scale,
+		rasterTilePadding*scale,
+		(rasterTilePadding+rasterTileSize)*scale,
+		(rasterTilePadding+rasterTileSize)*scale,
 	))
 
 	var buf bytes.Buffer
@@ -227,9 +269,12 @@ func clipAgainstEdge(points []pixelPt, inside func(pixelPt) bool, intersect func
 // clipPolygonToRect) so the rasterizer only ever sees small, in-range
 // coordinates — never the raw ring, which for a plot spanning multiple
 // tiles at high zoom can have vertices hundreds of pixels off-canvas.
-func drawPlotRing(dc *gg.Context, ring []geoLatLng, z int, originX, originY float64, isForSale bool) {
+func drawPlotRing(dc *gg.Context, ring []geoLatLng, z int, originX, originY float64, isForSale bool, scale int) {
 	if len(ring) < 3 {
 		return
+	}
+	if scale < 1 {
+		scale = 1
 	}
 	local := make([]pixelPt, len(ring))
 	for i, pt := range ring {
@@ -237,6 +282,9 @@ func drawPlotRing(dc *gg.Context, ring []geoLatLng, z int, originX, originY floa
 		local[i] = pixelPt{px - originX, py - originY}
 	}
 
+	// Clip in unscaled 256-pixel canvas space (same math regardless of
+	// scale), then multiply the surviving coordinates by scale when emitting
+	// to the retina-sized context below.
 	const clipMargin = 4 // small extra slack so stroke width at the padding edge never gets a hairline clip
 	clipped := clipPolygonToRect(
 		local,
@@ -247,12 +295,13 @@ func drawPlotRing(dc *gg.Context, ring []geoLatLng, z int, originX, originY floa
 		return
 	}
 
+	s := float64(scale)
 	dc.NewSubPath()
 	for i, p := range clipped {
 		if i == 0 {
-			dc.MoveTo(p.x, p.y)
+			dc.MoveTo(p.x*s, p.y*s)
 		} else {
-			dc.LineTo(p.x, p.y)
+			dc.LineTo(p.x*s, p.y*s)
 		}
 	}
 	dc.ClosePath()
@@ -269,7 +318,9 @@ func drawPlotRing(dc *gg.Context, ring []geoLatLng, z int, originX, originY floa
 	} else {
 		dc.SetColor(rasterPlotStroke)
 	}
-	dc.SetLineWidth(1.4)
+	// Stroke scales with the bitmap so a 1.4px line stays 1.4 CSS-pixels
+	// wide on screen (2.8 device px at @2x), not a hairline.
+	dc.SetLineWidth(1.4 * s)
 	dc.Stroke()
 }
 
@@ -299,6 +350,10 @@ const (
 	habitatPrewarmMaxZoom     = 20
 	habitatPrewarmMaxTiles    = 1000
 	habitatPrewarmConcurrency = 8
+	// The app requests @2x (512px) tiles, so prewarm must render at the same
+	// scale — otherwise the sweep fills the cache with 1x bitmaps the client
+	// never asks for and every real @2x request still misses.
+	habitatPrewarmScale = rasterMaxScale
 )
 
 // habitatPrewarmInFlight dedupes concurrent prewarm sweeps for the same
@@ -362,7 +417,7 @@ sweep:
 	var wg sync.WaitGroup
 	rendered := 0
 	for _, t := range tiles {
-		cacheKey := habitatTileCacheKey("raster-sector:"+strconv.FormatUint(uint64(sectorID), 10), t.z, t.x, t.y, version)
+		cacheKey := habitatRasterTileCacheKey(sectorID, t.z, t.x, t.y, habitatPrewarmScale, version)
 		if _, hit := habitatTileCacheGet(cacheKey); hit {
 			continue
 		}
@@ -372,7 +427,7 @@ sweep:
 		go func(t tileCoord, cacheKey string) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			data, err := habitatSectorRasterTilePostGIS(sectorID, t.z, t.x, t.y)
+			data, err := habitatSectorRasterTilePostGIS(sectorID, t.z, t.x, t.y, habitatPrewarmScale)
 			if err != nil || data == nil {
 				return
 			}
@@ -411,6 +466,7 @@ func GetHabitatSectorRasterTile(ctx iris.Context) {
 	if !ok {
 		return
 	}
+	scale := parseRasterScale(ctx)
 
 	// Fire-and-forget: renders the sector's likely-needed tile range in the
 	// background so a later pinch zoom mostly hits warm cache instead of
@@ -418,9 +474,8 @@ func GetHabitatSectorRasterTile(ctx iris.Context) {
 	// doc comment). Deduped internally, safe to call on every request.
 	go prewarmSectorRasterTiles(uint(sectorID))
 
-	cacheKey := habitatTileCacheKey(
-		"raster-sector:"+strconv.FormatUint(sectorID, 10),
-		z, x, y,
+	cacheKey := habitatRasterTileCacheKey(
+		uint(sectorID), z, x, y, scale,
 		habitatRasterCacheVersion(uint(sectorID)),
 	)
 	if cached, hit := habitatTileCacheGet(cacheKey); hit {
@@ -430,14 +485,14 @@ func GetHabitatSectorRasterTile(ctx iris.Context) {
 
 	var data []byte
 	if storage.HabitatPostGISReady {
-		data, err = habitatSectorRasterTilePostGIS(uint(sectorID), z, x, y)
+		data, err = habitatSectorRasterTilePostGIS(uint(sectorID), z, x, y, scale)
 		if err != nil {
 			log.Printf("habitat raster tile: PostGIS query failed for sector=%d z=%d x=%d y=%d, falling back: %v", sectorID, z, x, y, err)
 			data = nil
 		}
 	}
 	if data == nil {
-		data, err = habitatSectorRasterTileLegacy(uint(sectorID), z, x, y)
+		data, err = habitatSectorRasterTileLegacy(uint(sectorID), z, x, y, scale)
 		if err != nil {
 			ctx.StatusCode(http.StatusInternalServerError)
 			ctx.JSON(iris.Map{"error": "failed to render raster tile"})
@@ -461,7 +516,7 @@ func writeHabitatRasterTile(ctx iris.Context, data []byte) {
 	ctx.Write(data)
 }
 
-func habitatSectorRasterTilePostGIS(sectorID uint, z, x, y int) ([]byte, error) {
+func habitatSectorRasterTilePostGIS(sectorID uint, z, x, y, scale int) ([]byte, error) {
 	bufferMeters := float64(rasterTilePadding) * webMercatorMetersPerPixel(z)
 
 	const sql = `
@@ -501,7 +556,7 @@ func habitatSectorRasterTilePostGIS(sectorID uint, z, x, y int) ([]byte, error) 
 		}
 		rings = append(rings, rasterPlotRing{ring: parsed[0], isForSale: row.IsForSale})
 	}
-	return renderPlotRingsToTile(rings, z, x, y)
+	return renderPlotRingsToTile(rings, z, x, y, scale)
 }
 
 // habitatSectorRasterTileLegacy mirrors habitatSectorTileLegacy in
@@ -509,7 +564,7 @@ func habitatSectorRasterTilePostGIS(sectorID uint, z, x, y int) ([]byte, error) 
 // PostGIS required. Kept as a true fallback, not the primary path (a
 // sequential scan over centroid_lat/lng doesn't scale to nationwide data,
 // but is fine for one sector's worth of plots).
-func habitatSectorRasterTileLegacy(sectorID uint, z, x, y int) ([]byte, error) {
+func habitatSectorRasterTileLegacy(sectorID uint, z, x, y, scale int) ([]byte, error) {
 	tile := maptile.New(uint32(x), uint32(y), maptile.Zoom(z))
 	b := tile.Bound()
 	margin := float64(rasterTilePadding) * degreesPerPixelApprox(z)
@@ -554,7 +609,7 @@ func habitatSectorRasterTileLegacy(sectorID uint, z, x, y int) ([]byte, error) {
 		}
 		rings = append(rings, rasterPlotRing{ring: ring, isForSale: row.IsForSale})
 	}
-	return renderPlotRingsToTile(rings, z, x, y)
+	return renderPlotRingsToTile(rings, z, x, y, scale)
 }
 
 // pointInRing is a standard ray-casting point-in-polygon test — used by the
