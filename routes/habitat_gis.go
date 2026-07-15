@@ -1272,6 +1272,9 @@ func GetHabitatPlotGeometryBatch(ctx iris.Context) {
 	}
 
 	fillHabitatPlotsDerivedFields(storage.DB, plots)
+	// Every requested plot must come back drawable — synthesize geometry for
+	// rows with NULL geom_geojson (corners → dimensioned centroid rectangle).
+	ensureHabitatPlotGeometryPayload(plots)
 
 	beforePlots := append([]models.HabitatPlot(nil), plots...)
 	logHabitatPlotAPIBatch("GET /api/habitat/plots/geometry", beforePlots, 5)

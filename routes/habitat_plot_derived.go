@@ -1,6 +1,7 @@
 package routes
 
 import (
+	"encoding/json"
 	"fmt"
 	"math"
 	"regexp"
@@ -255,6 +256,53 @@ func fillHabitatPlotsDerivedFields(db *gorm.DB, plots []models.HabitatPlot) {
 	for i := range plots {
 		fillHabitatPlotDerivedFields(&plots[i])
 	}
+}
+
+// ensureHabitatPlotGeometryPayload guarantees every plot in a geometry API
+// response carries a drawable polygon. Plots whose geom_geojson is NULL or
+// empty in the DB get one synthesized into the RESPONSE (never written back)
+// from the same fallback chain the raster tiles already use: corners first,
+// then a rectangle at the true centroid with the plot's real length/width.
+// Without this, a quartier of 1,840 plots renders only the ~1,750 that have
+// stored GeoJSON — the rest silently vanish from the client map.
+func ensureHabitatPlotGeometryPayload(plots []models.HabitatPlot) {
+	for i := range plots {
+		p := &plots[i]
+		if geomJSONLooksUsable(p.GeomGeoJSON) {
+			continue
+		}
+		ring := habitatPlotMapRing(p)
+		if len(ring) < 3 {
+			continue
+		}
+		coords := make([][]float64, 0, len(ring)+1)
+		for _, c := range ring {
+			coords = append(coords, []float64{c.Lng, c.Lat})
+		}
+		first := coords[0]
+		last := coords[len(coords)-1]
+		if first[0] != last[0] || first[1] != last[1] {
+			coords = append(coords, []float64{first[0], first[1]})
+		}
+		payload, err := json.Marshal(map[string]any{
+			"type":        "Polygon",
+			"coordinates": [][][]float64{coords},
+		})
+		if err != nil {
+			continue
+		}
+		p.GeomGeoJSON = datatypes.JSON(payload)
+	}
+}
+
+// geomJSONLooksUsable filters out NULL/empty/degenerate jsonb values that
+// deserialize fine but render nothing.
+func geomJSONLooksUsable(raw datatypes.JSON) bool {
+	if len(raw) == 0 {
+		return false
+	}
+	s := strings.TrimSpace(string(raw))
+	return s != "" && s != "null" && s != "{}" && s != "[]"
 }
 
 // habitatPlotMapRing returns the best polygon ring for map overlays (geom → corners → rectangle).
