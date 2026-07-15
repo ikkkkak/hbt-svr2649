@@ -21,28 +21,49 @@ import (
 	"github.com/kataras/iris/v12/middleware/jwt"
 )
 
-// refreshRateLimit: 10 requests per minute per IP (brief R-13)
+// refreshRateLimit: 30 requests per minute, keyed by IP+device — NOT per
+// bare IP. Mobile carriers NAT thousands of users behind a handful of IPs,
+// so a per-IP limit of 10/min was throttling unrelated users' refreshes
+// (observed as 429 storms in production). Per-device keying keeps the abuse
+// protection while never punishing NAT neighbors for each other's traffic.
 var refreshRateMu sync.Mutex
 var refreshRateCounts = map[string][]time.Time{}
+var refreshRateLastSweep = time.Now()
 
-func checkRefreshRateLimit(ip string) bool {
+func checkRefreshRateLimit(key string) bool {
 	refreshRateMu.Lock()
 	defer refreshRateMu.Unlock()
-	cutoff := time.Now().Add(-time.Minute)
-	if refreshRateCounts[ip] == nil {
-		refreshRateCounts[ip] = []time.Time{}
+	now := time.Now()
+	cutoff := now.Add(-time.Minute)
+
+	// Periodic sweep so keys from one-off devices don't accumulate forever.
+	if now.Sub(refreshRateLastSweep) > 10*time.Minute {
+		refreshRateLastSweep = now
+		for k, times := range refreshRateCounts {
+			alive := false
+			for _, t := range times {
+				if t.After(cutoff) {
+					alive = true
+					break
+				}
+			}
+			if !alive {
+				delete(refreshRateCounts, k)
+			}
+		}
 	}
-	// Prune old entries
-	valid := make([]time.Time, 0, len(refreshRateCounts[ip]))
-	for _, t := range refreshRateCounts[ip] {
+
+	valid := make([]time.Time, 0, len(refreshRateCounts[key]))
+	for _, t := range refreshRateCounts[key] {
 		if t.After(cutoff) {
 			valid = append(valid, t)
 		}
 	}
-	if len(valid) >= 10 {
+	if len(valid) >= 30 {
+		refreshRateCounts[key] = valid
 		return false
 	}
-	refreshRateCounts[ip] = append(valid, time.Now())
+	refreshRateCounts[key] = append(valid, now)
 	return true
 }
 
@@ -124,9 +145,12 @@ func AccessTokenExpiresInSeconds() int {
 }
 
 // RefreshTokenExpiry returns the refresh token lifetime.
-// Uses REFRESH_TOKEN_EXPIRY_DAYS (default 14 — OAuth mobile session target).
+// Uses REFRESH_TOKEN_EXPIRY_DAYS (default 30). Sessions are SLIDING: every
+// refresh rotation mints a token with the full TTL again, so any user who
+// opens the app at least once a month stays signed in indefinitely; only a
+// fully dormant device has to log in again.
 func RefreshTokenExpiry() time.Duration {
-	d := 14
+	d := 30
 	if s := os.Getenv("REFRESH_TOKEN_EXPIRY_DAYS"); s != "" {
 		if n, _ := strconv.Atoi(s); n > 0 {
 			d = n
@@ -134,6 +158,14 @@ func RefreshTokenExpiry() time.Duration {
 	}
 	return time.Duration(d) * 24 * time.Hour
 }
+
+// refreshReuseGraceWindow: a rotated (revoked) refresh token presented again
+// within this window is a benign race — the app relaunching mid-refresh, a
+// carrier proxy replaying the request, or two in-flight calls on one device
+// — NOT an attack. Nuking every session for it (the previous behavior) is
+// exactly the "randomly logged out" bug. Within the grace window we issue a
+// fresh pair; only reuse AFTER the window trips the all-sessions revoke.
+const refreshReuseGraceWindow = 60 * time.Second
 
 var bgContext = context.Background()
 
@@ -211,8 +243,9 @@ type RefreshTokenBody struct {
 // - Opaque tokens (new): hash lookup by token_hash
 // - Legacy JWT: lookup by token string for backward compatibility
 func RefreshToken(ctx iris.Context) {
-	// Rate limit: 10/min per IP (brief R-13)
-	if !checkRefreshRateLimit(clientIP(ctx)) {
+	// Rate limit: 30/min keyed by IP+device (carrier-NAT safe).
+	rlKey := clientIP(ctx) + "|" + ctx.GetHeader("X-Device-ID")
+	if !checkRefreshRateLimit(rlKey) {
 		ctx.StatusCode(429)
 		ctx.Header("Retry-After", "60")
 		ctx.JSON(iris.Map{"error": "too many refresh attempts, try again later"})
@@ -276,8 +309,35 @@ func RefreshToken(ctx iris.Context) {
 	}
 
 	if refreshTokenRecord.Revoked {
-		// Token reuse detection: a revoked refresh token is being used again.
-		// Security response: revoke ALL tokens for this user (force re-login everywhere).
+		// Benign rotation race: the token was rotated moments ago and the same
+		// device is presenting it again (app relaunch mid-refresh, proxy
+		// retry, two in-flight calls). Issue a fresh pair instead of nuking
+		// the account's sessions — this was the source of random logouts.
+		if refreshTokenRecord.RevokedAt != nil &&
+			time.Since(*refreshTokenRecord.RevokedAt) < refreshReuseGraceWindow {
+			deviceID := ctx.GetHeader("X-Device-ID")
+			if deviceID == "" {
+				deviceID = refreshTokenRecord.DeviceID
+			}
+			tokenPair, err := CreateTokenPair(refreshTokenRecord.UserID, deviceID)
+			if err != nil {
+				ctx.StatusCode(iris.StatusInternalServerError)
+				ctx.JSON(iris.Map{"error": "failed to generate new tokens"})
+				return
+			}
+			log.Printf("[auth] refresh race grace user_id=%d ip=%s", refreshTokenRecord.UserID, clientIP(ctx))
+			ctx.JSON(iris.Map{
+				"accessToken":  string(tokenPair.AccessToken),
+				"refreshToken": string(tokenPair.RefreshToken),
+				"expiresIn":    AccessTokenExpiresInSeconds(),
+				"user_id":      refreshTokenRecord.UserID,
+			})
+			return
+		}
+
+		// Token reuse detection: a revoked refresh token is being used again
+		// well after rotation. Security response: revoke ALL tokens for this
+		// user (force re-login everywhere).
 		log.Printf("[auth] refresh reuse detected user_id=%d ip=%s", refreshTokenRecord.UserID, clientIP(ctx))
 		storage.DB.Model(&models.RefreshToken{}).
 			Where("user_id = ? AND revoked = false", refreshTokenRecord.UserID).
