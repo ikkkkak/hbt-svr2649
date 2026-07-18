@@ -67,6 +67,11 @@ func (u *User) MarshalJSON() ([]byte, error) {
 		SavedExperiences  []int    `json:"savedExperiences,omitempty"`
 		SavedPropertySales []int    `json:"savedPropertySales,omitempty"`
 		PushTokens        []string `json:"pushTokens,omitempty"`
+		// Shadows the model's Password field with an always-empty value so
+		// the bcrypt hash can never serialize into ANY API response (it was
+		// shipping in every payload that embeds a user — property host,
+		// login, profile). Empty + omitempty = key absent entirely.
+		Password string `json:"password,omitempty"`
 		*Alias
 	}{
 		Languages:          []string{},

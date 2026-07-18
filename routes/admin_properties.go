@@ -76,11 +76,11 @@ func AdminGetProperty(ctx iris.Context) {
 	include := strings.Split(strings.TrimSpace(ctx.URLParamDefault("include", "")), ",")
 
 	var prop models.Property
-	q := storage.DB.Model(&models.Property{})
+	// Host is ALWAYS preloaded — the admin review page needs full host
+	// details (identity, verification, broker status) to make a decision.
+	q := storage.DB.Model(&models.Property{}).Preload("Host")
 	for _, inc := range include {
 		switch strings.TrimSpace(inc) {
-		case "host":
-			q = q.Preload("Host")
 		case "reservations":
 			q = q.Preload("Reservations")
 		case "media":
@@ -93,7 +93,28 @@ func AdminGetProperty(ctx iris.Context) {
 		utils.JSONError(ctx, http.StatusNotFound, "not_found", "property not found")
 		return
 	}
-	ctx.JSON(iris.Map{"data": prop, "meta": iris.Map{}, "links": iris.Map{}})
+
+	// Host portfolio stats for the review sidebar.
+	meta := iris.Map{}
+	if prop.HostID > 0 {
+		var totalProps, approvedProps, totalReservations int64
+		storage.DB.Model(&models.Property{}).
+			Where("host_id = ?", prop.HostID).Count(&totalProps)
+		storage.DB.Model(&models.Property{}).
+			Where("host_id = ? AND status IN ?", prop.HostID, []string{"approved", "live", "published"}).
+			Count(&approvedProps)
+		storage.DB.Model(&models.Reservation{}).
+			Joins("JOIN properties ON properties.id = reservations.property_id").
+			Where("properties.host_id = ?", prop.HostID).
+			Count(&totalReservations)
+		meta["host_stats"] = iris.Map{
+			"total_properties":    totalProps,
+			"approved_properties": approvedProps,
+			"total_reservations":  totalReservations,
+			"member_since":        prop.Host.CreatedAt,
+		}
+	}
+	ctx.JSON(iris.Map{"data": prop, "meta": meta, "links": iris.Map{}})
 }
 
 // PATCH /admin/properties/:id/status {status, note}
