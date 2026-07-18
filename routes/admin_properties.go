@@ -83,14 +83,20 @@ func AdminGetProperty(ctx iris.Context) {
 		switch strings.TrimSpace(inc) {
 		case "reservations":
 			q = q.Preload("Reservations")
-		case "media":
-			q = q.Preload("Images")
+		// NOTE: no "media" case — Property.Images is a JSON string column,
+		// not a relation. Preload("Images") makes GORM error out, which the
+		// old error mapping below reported as a bogus 404 "property not
+		// found" for a property that exists.
 		case "reviews":
 			q = q.Preload("Reviews")
 		}
 	}
 	if err := q.First(&prop, id).Error; err != nil {
-		utils.JSONError(ctx, http.StatusNotFound, "not_found", "property not found")
+		if err == gorm.ErrRecordNotFound {
+			utils.JSONError(ctx, http.StatusNotFound, "not_found", "property not found")
+			return
+		}
+		utils.JSONError(ctx, http.StatusInternalServerError, "server_error", err.Error())
 		return
 	}
 
