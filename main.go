@@ -247,6 +247,17 @@ func main() {
 			utils.PurgeOldRefreshTokens()
 		}
 	}()
+	// Hourly geom backfill — plots imported while the server runs become
+	// visible to the tile engine without a restart (the tile query filters
+	// geom IS NOT NULL; startup-only backfill left post-import quartiers
+	// rendering a fraction of their plots).
+	go func() {
+		t := time.NewTicker(1 * time.Hour)
+		defer t.Stop()
+		for range t.C {
+			storage.BackfillHabitatPlotGeomNow()
+		}
+	}()
 	fmt.Println("✅ WebSocket Hub initialized successfully")
 
 	// Initialize MeskenyGPT AI service (shared AI infrastructure)

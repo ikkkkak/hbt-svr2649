@@ -1051,6 +1051,18 @@ func ensureHabitatPostGIS(db *gorm.DB) {
 	go backfillHabitatPlotGeom(db)
 }
 
+// BackfillHabitatPlotGeomNow re-runs the geom backfill on demand — called on
+// a schedule from main so plots imported AFTER server startup become visible
+// to the tile engine without a redeploy. (Observed in prod: a quartier with
+// 7,798 plots served tiles for only the 464 rows whose geom was backfilled
+// before its import — the tile query filters `geom IS NOT NULL`.)
+func BackfillHabitatPlotGeomNow() {
+	if !HabitatPostGISReady || DB == nil {
+		return
+	}
+	backfillHabitatPlotGeom(DB)
+}
+
 // backfillHabitatPlotGeom populates geom from the existing geom_geojson JSONB
 // column. Runs per-row inside a PL/pgSQL loop with exception handling so one
 // malformed geometry doesn't abort the whole batch — those rows are simply
