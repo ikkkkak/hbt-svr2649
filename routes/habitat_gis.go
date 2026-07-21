@@ -1121,7 +1121,20 @@ func findHabitatPlotInSector(sectorID uint, plotNumber string, subSectorID *uint
 		return q
 	}
 
-	err := applySubSectorScope(storage.DB.Model(&models.HabitatPlot{}).
+	// When no sub-area is specified, a plot number can be ambiguous: the same
+	// number may exist directly in the parent sector AND inside a sub-area.
+	// Prefer the PARENT-sector plot (sub_sector_id IS NULL) so an unscoped
+	// search returns the top-level plot, not the sub-area one. (`(x IS NULL)`
+	// is boolean; DESC puts TRUE/NULL-sub_sector rows first.)
+	applyParentFirstOrder := func(q *gorm.DB) *gorm.DB {
+		if subSectorID != nil && *subSectorID > 0 {
+			return q.Order("habitat_plots.id ASC")
+		}
+		return q.Order("(habitat_plots.sub_sector_id IS NULL) DESC").
+			Order("habitat_plots.id ASC")
+	}
+
+	err := applyParentFirstOrder(applySubSectorScope(storage.DB.Model(&models.HabitatPlot{}).
 		Joins(forSaleJoin).
 		Select(
 			"habitat_plots.*",
@@ -1129,7 +1142,7 @@ func findHabitatPlotInSector(sectorID uint, plotNumber string, subSectorID *uint
 		).
 		Preload("Sector").Preload("Plan").Preload("SubSector").
 		Where("sector_id = ?", sectorID).
-		Where("LOWER(REPLACE(TRIM(plot_number), ' ', '')) = ?", norm)).
+		Where("LOWER(REPLACE(TRIM(plot_number), ' ', '')) = ?", norm))).
 		First(&plot).Error
 	if err == nil {
 		ensureHabitatPlotPlanSector(&plot)
@@ -1142,7 +1155,7 @@ func findHabitatPlotInSector(sectorID uint, plotNumber string, subSectorID *uint
 		return nil, "", err
 	}
 
-	err = applySubSectorScope(storage.DB.Model(&models.HabitatPlot{}).
+	err = applyParentFirstOrder(applySubSectorScope(storage.DB.Model(&models.HabitatPlot{}).
 		Joins(forSaleJoin).
 		Select(
 			"habitat_plots.*",
@@ -1150,7 +1163,7 @@ func findHabitatPlotInSector(sectorID uint, plotNumber string, subSectorID *uint
 		).
 		Preload("Sector").Preload("Plan").Preload("SubSector").
 		Where("sector_id = ?", sectorID).
-		Where("LOWER(TRIM(plot_number)) = LOWER(TRIM(?))", pn)).
+		Where("LOWER(TRIM(plot_number)) = LOWER(TRIM(?))", pn))).
 		First(&plot).Error
 	if err == nil {
 		ensureHabitatPlotPlanSector(&plot)
