@@ -182,18 +182,24 @@ func (w *WebScraper) scrapeSourceWithTrigger(ctx context.Context, source *models
 		storage.DB.Create(&run)
 	}()
 
-	var sel scrapeSelectors
-	if len(source.Selectors) > 0 {
-		_ = json.Unmarshal(source.Selectors, &sel)
-	}
-	if strings.TrimSpace(sel.Item) == "" {
-		return nil, fmt.Errorf("source %d has no 'item' selector", source.ID)
-	}
-
 	target, perr := url.Parse(source.URL)
 	if perr != nil || target.Host == "" {
 		return nil, fmt.Errorf("invalid source URL")
 	}
+
+	var sel scrapeSelectors
+	if len(source.Selectors) > 0 {
+		_ = json.Unmarshal(source.Selectors, &sel)
+	}
+	// No 'item' selector → CONTENT-CRAWL mode: map the whole site and extract
+	// each page's readable text (for ministry / cadastre / procedures info),
+	// instead of listing-card extraction. This is the default for informational
+	// government/institutional sources.
+	if strings.TrimSpace(sel.Item) == "" {
+		result, retErr = w.crawlSiteContent(ctx, source, target)
+		return result, retErr
+	}
+
 	// Respect robots.txt — refuse disallowed paths (compliance/legal).
 	if !w.robotsAllowed(ctx, target) {
 		return nil, fmt.Errorf("blocked by robots.txt for %s", target.Host)
@@ -389,6 +395,174 @@ func hashListing(sourceID uint, l *models.ScrapedListing) string {
 	h := sha256.Sum256([]byte(fmt.Sprintf("%d|%s|%s|%s|%s",
 		sourceID, l.Title, l.PriceText, l.Location, l.SourceURL)))
 	return hex.EncodeToString(h[:])
+}
+
+// Crawl limits — bounded so a single source can't run away.
+const (
+	crawlMaxPages = 60
+	crawlMaxDepth = 2
+	crawlMinChars = 120 // skip near-empty pages
+)
+
+// Real-estate relevance: only KEEP pages whose text/URL relates to housing,
+// land, cadastre, urbanism, or the relevant ministries/procedures. Links are
+// still followed broadly (a hub page may link to relevant sub-pages), but
+// stored content is filtered so the AI's knowledge stays on-topic.
+var realEstateTerms = []string{
+	"immobilier", "logement", "urbanisme", "foncier", "terrain", "cadastre",
+	"habitat", "propriété", "propriete", "parcelle", "lotissement", "construction",
+	"land", "housing", "property", "real estate", "plot", "deed", "title",
+	"عقار", "أرض", "سكن", "إسكان", "عمران", "مساحة", "قطعة", "بناء", "ملكية",
+	"procédure", "procedure", "ministère", "ministere", "ministry",
+}
+
+type crawlPage struct {
+	url   string
+	depth int
+}
+
+// crawlSiteContent maps a site (BFS, same-host, bounded) and stores each
+// relevant page's readable text as a ScrapedListing (Title = page title,
+// Description = cleaned text, SourceURL = page URL). This powers the AI's
+// knowledge of ministry/cadastre/land procedures with citations.
+func (w *WebScraper) crawlSiteContent(ctx context.Context, source *models.ScrapedSource, start *url.URL) (*ScrapeResult, error) {
+	result := &ScrapeResult{}
+	visited := map[string]bool{}
+	queue := []crawlPage{{url: start.String(), depth: 0}}
+	now := time.Now()
+
+	for len(queue) > 0 && result.ItemCount < crawlMaxPages {
+		if ctx.Err() != nil {
+			break
+		}
+		page := queue[0]
+		queue = queue[1:]
+		if visited[page.url] {
+			continue
+		}
+		visited[page.url] = true
+
+		pu, err := url.Parse(page.url)
+		if err != nil || pu.Host != start.Host {
+			continue
+		}
+		if !w.robotsAllowed(ctx, pu) {
+			continue
+		}
+		waitForDomain(pu.Host)
+
+		doc, err := w.fetchDoc(ctx, page.url)
+		if err != nil || doc == nil {
+			continue
+		}
+
+		title, text := extractReadable(doc)
+		if pageIsRelevant(title, text, page.url) && len(text) >= crawlMinChars {
+			listing := models.ScrapedListing{
+				SourceID:    source.ID,
+				Kind:        source.Kind,
+				Title:       clip(title, 500),
+				Description: clip(text, 6000),
+				SourceURL:   page.url,
+				ScrapedAt:   now,
+			}
+			listing.ContentHash = hashListing(source.ID, &listing)
+			var existing models.ScrapedListing
+			if storage.DB.Where("source_id = ? AND content_hash = ?", source.ID, listing.ContentHash).
+				First(&existing).Error == nil {
+				listing.ID = existing.ID
+				listing.CreatedAt = existing.CreatedAt
+				if storage.DB.Save(&listing).Error == nil {
+					result.Updated++
+				}
+			} else if storage.DB.Create(&listing).Error == nil {
+				result.Inserted++
+			}
+			result.ItemCount++
+		}
+
+		// Discover same-host links to crawl next (breadth-first, bounded depth).
+		if page.depth < crawlMaxDepth {
+			doc.Find("a[href]").Each(func(_ int, s *goquery.Selection) {
+				href, ok := s.Attr("href")
+				if !ok {
+					return
+				}
+				next := absURL(start, strings.TrimSpace(href))
+				nu, err := url.Parse(next)
+				if err != nil || nu.Host != start.Host {
+					return
+				}
+				nu.Fragment = ""
+				clean := nu.String()
+				if !visited[clean] && len(queue) < 400 {
+					queue = append(queue, crawlPage{url: clean, depth: page.depth + 1})
+				}
+			})
+		}
+	}
+
+	result.Status = fmt.Sprintf("crawled — %d relevant pages (%d new, %d updated)",
+		result.ItemCount, result.Inserted, result.Updated)
+	source.LastScrapedAt = &now
+	source.LastStatus = result.Status
+	source.LastItemCount = result.ItemCount
+	storage.DB.Model(source).Updates(map[string]any{
+		"last_scraped_at": now,
+		"last_status":     result.Status,
+		"last_item_count": result.ItemCount,
+	})
+	return result, nil
+}
+
+func (w *WebScraper) fetchDoc(ctx context.Context, rawURL string) (*goquery.Document, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent",
+		"Mozilla/5.0 (compatible; MeskenyBot/1.0; +https://meskeny.com/bot)")
+	req.Header.Set("Accept-Language", "en,fr,ar")
+	resp, err := w.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+	ct := resp.Header.Get("Content-Type")
+	if ct != "" && !strings.Contains(ct, "html") {
+		return nil, fmt.Errorf("non-html")
+	}
+	return goquery.NewDocumentFromReader(resp.Body)
+}
+
+var wsCollapse = regexp.MustCompile(`\s+`)
+
+// extractReadable pulls a page's title and main text, stripping chrome.
+func extractReadable(doc *goquery.Document) (title, text string) {
+	title = strings.TrimSpace(doc.Find("title").First().Text())
+	if title == "" {
+		title = strings.TrimSpace(doc.Find("h1").First().Text())
+	}
+	doc.Find("script, style, noscript, nav, footer, header, form, svg").Remove()
+	body := doc.Find("main")
+	if body.Length() == 0 {
+		body = doc.Find("body")
+	}
+	text = wsCollapse.ReplaceAllString(strings.TrimSpace(body.Text()), " ")
+	return title, text
+}
+
+func pageIsRelevant(title, text, pageURL string) bool {
+	hay := strings.ToLower(title + " " + text + " " + pageURL)
+	for _, term := range realEstateTerms {
+		if strings.Contains(hay, term) {
+			return true
+		}
+	}
+	return false
 }
 
 // ScrapeAllActiveSources re-scrapes every active source, sequentially and

@@ -46,12 +46,28 @@ func retrieveScrapedMarketBlock(ctx context.Context, gdb *gorm.DB, mc lang.Messa
 	if kind != "" {
 		q = q.Where("sl.kind = ?", kind)
 	}
-	// Relevance: prefer city/location matches, else most recent.
-	needle := strings.TrimSpace(strings.ToLower(firstNonEmptyStr(mc.City, mc.Zone)))
-	if needle != "" {
-		like := "%" + needle + "%"
-		q = q.Where("LOWER(sl.city) LIKE ? OR LOWER(sl.location) LIKE ? OR LOWER(sl.title) LIKE ?",
-			like, like, like)
+
+	// Relevance: match the user's message keywords across title, DESCRIPTION
+	// (crawled page text — ministry/cadastre/procedures info lives here),
+	// location and city. City/zone from the parsed context are weighted in too.
+	terms := promptTokens(mc.RawText)
+	if c := strings.TrimSpace(strings.ToLower(firstNonEmptyStr(mc.City, mc.Zone))); c != "" {
+		terms = append([]string{c}, terms...)
+	}
+	if len(terms) > 0 {
+		or := gdb.Session(&gorm.Session{NewDB: true})
+		first := true
+		for _, t := range terms {
+			like := "%" + t + "%"
+			cond := "LOWER(sl.title) LIKE ? OR LOWER(sl.description) LIKE ? OR LOWER(sl.location) LIKE ? OR LOWER(sl.city) LIKE ?"
+			if first {
+				or = or.Where(cond, like, like, like, like)
+				first = false
+			} else {
+				or = or.Or(cond, like, like, like, like)
+			}
+		}
+		q = q.Where(or)
 	}
 
 	var rows []scrapedMarketRow
@@ -60,7 +76,7 @@ func retrieveScrapedMarketBlock(ctx context.Context, gdb *gorm.DB, mc lang.Messa
 	}
 
 	var b strings.Builder
-	b.WriteString("\n\n=== LIVE MARKET LISTINGS (scraped, real; use for pricing/comparables and CITE the source URL when you reference one) ===\n")
+	b.WriteString("\n\n=== SCRAPED KNOWLEDGE & MARKET DATA (real pages: ministry/cadastre/land procedures + market listings; use to inform the answer and CITE the source URL when you reference one) ===\n")
 	for i, r := range rows {
 		loc := firstNonEmptyStr(r.Location, r.City)
 		b.WriteString(fmt.Sprintf("%d. %s", i+1, strings.TrimSpace(r.Title)))
@@ -86,4 +102,33 @@ func firstNonEmptyStr(vals ...string) string {
 		}
 	}
 	return ""
+}
+
+var promptStop = map[string]bool{
+	"the": true, "and": true, "for": true, "with": true, "you": true, "what": true,
+	"how": true, "are": true, "can": true, "que": true, "les": true, "des": true,
+	"pour": true, "une": true, "comment": true, "quel": true, "quelle": true,
+}
+
+// promptTokens extracts up-to-6 meaningful search tokens (latin + arabic) from
+// the user's message for matching against scraped content.
+func promptTokens(msg string) []string {
+	msg = strings.ToLower(strings.TrimSpace(msg))
+	fields := strings.FieldsFunc(msg, func(r rune) bool {
+		return !(r >= 'a' && r <= 'z') && !(r >= '0' && r <= '9') &&
+			!(r >= 0x0600 && r <= 0x06FF)
+	})
+	out := make([]string, 0, 6)
+	seen := map[string]bool{}
+	for _, f := range fields {
+		if len(f) < 4 || promptStop[f] || seen[f] {
+			continue
+		}
+		seen[f] = true
+		out = append(out, f)
+		if len(out) >= 6 {
+			break
+		}
+	}
+	return out
 }
