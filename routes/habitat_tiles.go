@@ -22,7 +22,13 @@ import (
 
 const (
 	habitatTileMinZoom = 12
-	habitatTileMaxZoom = 20
+	// 22 (not 20): pinch-zoom momentum easily overshoots the camera cap, and
+	// the client then requests tiles one or two levels deeper. Any request
+	// above this returns 204, which blanks EVERY plot mid-zoom ("plots
+	// disappear when I zoom in too much"). Serving real tiles to z22 (~9m)
+	// means data always exists wherever the camera lands. Each deep tile is
+	// tiny (few plots), so the extra levels are cheap.
+	habitatTileMaxZoom = 22
 
 	// habitatTileMaxFeatures bounds the legacy Go/orb fallback. Raised from
 	// 4096 → 20000 because with PostGIS unavailable on the managed host, the
