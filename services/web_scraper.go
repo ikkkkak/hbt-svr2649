@@ -258,3 +258,29 @@ func hashListing(sourceID uint, l *models.ScrapedListing) string {
 		sourceID, l.Title, l.PriceText, l.Location, l.SourceURL)))
 	return hex.EncodeToString(h[:])
 }
+
+// ScrapeAllActiveSources re-scrapes every active source, sequentially and
+// politely (a short delay between sources so we never hammer a site). Used by
+// the scheduled refresh so the AI's market data stays fresh without manual
+// admin runs. Errors are logged per-source and never abort the batch.
+func ScrapeAllActiveSources() {
+	if storage.DB == nil {
+		return
+	}
+	var sources []models.ScrapedSource
+	if err := storage.DB.Where("active = true").Find(&sources).Error; err != nil {
+		return
+	}
+	scraper := NewWebScraper()
+	for i := range sources {
+		func(src *models.ScrapedSource) {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			if _, err := scraper.ScrapeSource(ctx, src); err != nil {
+				src.LastStatus = "error: " + err.Error()
+				storage.DB.Model(src).Update("last_status", src.LastStatus)
+			}
+		}(&sources[i])
+		time.Sleep(3 * time.Second) // be polite between sites
+	}
+}

@@ -270,6 +270,18 @@ func main() {
 			routes.BackfillHabitatCentroidsFromGeoJSON()
 		}
 	}()
+	// MeskenyGPT market-data refresh — re-scrape active web sources every 6h
+	// so the AI cites current listings. First run is delayed 2 min so boot
+	// isn't slowed; disable per-source via the admin "Pause" toggle.
+	go func() {
+		time.Sleep(2 * time.Minute)
+		services.ScrapeAllActiveSources()
+		t := time.NewTicker(6 * time.Hour)
+		defer t.Stop()
+		for range t.C {
+			services.ScrapeAllActiveSources()
+		}
+	}()
 	fmt.Println("✅ WebSocket Hub initialized successfully")
 
 	// Initialize MeskenyGPT AI service (shared AI infrastructure)
