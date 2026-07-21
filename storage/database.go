@@ -1063,6 +1063,37 @@ func BackfillHabitatPlotGeomNow() {
 	backfillHabitatPlotGeom(DB)
 }
 
+// BackfillHabitatPlotGeomToCompletion loops the backfill until NO backfillable
+// rows remain (or a batch makes no progress — all remaining rows malformed).
+// Each backfillHabitatPlotGeom call handles up to 300k rows, so a large
+// dataset needs several passes; the admin trigger uses this to finish now
+// instead of chipping away 300k/hour via the ticker.
+func BackfillHabitatPlotGeomToCompletion() {
+	if !HabitatPostGISReady || DB == nil {
+		return
+	}
+	for i := 0; i < 100; i++ {
+		var before int64
+		DB.Raw(`
+			SELECT COUNT(*) FROM habitat_plots
+			WHERE geom IS NULL AND geom_geojson IS NOT NULL AND geom_geojson::text NOT IN ('null', '{}')
+		`).Scan(&before)
+		if before == 0 {
+			return
+		}
+		backfillHabitatPlotGeom(DB)
+		var after int64
+		DB.Raw(`
+			SELECT COUNT(*) FROM habitat_plots
+			WHERE geom IS NULL AND geom_geojson IS NOT NULL AND geom_geojson::text NOT IN ('null', '{}')
+		`).Scan(&after)
+		if after >= before {
+			// No progress — remaining rows are all malformed; stop looping.
+			return
+		}
+	}
+}
+
 // backfillHabitatPlotGeom populates geom from the existing geom_geojson JSONB
 // column. Runs per-row inside a PL/pgSQL loop with exception handling so one
 // malformed geometry doesn't abort the whole batch — those rows are simply
