@@ -118,7 +118,11 @@ func AdminDeleteScrapedSource(ctx iris.Context) {
 	ctx.JSON(iris.Map{"success": true})
 }
 
-// POST /admin/scraper/sources/:id/run — scrape now, returns the run summary.
+// POST /admin/scraper/sources/:id/run — start a scrape in the BACKGROUND and
+// return immediately. Scraping (robots fetch + polite wait + page fetch +
+// parse) can exceed a reverse proxy's request timeout; running it inline made
+// the proxy return 502. The admin polls GET /scraper/sources (last_status) or
+// /scraper/listings to see the outcome.
 func AdminRunScrapedSource(ctx iris.Context) {
 	id, err := ctx.Params().GetUint("id")
 	if err != nil {
@@ -130,16 +134,25 @@ func AdminRunScrapedSource(ctx iris.Context) {
 		utils.JSONError(ctx, http.StatusNotFound, "not_found", "source not found")
 		return
 	}
-	c, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	res, err := services.NewWebScraper().ScrapeSource(c, &src)
-	if err != nil {
-		src.LastStatus = "error: " + err.Error()
-		storage.DB.Model(&src).Update("last_status", src.LastStatus)
-		utils.JSONError(ctx, http.StatusBadGateway, "scrape_failed", err.Error())
-		return
-	}
-	ctx.JSON(iris.Map{"data": res, "source": src})
+
+	// Mark running so the UI shows progress immediately.
+	storage.DB.Model(&src).Update("last_status", "running…")
+
+	go func(s models.ScrapedSource) {
+		c, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		if _, err := services.NewWebScraper().ScrapeSource(c, &s); err != nil {
+			storage.DB.Model(&models.ScrapedSource{}).Where("id = ?", s.ID).
+				Update("last_status", "error: "+err.Error())
+		}
+	}(src)
+
+	ctx.StatusCode(http.StatusAccepted)
+	ctx.JSON(iris.Map{
+		"status":     "started",
+		"source_id":  id,
+		"poll":       "GET /api/admin/scraper/listings?source_id=" + strconv.FormatUint(uint64(id), 10),
+	})
 }
 
 // GET /admin/scraper/runs?source_id=&limit= — audit trail of scrape runs.
