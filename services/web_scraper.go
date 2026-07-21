@@ -123,6 +123,10 @@ func NewWebScraper() *WebScraper {
 }
 
 type scrapeSelectors struct {
+	// StoreAll ("true"): in crawl mode, keep EVERY page with substantial text,
+	// not just real-estate-relevant ones (for dedicated housing/land/cadastre
+	// sites where everything matters).
+	StoreAll    string `json:"_store_all"`
 	Item        string `json:"item"`
 	Title       string `json:"title"`
 	Price       string `json:"price"`
@@ -196,7 +200,7 @@ func (w *WebScraper) scrapeSourceWithTrigger(ctx context.Context, source *models
 	// instead of listing-card extraction. This is the default for informational
 	// government/institutional sources.
 	if strings.TrimSpace(sel.Item) == "" {
-		result, retErr = w.crawlSiteContent(ctx, source, target)
+		result, retErr = w.crawlSiteContent(ctx, source, target, sel.StoreAll == "true")
 		return result, retErr
 	}
 
@@ -397,11 +401,15 @@ func hashListing(sourceID uint, l *models.ScrapedListing) string {
 	return hex.EncodeToString(h[:])
 }
 
-// Crawl limits — bounded so a single source can't run away.
+// Crawl limits — high enough to map an entire ministry/portal, still bounded
+// so one source can't run away. An admin-registered crawl of a single site
+// gets a lighter per-page delay than the global politeness spacing.
 const (
-	crawlMaxPages = 60
-	crawlMaxDepth = 2
-	crawlMinChars = 120 // skip near-empty pages
+	crawlMaxPages    = 1200
+	crawlMaxDepth    = 8
+	crawlMinChars    = 100 // skip near-empty pages
+	crawlPageSpacing = 600 * time.Millisecond
+	crawlMaxSitemaps = 50 // nested sitemap files to expand
 )
 
 // Real-estate relevance: only KEEP pages whose text/URL relates to housing,
@@ -425,13 +433,24 @@ type crawlPage struct {
 // relevant page's readable text as a ScrapedListing (Title = page title,
 // Description = cleaned text, SourceURL = page URL). This powers the AI's
 // knowledge of ministry/cadastre/land procedures with citations.
-func (w *WebScraper) crawlSiteContent(ctx context.Context, source *models.ScrapedSource, start *url.URL) (*ScrapeResult, error) {
+func (w *WebScraper) crawlSiteContent(ctx context.Context, source *models.ScrapedSource, start *url.URL, storeAll bool) (*ScrapeResult, error) {
 	result := &ScrapeResult{}
 	visited := map[string]bool{}
 	queue := []crawlPage{{url: start.String(), depth: 0}}
 	now := time.Now()
+	pagesFetched := 0
 
-	for len(queue) > 0 && result.ItemCount < crawlMaxPages {
+	// Seed the queue from the site's sitemap(s) FIRST — this is how we find
+	// every page, including ones not linked from the homepage. Robots.txt
+	// Sitemap: directives + common sitemap paths are expanded (incl. sitemap
+	// index files). Link-following below then catches anything not in a sitemap.
+	for _, smURL := range w.discoverSitemapURLs(ctx, start) {
+		if !visited[smURL] {
+			queue = append(queue, crawlPage{url: smURL, depth: 1})
+		}
+	}
+
+	for len(queue) > 0 && result.ItemCount < crawlMaxPages && pagesFetched < crawlMaxPages*3 {
 		if ctx.Err() != nil {
 			break
 		}
@@ -449,7 +468,8 @@ func (w *WebScraper) crawlSiteContent(ctx context.Context, source *models.Scrape
 		if !w.robotsAllowed(ctx, pu) {
 			continue
 		}
-		waitForDomain(pu.Host)
+		time.Sleep(crawlPageSpacing) // lighter than global spacing; single site
+		pagesFetched++
 
 		doc, err := w.fetchDoc(ctx, page.url)
 		if err != nil || doc == nil {
@@ -457,7 +477,7 @@ func (w *WebScraper) crawlSiteContent(ctx context.Context, source *models.Scrape
 		}
 
 		title, text := extractReadable(doc)
-		if pageIsRelevant(title, text, page.url) && len(text) >= crawlMinChars {
+		if len(text) >= crawlMinChars && (storeAll || pageIsRelevant(title, text, page.url)) {
 			listing := models.ScrapedListing{
 				SourceID:    source.ID,
 				Kind:        source.Kind,
@@ -513,6 +533,99 @@ func (w *WebScraper) crawlSiteContent(ctx context.Context, source *models.Scrape
 		"last_item_count": result.ItemCount,
 	})
 	return result, nil
+}
+
+var (
+	sitemapDirectiveRe = regexp.MustCompile(`(?i)^\s*sitemap:\s*(\S+)`)
+	locRe              = regexp.MustCompile(`(?i)<loc>\s*([^<\s]+)\s*</loc>`)
+)
+
+// discoverSitemapURLs returns every page URL listed in the site's sitemaps —
+// the authoritative "map of all pages". Sources: robots.txt Sitemap: lines,
+// plus common paths (/sitemap.xml, /sitemap_index.xml). Sitemap-index files
+// are expanded into their child sitemaps (bounded). Same-host only.
+func (w *WebScraper) discoverSitemapURLs(ctx context.Context, start *url.URL) []string {
+	base := start.Scheme + "://" + start.Host
+	seeds := []string{}
+
+	// From robots.txt.
+	if req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/robots.txt", nil); err == nil {
+		req.Header.Set("User-Agent", userAgentToken)
+		if resp, err := w.client.Do(req); err == nil {
+			sc := bufio.NewScanner(resp.Body)
+			for sc.Scan() {
+				if m := sitemapDirectiveRe.FindStringSubmatch(sc.Text()); m != nil {
+					seeds = append(seeds, strings.TrimSpace(m[1]))
+				}
+			}
+			resp.Body.Close()
+		}
+	}
+	// Common conventional paths.
+	seeds = append(seeds, base+"/sitemap.xml", base+"/sitemap_index.xml")
+
+	var pages []string
+	seenSM := map[string]bool{}
+	seenPage := map[string]bool{}
+	expanded := 0
+
+	var expand func(smURL string)
+	expand = func(smURL string) {
+		if expanded >= crawlMaxSitemaps || seenSM[smURL] {
+			return
+		}
+		seenSM[smURL] = true
+		expanded++
+		body := w.fetchText(ctx, smURL)
+		if body == "" {
+			return
+		}
+		isIndex := strings.Contains(strings.ToLower(body), "<sitemapindex")
+		for _, m := range locRe.FindAllStringSubmatch(body, -1) {
+			loc := strings.TrimSpace(m[1])
+			lu, err := url.Parse(loc)
+			if err != nil || lu.Host != start.Host {
+				continue
+			}
+			if isIndex || strings.HasSuffix(strings.ToLower(lu.Path), ".xml") {
+				expand(loc) // nested sitemap
+			} else if !seenPage[loc] {
+				seenPage[loc] = true
+				pages = append(pages, loc)
+			}
+		}
+	}
+	for _, s := range seeds {
+		expand(s)
+	}
+	return pages
+}
+
+// fetchText returns the raw body of a URL (for sitemap XML), size-capped.
+func (w *WebScraper) fetchText(ctx context.Context, rawURL string) string {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return ""
+	}
+	req.Header.Set("User-Agent", userAgentToken)
+	resp, err := w.client.Do(req)
+	if err != nil || resp.StatusCode >= 400 {
+		if resp != nil {
+			resp.Body.Close()
+		}
+		return ""
+	}
+	defer resp.Body.Close()
+	buf := make([]byte, 0, 64*1024)
+	tmp := make([]byte, 32*1024)
+	for len(buf) < 8*1024*1024 { // 8MB cap
+		n, err := resp.Body.Read(tmp)
+		buf = append(buf, tmp[:n]...)
+		if err != nil {
+			break
+		}
+	}
+	return string(buf)
 }
 
 func (w *WebScraper) fetchDoc(ctx context.Context, rawURL string) (*goquery.Document, error) {
@@ -580,7 +693,7 @@ func ScrapeAllActiveSources() {
 	scraper := NewWebScraper()
 	for i := range sources {
 		func(src *models.ScrapedSource) {
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), 25*time.Minute)
 			defer cancel()
 			if _, err := scraper.ScrapeSourceScheduled(ctx, src); err != nil {
 				src.LastStatus = "error: " + err.Error()

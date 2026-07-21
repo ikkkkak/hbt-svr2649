@@ -139,7 +139,9 @@ func AdminRunScrapedSource(ctx iris.Context) {
 	storage.DB.Model(&src).Update("last_status", "running…")
 
 	go func(s models.ScrapedSource) {
-		c, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		// Long budget: a full site crawl (sitemap + links) can take many
+		// minutes. Runs in the background so nothing waits on it.
+		c, cancel := context.WithTimeout(context.Background(), 25*time.Minute)
 		defer cancel()
 		if _, err := services.NewWebScraper().ScrapeSource(c, &s); err != nil {
 			storage.DB.Model(&models.ScrapedSource{}).Where("id = ?", s.ID).
