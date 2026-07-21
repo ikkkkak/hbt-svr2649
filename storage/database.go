@@ -221,6 +221,8 @@ func performMigrations(db *gorm.DB) {
 		&models.AIFeedback{},
 		&models.MarketSnapshot{},
 		&models.MeskenyKnowledgeEntry{},
+		&models.ScrapedSource{},
+		&models.ScrapedListing{},
 		&models.AIEscalation{},
 		&models.AINotification{},
 		&models.AIConversationMemory{},

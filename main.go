@@ -673,6 +673,14 @@ func main() {
 		admin.Get("/broker-verifications/pending", routes.AdminListPendingBrokerVerifications)
 		admin.Get("/identity-verifications", routes.AdminListIdentityVerifications)
 		admin.Get("/identity-verifications/{user_id:uint}", routes.AdminGetIdentityVerificationUser)
+		// MeskenyGPT web-scraping sources + scraped market listings.
+		admin.Get("/scraper/sources", routes.AdminListScrapedSources)
+		admin.Post("/scraper/sources", routes.AdminCreateScrapedSource)
+		admin.Patch("/scraper/sources/{id:uint}", routes.AdminUpdateScrapedSource)
+		admin.Delete("/scraper/sources/{id:uint}", routes.AdminDeleteScrapedSource)
+		admin.Post("/scraper/sources/{id:uint}/run", routes.AdminRunScrapedSource)
+		admin.Get("/scraper/listings", routes.AdminListScrapedListings)
+
 		admin.Get("/properties", routes.AdminListProperties)
 		admin.Get("/properties/{id:uint}", routes.AdminGetProperty)
 		admin.Patch("/properties/{id:uint}/status", routes.AdminUpdatePropertyStatus)
