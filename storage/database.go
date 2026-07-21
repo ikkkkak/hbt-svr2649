@@ -223,6 +223,7 @@ func performMigrations(db *gorm.DB) {
 		&models.MeskenyKnowledgeEntry{},
 		&models.ScrapedSource{},
 		&models.ScrapedListing{},
+		&models.ScrapeRun{},
 		&models.AIEscalation{},
 		&models.AINotification{},
 		&models.AIConversationMemory{},

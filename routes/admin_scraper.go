@@ -142,6 +142,26 @@ func AdminRunScrapedSource(ctx iris.Context) {
 	ctx.JSON(iris.Map{"data": res, "source": src})
 }
 
+// GET /admin/scraper/runs?source_id=&limit= — audit trail of scrape runs.
+func AdminListScrapeRuns(ctx iris.Context) {
+	q := storage.DB.Model(&models.ScrapeRun{})
+	if sid := ctx.URLParam("source_id"); sid != "" {
+		if v, err := strconv.ParseUint(sid, 10, 32); err == nil {
+			q = q.Where("source_id = ?", v)
+		}
+	}
+	limit := ctx.URLParamIntDefault("limit", 50)
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	var runs []models.ScrapeRun
+	if err := q.Order("created_at DESC").Limit(limit).Find(&runs).Error; err != nil {
+		utils.JSONError(ctx, http.StatusInternalServerError, "server_error", err.Error())
+		return
+	}
+	ctx.JSON(iris.Map{"data": runs})
+}
+
 // GET /admin/scraper/listings?source_id=&kind=&limit= — browse scraped rows.
 func AdminListScrapedListings(ctx iris.Context) {
 	q := storage.DB.Model(&models.ScrapedListing{})

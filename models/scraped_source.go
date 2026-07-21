@@ -77,3 +77,23 @@ type ScrapedListing struct {
 }
 
 func (ScrapedListing) TableName() string { return "scraped_listings" }
+
+// ScrapeRun is an audit record of one scrape execution — who/when/what/outcome.
+// Enterprise/government traceability: every fetch of external data is logged,
+// with duration and item counts, immutable after creation.
+type ScrapeRun struct {
+	ID        uint      `json:"id" gorm:"primaryKey"`
+	CreatedAt time.Time `json:"created_at" gorm:"index"`
+
+	SourceID   uint   `json:"source_id" gorm:"index;not null"`
+	URL        string `json:"url" gorm:"type:text"`
+	Trigger    string `json:"trigger" gorm:"size:24"` // manual | scheduled
+	Status     string `json:"status" gorm:"size:255"`
+	OK         bool   `json:"ok" gorm:"index"`
+	ItemCount  int    `json:"item_count"`
+	Inserted   int    `json:"inserted"`
+	Updated    int    `json:"updated"`
+	DurationMs int64  `json:"duration_ms"`
+}
+
+func (ScrapeRun) TableName() string { return "scrape_runs" }

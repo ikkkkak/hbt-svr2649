@@ -413,6 +413,10 @@ func (s *service) HandleChatTurn(ctx context.Context, in ChatInput) (ChatOutput,
 		}
 		sys += kb.String()
 	}
+	// Live market listings (admin-scraped) — lets the AI reason over real
+	// current prices/comparables and cite the source URL.
+	sys += retrieveScrapedMarketBlock(ctx, s.gdb, msgCtx)
+
 	msgs := []client.Message{{Role: "system", Content: sys}}
 	msgs = append(msgs, sanitizeHistoryForLLM(in.History)...)
 	msgs = append(msgs, client.Message{Role: "user", Content: in.Text})

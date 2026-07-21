@@ -692,6 +692,7 @@ func main() {
 		admin.Delete("/scraper/sources/{id:uint}", routes.AdminDeleteScrapedSource)
 		admin.Post("/scraper/sources/{id:uint}/run", routes.AdminRunScrapedSource)
 		admin.Get("/scraper/listings", routes.AdminListScrapedListings)
+		admin.Get("/scraper/runs", routes.AdminListScrapeRuns)
 
 		admin.Get("/properties", routes.AdminListProperties)
 		admin.Get("/properties/{id:uint}", routes.AdminGetProperty)

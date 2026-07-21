@@ -1,6 +1,7 @@
 package services
 
 import (
+	"bufio"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -11,6 +12,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"apartments-clone-server/models"
@@ -18,6 +20,93 @@ import (
 
 	"github.com/PuerkitoBio/goquery"
 )
+
+// userAgentToken is how we identify ourselves in robots.txt + requests.
+const userAgentToken = "MeskenyBot"
+
+// Per-domain politeness: never hit the same host more than once per interval.
+var (
+	domainLastHit   sync.Map // host -> time.Time
+	minDomainSpacing = 4 * time.Second
+	robotsCache      sync.Map // host -> []string (disallowed path prefixes)
+)
+
+// waitForDomain enforces a minimum spacing between requests to the same host.
+func waitForDomain(host string) {
+	if v, ok := domainLastHit.Load(host); ok {
+		if last, ok := v.(time.Time); ok {
+			if d := minDomainSpacing - time.Since(last); d > 0 {
+				time.Sleep(d)
+			}
+		}
+	}
+	domainLastHit.Store(host, time.Now())
+}
+
+// robotsDisallows returns Disallow path-prefixes that apply to us for a host,
+// fetched once per host and cached. Best-effort: on any error we return no
+// rules (fail-open is standard for robots fetch failures).
+func (w *WebScraper) robotsDisallows(ctx context.Context, u *url.URL) []string {
+	if u == nil {
+		return nil
+	}
+	if v, ok := robotsCache.Load(u.Host); ok {
+		if rules, ok := v.([]string); ok {
+			return rules
+		}
+	}
+	robotsURL := u.Scheme + "://" + u.Host + "/robots.txt"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, robotsURL, nil)
+	if err != nil {
+		robotsCache.Store(u.Host, []string(nil))
+		return nil
+	}
+	req.Header.Set("User-Agent", userAgentToken)
+	resp, err := w.client.Do(req)
+	if err != nil || resp.StatusCode >= 400 {
+		if resp != nil {
+			resp.Body.Close()
+		}
+		robotsCache.Store(u.Host, []string(nil))
+		return nil
+	}
+	defer resp.Body.Close()
+
+	// Parse groups; collect Disallow lines under User-agent: * or MeskenyBot.
+	var disallows []string
+	applies := false
+	sc := bufio.NewScanner(resp.Body)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		lower := strings.ToLower(line)
+		if strings.HasPrefix(lower, "user-agent:") {
+			ua := strings.TrimSpace(line[len("user-agent:"):])
+			applies = ua == "*" || strings.Contains(strings.ToLower(ua), "meskenybot")
+			continue
+		}
+		if applies && strings.HasPrefix(lower, "disallow:") {
+			path := strings.TrimSpace(line[len("disallow:"):])
+			if path != "" {
+				disallows = append(disallows, path)
+			}
+		}
+	}
+	robotsCache.Store(u.Host, disallows)
+	return disallows
+}
+
+// robotsAllowed reports whether robots.txt permits fetching u for us.
+func (w *WebScraper) robotsAllowed(ctx context.Context, u *url.URL) bool {
+	for _, dis := range w.robotsDisallows(ctx, u) {
+		if dis == "/" || strings.HasPrefix(u.Path, dis) {
+			return false
+		}
+	}
+	return true
+}
 
 // WebScraper is a single reusable extractor: it fetches a ScrapedSource's URL
 // and maps the DOM onto ScrapedListing rows using the source's CSS selectors.
@@ -59,8 +148,40 @@ type ScrapeResult struct {
 }
 
 // ScrapeSource fetches + extracts + upserts listings for a source. Idempotent
-// per listing via ContentHash. Never panics on malformed markup.
+// per listing via ContentHash. Never panics on malformed markup. `trigger`
+// ("manual"|"scheduled") is recorded in the audit trail.
 func (w *WebScraper) ScrapeSource(ctx context.Context, source *models.ScrapedSource) (*ScrapeResult, error) {
+	return w.scrapeSourceWithTrigger(ctx, source, "manual")
+}
+
+// ScrapeSourceScheduled is the audit-tagged variant used by the background refresh.
+func (w *WebScraper) ScrapeSourceScheduled(ctx context.Context, source *models.ScrapedSource) (*ScrapeResult, error) {
+	return w.scrapeSourceWithTrigger(ctx, source, "scheduled")
+}
+
+func (w *WebScraper) scrapeSourceWithTrigger(ctx context.Context, source *models.ScrapedSource, trigger string) (result *ScrapeResult, retErr error) {
+	startedAt := time.Now()
+	// Audit EVERY run (success or failure) via defer, so no return path escapes
+	// the trail — enterprise/government traceability of external data fetches.
+	defer func() {
+		run := models.ScrapeRun{
+			SourceID:   source.ID,
+			URL:        source.URL,
+			Trigger:    trigger,
+			OK:         retErr == nil,
+			DurationMs: time.Since(startedAt).Milliseconds(),
+		}
+		if retErr != nil {
+			run.Status = clip("error: "+retErr.Error(), 255)
+		} else if result != nil {
+			run.Status = clip(result.Status, 255)
+			run.ItemCount = result.ItemCount
+			run.Inserted = result.Inserted
+			run.Updated = result.Updated
+		}
+		storage.DB.Create(&run)
+	}()
+
 	var sel scrapeSelectors
 	if len(source.Selectors) > 0 {
 		_ = json.Unmarshal(source.Selectors, &sel)
@@ -68,6 +189,17 @@ func (w *WebScraper) ScrapeSource(ctx context.Context, source *models.ScrapedSou
 	if strings.TrimSpace(sel.Item) == "" {
 		return nil, fmt.Errorf("source %d has no 'item' selector", source.ID)
 	}
+
+	target, perr := url.Parse(source.URL)
+	if perr != nil || target.Host == "" {
+		return nil, fmt.Errorf("invalid source URL")
+	}
+	// Respect robots.txt — refuse disallowed paths (compliance/legal).
+	if !w.robotsAllowed(ctx, target) {
+		return nil, fmt.Errorf("blocked by robots.txt for %s", target.Host)
+	}
+	// Per-domain politeness — never hammer a host.
+	waitForDomain(target.Host)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, source.URL, nil)
 	if err != nil {
@@ -94,7 +226,7 @@ func (w *WebScraper) ScrapeSource(ctx context.Context, source *models.ScrapedSou
 
 	base, _ := url.Parse(source.URL)
 	now := time.Now()
-	result := &ScrapeResult{}
+	result = &ScrapeResult{}
 
 	doc.Find(sel.Item).Each(func(_ int, s *goquery.Selection) {
 		title := fieldText(s, sel.Title)
@@ -276,7 +408,7 @@ func ScrapeAllActiveSources() {
 		func(src *models.ScrapedSource) {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
-			if _, err := scraper.ScrapeSource(ctx, src); err != nil {
+			if _, err := scraper.ScrapeSourceScheduled(ctx, src); err != nil {
 				src.LastStatus = "error: " + err.Error()
 				storage.DB.Model(src).Update("last_status", src.LastStatus)
 			}
