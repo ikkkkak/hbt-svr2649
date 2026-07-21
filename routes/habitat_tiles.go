@@ -37,6 +37,12 @@ const (
 	// is a generous sanity ceiling — not a functional cap — high enough
 	// that no real quartier (7-8K+ plots) ever gets silently truncated.
 	habitatPostGISTileMaxFeatures = 20000
+
+	// habitatTileCentroidBufferDeg pads the legacy centroid-in-tile filter so
+	// large plots whose centroid lies just outside a tile still render in it.
+	// ~0.004° ≈ 440m at Nouakchott's latitude — covers the largest civic
+	// parcels. Purely additive; off-tile geometry is clipped.
+	habitatTileCentroidBufferDeg = 0.004
 )
 
 // habitatForSaleTileJoinSQL mirrors habitatForSaleJoinSQL (habitat_plot_response.go)
@@ -359,8 +365,14 @@ func habitatSectorTileLegacy(sectorID uint, z, x, y int) ([]byte, error) {
 		).
 		Where("habitat_plots.sector_id = ?", sectorID).
 		Where("habitat_plots.geom_geojson IS NOT NULL AND habitat_plots.geom_geojson::text NOT IN ('null', '{}')").
-		Where("habitat_plots.centroid_lat BETWEEN ? AND ?", minLat, maxLat).
-		Where("habitat_plots.centroid_lng BETWEEN ? AND ?", minLng, maxLng).
+		// Centroid-in-tile is an APPROXIMATE spatial filter (no PostGIS on the
+		// host). Buffer the tile bounds by ~0.004° (~440m) so a large plot
+		// (mosque, school, market — hundreds of metres across) whose centroid
+		// falls in a neighbouring tile still renders in every tile its polygon
+		// overlaps, instead of vanishing at high zoom. Off-tile geometry is
+		// clipped away below, so the buffer only ADDS the plots that belong.
+		Where("habitat_plots.centroid_lat BETWEEN ? AND ?", minLat-habitatTileCentroidBufferDeg, maxLat+habitatTileCentroidBufferDeg).
+		Where("habitat_plots.centroid_lng BETWEEN ? AND ?", minLng-habitatTileCentroidBufferDeg, maxLng+habitatTileCentroidBufferDeg).
 		Limit(habitatTileMaxFeatures)
 
 	if err := q.Find(&rows).Error; err != nil {
