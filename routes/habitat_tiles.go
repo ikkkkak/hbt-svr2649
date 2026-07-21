@@ -397,6 +397,18 @@ func habitatSectorTileLegacy(sectorID uint, z, x, y int) ([]byte, error) {
 			orbRing = append(orbRing, orbRing[0])
 		}
 
+		// Normalize winding order. orb's mvt.Marshal does NOT correct ring
+		// orientation (only its decoder does), so a source polygon wound the
+		// "wrong" way encodes a broken fill that Mapbox GL renders hollow/
+		// corrupted — unnoticeable when plots are sub-pixel, obvious when
+		// zoomed in. MVT requires CLOCKWISE exterior rings in tile space;
+		// ProjectToTile flips Y (inverting orientation), so the exterior must
+		// be COUNTER-CLOCKWISE here in geographic space to land clockwise in
+		// the tile. Force it.
+		if orbRing.Orientation() != orb.CCW {
+			orbRing.Reverse()
+		}
+
 		f := geojson.NewFeature(orb.Polygon{orbRing})
 		f.ID = row.ID
 		f.Properties = geojson.Properties{
