@@ -421,16 +421,35 @@ func habitatSectorTileBounds(sectorID uint, sector *models.HabitatSector) (bound
 		PlotCount int64   `gorm:"column:plot_count"`
 	}
 	var ex extent
-	err := storage.DB.Model(&models.HabitatPlot{}).
-		Select(
+	// Bounds + count reflect RENDER-TRUTH: only plots with a non-NULL geom
+	// (PostGIS) actually appear in the MVT tiles, so plot_count here equals
+	// the number of plots the map will draw — a meaningful health metric
+	// (a quartier whose geom backfill hasn't run shows a low count). Extent
+	// comes from the geom itself (ST_Extent), independent of the separate
+	// centroid columns.
+	geomFilter := "geom IS NOT NULL"
+	selects := []string{
+		"ST_YMin(ST_Extent(geom)) AS min_lat",
+		"ST_YMax(ST_Extent(geom)) AS max_lat",
+		"ST_XMin(ST_Extent(geom)) AS min_lng",
+		"ST_XMax(ST_Extent(geom)) AS max_lng",
+		"COUNT(*) AS plot_count",
+	}
+	if !storage.HabitatPostGISReady {
+		// No PostGIS geom column — fall back to centroid-based extent.
+		geomFilter = "centroid_lat IS NOT NULL AND centroid_lng IS NOT NULL"
+		selects = []string{
 			"MIN(centroid_lat) AS min_lat",
 			"MAX(centroid_lat) AS max_lat",
 			"MIN(centroid_lng) AS min_lng",
 			"MAX(centroid_lng) AS max_lng",
 			"COUNT(*) AS plot_count",
-		).
+		}
+	}
+	err := storage.DB.Model(&models.HabitatPlot{}).
+		Select(selects).
 		Where("sector_id = ?", sectorID).
-		Where("centroid_lat IS NOT NULL AND centroid_lng IS NOT NULL").
+		Where(geomFilter).
 		Scan(&ex).Error
 	plotCount = ex.PlotCount
 	if err != nil || (ex.MinLat == 0 && ex.MaxLat == 0 && ex.MinLng == 0 && ex.MaxLng == 0) {

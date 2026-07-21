@@ -1111,6 +1111,37 @@ func backfillHabitatPlotGeom(db *gorm.DB) {
 		return
 	}
 	log.Println("✅ habitat: geom backfill batch complete")
+
+	// Centroids drive the TileJSON bounds + plot_count (the map's camera fit
+	// and health metric). Rows imported with geometry but no centroid left
+	// the quartier's reported extent/count based only on the subset that had
+	// centroids. Derive any missing centroid from the freshly-populated geom
+	// so bounds cover the whole quartier and plot_count is truthful.
+	backfillHabitatPlotCentroids(db)
+}
+
+// backfillHabitatPlotCentroids fills centroid_lat/centroid_lng from geom for
+// rows missing a centroid. Set-based (fast), idempotent, additive.
+func backfillHabitatPlotCentroids(db *gorm.DB) {
+	var pending int64
+	db.Raw(`
+		SELECT COUNT(*) FROM habitat_plots
+		WHERE (centroid_lat IS NULL OR centroid_lng IS NULL) AND geom IS NOT NULL
+	`).Scan(&pending)
+	if pending == 0 {
+		return
+	}
+	log.Printf("🔧 habitat: backfilling centroids for %d plots from geom...", pending)
+	if err := db.Exec(`
+		UPDATE habitat_plots
+		SET centroid_lat = ST_Y(ST_Centroid(geom)),
+		    centroid_lng = ST_X(ST_Centroid(geom))
+		WHERE (centroid_lat IS NULL OR centroid_lng IS NULL) AND geom IS NOT NULL
+	`).Error; err != nil {
+		log.Printf("⚠️ habitat: centroid backfill error: %v", err)
+		return
+	}
+	log.Println("✅ habitat: centroid backfill complete")
 }
 
 // ensurePerformanceIndexes adds indexes for hot paths that were stalling the DB pool.
