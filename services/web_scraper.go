@@ -439,6 +439,7 @@ func (w *WebScraper) crawlSiteContent(ctx context.Context, source *models.Scrape
 	queue := []crawlPage{{url: start.String(), depth: 0}}
 	now := time.Now()
 	pagesFetched := 0
+	maxSeenChars := 0
 
 	// Seed the queue from the site's sitemap(s) FIRST — this is how we find
 	// every page, including ones not linked from the homepage. Robots.txt
@@ -477,6 +478,9 @@ func (w *WebScraper) crawlSiteContent(ctx context.Context, source *models.Scrape
 		}
 
 		title, text := extractReadable(doc)
+		if len(text) > maxSeenChars {
+			maxSeenChars = len(text)
+		}
 		if len(text) >= crawlMinChars && (storeAll || pageIsRelevant(title, text, page.url)) {
 			listing := models.ScrapedListing{
 				SourceID:    source.ID,
@@ -522,8 +526,18 @@ func (w *WebScraper) crawlSiteContent(ctx context.Context, source *models.Scrape
 		}
 	}
 
-	result.Status = fmt.Sprintf("crawled — %d relevant pages (%d new, %d updated)",
-		result.ItemCount, result.Inserted, result.Updated)
+	if result.ItemCount == 0 {
+		// Distinguish "site is JS-rendered" (we fetched pages but they had
+		// almost no server HTML text) from "no relevant content".
+		if maxSeenChars < crawlMinChars && pagesFetched > 0 {
+			result.Status = fmt.Sprintf("no content — site appears JavaScript-rendered (server HTML nearly empty across %d pages). A headless renderer is required for this source.", pagesFetched)
+		} else {
+			result.Status = fmt.Sprintf("crawled %d pages — 0 real-estate-relevant. Try the 'Store every page' option, or check the URL.", pagesFetched)
+		}
+	} else {
+		result.Status = fmt.Sprintf("crawled — %d relevant pages (%d new, %d updated)",
+			result.ItemCount, result.Inserted, result.Updated)
+	}
 	source.LastScrapedAt = &now
 	source.LastStatus = result.Status
 	source.LastItemCount = result.ItemCount
