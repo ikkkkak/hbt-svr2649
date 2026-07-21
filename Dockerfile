@@ -2,7 +2,7 @@
 #   Build type = Dockerfile
 #   Dockerfile path = Dockerfile   (never docker-compose.yaml or compose.yaml)
 #   Build path = .  (or apartmentscloneserver if repo root is parent)
-FROM golang:1.24-alpine
+FROM golang:1.25-alpine
 
 RUN apk add --no-cache ffmpeg ttf-dejavu ca-certificates \
 	&& ffmpeg -version

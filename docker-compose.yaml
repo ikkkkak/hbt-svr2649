@@ -1,6 +1,6 @@
 # Dokploy reads this path as the Dockerfile (misconfigured in dashboard).
 # Canonical Dockerfile is ./Dockerfile — fix Dokploy: Dockerfile path = Dockerfile
-FROM golang:1.24-alpine
+FROM golang:1.25-alpine
 
 RUN apk add --no-cache ffmpeg ttf-dejavu ca-certificates \
 	&& ffmpeg -version
