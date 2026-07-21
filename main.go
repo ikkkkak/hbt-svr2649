@@ -1537,6 +1537,7 @@ func main() {
 		habitat.Get("/sectors/{sectorId:uint}/sub-sectors", routes.GetHabitatSubSectorsBySector)
 		habitat.Get("/sub-sectors/{subSectorId:uint}", routes.GetHabitatSubSector)
 		habitat.Get("/sub-sectors/{subSectorId:uint}/plots", routes.GetHabitatPlotsBySubSector)
+		habitat.Get("/version", routes.GetHabitatAPIVersion)
 		habitat.Get("/sectors/{sectorId:uint}/tiles.json", routes.GetHabitatSectorTileJSON)
 		// No ".pbf" suffix: Iris's typed macros (":int") don't match a literal
 		// suffix glued onto the same path segment (verified directly against

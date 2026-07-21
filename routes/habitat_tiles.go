@@ -95,6 +95,9 @@ func GetHabitatSectorTileJSON(ctx iris.Context) {
 	ctx.Header("Cache-Control", "public, max-age=600")
 	ctx.JSON(iris.Map{
 		"tilejson":    "3.0.0",
+		// Deploy fingerprint — if this doesn't match routes.HabitatAPIVersion
+		// in the source, the live server is running a stale binary.
+		"api_version": HabitatAPIVersion,
 		"name":        fmt.Sprintf("Habitat sector %d — %s", sector.ID, name),
 		"description": "Cadastre plot polygons (MVT). Feature id = habitat_plots.id; properties: plot_number, sector_id, plan_id, area_m2, area_rounded, is_for_sale.",
 		"minzoom":     habitatTileMinZoom,
