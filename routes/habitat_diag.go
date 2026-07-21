@@ -48,10 +48,12 @@ func GetHabitatSectorDiag(ctx iris.Context) {
 	switch {
 	case total == 0:
 		diagnosis = "sector has no plots"
+	case withGeoJSON >= total && withCentroid < total && !storage.HabitatPostGISReady:
+		diagnosis = "geometry present (geom_geojson) — legacy tile path renders it, but centroids missing so camera/bounds are wrong. Trigger /habitat/admin/backfill-centroids, and enable PostGIS on the DB for the fast path."
 	case backfillable > 0:
 		diagnosis = "geom backfill incomplete — trigger /habitat/admin/backfill-geom"
-	case withGeoJSON >= total && withGeom < total:
-		diagnosis = "some rows have malformed geometry (skipped by backfill)"
+	case withGeoJSON >= total && withGeom < total && storage.HabitatPostGISReady:
+		diagnosis = "geom_geojson present but geom empty — trigger /habitat/admin/backfill-geom"
 	case withGeoJSON < total && cornersRecoverable > 0:
 		diagnosis = "geom_geojson missing but corners present — geometry is RECOVERABLE from corners without re-import"
 	case withGeoJSON < total:

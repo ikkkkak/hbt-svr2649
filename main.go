@@ -258,6 +258,18 @@ func main() {
 			storage.BackfillHabitatPlotGeomNow()
 		}
 	}()
+	// Centroid backfill from geom_geojson — PostGIS-INDEPENDENT. Fixes the
+	// TileJSON bounds/plot_count (camera fit) for plots imported with
+	// geometry but no centroid. Runs once on boot, then hourly so new
+	// imports self-heal even when PostGIS is unavailable on the host.
+	go func() {
+		routes.BackfillHabitatCentroidsFromGeoJSON()
+		t := time.NewTicker(1 * time.Hour)
+		defer t.Stop()
+		for range t.C {
+			routes.BackfillHabitatCentroidsFromGeoJSON()
+		}
+	}()
 	fmt.Println("✅ WebSocket Hub initialized successfully")
 
 	// Initialize MeskenyGPT AI service (shared AI infrastructure)
@@ -1540,6 +1552,7 @@ func main() {
 		habitat.Get("/version", routes.GetHabitatAPIVersion)
 		habitat.Get("/sectors/{sectorId:uint}/diag", routes.GetHabitatSectorDiag)
 		habitat.Post("/admin/backfill-geom", routes.TriggerHabitatGeomBackfill)
+		habitat.Post("/admin/backfill-centroids", routes.TriggerHabitatCentroidBackfill)
 		habitat.Get("/sectors/{sectorId:uint}/tiles.json", routes.GetHabitatSectorTileJSON)
 		// No ".pbf" suffix: Iris's typed macros (":int") don't match a literal
 		// suffix glued onto the same path segment (verified directly against

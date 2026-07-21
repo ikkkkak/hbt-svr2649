@@ -24,10 +24,12 @@ const (
 	habitatTileMinZoom = 12
 	habitatTileMaxZoom = 20
 
-	// habitatTileMaxFeatures bounds the legacy Go/orb fallback only, where
-	// every row costs real per-request Go-side JSON decode + polygon
-	// construction — a genuine cost that needs a conservative cap.
-	habitatTileMaxFeatures = 4096
+	// habitatTileMaxFeatures bounds the legacy Go/orb fallback. Raised from
+	// 4096 → 20000 because with PostGIS unavailable on the managed host, the
+	// legacy geom_geojson path is the PRIMARY renderer, and an 8K-plot
+	// quartier's overview tile must not silently truncate. Per-request decode
+	// cost is acceptable for completeness (government/enterprise use).
+	habitatTileMaxFeatures = 20000
 
 	// habitatPostGISTileMaxFeatures bounds the ST_AsMVT path (GIST-indexed,
 	// set-based, computed entirely inside Postgres). The real limiting
