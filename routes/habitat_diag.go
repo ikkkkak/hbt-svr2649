@@ -9,6 +9,7 @@ import (
 	"apartments-clone-server/storage"
 
 	"github.com/kataras/iris/v12"
+	"gorm.io/gorm"
 )
 
 // GET /api/habitat/sectors/{sectorId}/diag
@@ -27,17 +28,21 @@ func GetHabitatSectorDiag(ctx iris.Context) {
 	}
 
 	var total, withGeom, withGeoJSON, withCentroid, backfillable int64
-	storage.DB.Model(&models.HabitatPlot{}).Where("sector_id = ?", sectorID).Count(&total)
-	storage.DB.Model(&models.HabitatPlot{}).Where("sector_id = ? AND geom IS NOT NULL", sectorID).Count(&withGeom)
-	storage.DB.Model(&models.HabitatPlot{}).
-		Where("sector_id = ? AND geom_geojson IS NOT NULL AND geom_geojson::text NOT IN ('null','{}')", sectorID).
-		Count(&withGeoJSON)
-	storage.DB.Model(&models.HabitatPlot{}).
-		Where("sector_id = ? AND centroid_lat IS NOT NULL AND centroid_lng IS NOT NULL", sectorID).
-		Count(&withCentroid)
-	storage.DB.Model(&models.HabitatPlot{}).
-		Where("sector_id = ? AND geom IS NULL AND geom_geojson IS NOT NULL AND geom_geojson::text NOT IN ('null','{}')", sectorID).
-		Count(&backfillable)
+	var withCorners, withRawProps, cornersRecoverable int64
+	sec := func() *gorm.DB { return storage.DB.Model(&models.HabitatPlot{}).Where("sector_id = ?", sectorID) }
+	sec().Count(&total)
+	sec().Where("geom IS NOT NULL").Count(&withGeom)
+	sec().Where("geom_geojson IS NOT NULL AND geom_geojson::text NOT IN ('null','{}')").Count(&withGeoJSON)
+	sec().Where("centroid_lat IS NOT NULL AND centroid_lng IS NOT NULL").Count(&withCentroid)
+	sec().Where("geom IS NULL AND geom_geojson IS NOT NULL AND geom_geojson::text NOT IN ('null','{}')").Count(&backfillable)
+	// Recovery sources for plots missing geom_geojson.
+	sec().Where("corners IS NOT NULL AND corners::text NOT IN ('null','{}','[]')").Count(&withCorners)
+	sec().Where("raw_properties IS NOT NULL AND raw_properties::text NOT IN ('null','{}')").Count(&withRawProps)
+	// Plots with NO usable geom_geojson but WITH corners → reconstructable.
+	sec().
+		Where("(geom_geojson IS NULL OR geom_geojson::text IN ('null','{}'))").
+		Where("corners IS NOT NULL AND corners::text NOT IN ('null','{}','[]')").
+		Count(&cornersRecoverable)
 
 	diagnosis := "ok — all plots render"
 	switch {
@@ -45,23 +50,28 @@ func GetHabitatSectorDiag(ctx iris.Context) {
 		diagnosis = "sector has no plots"
 	case backfillable > 0:
 		diagnosis = "geom backfill incomplete — trigger /habitat/admin/backfill-geom"
-	case withGeoJSON < total:
-		diagnosis = "source geometry missing (geom_geojson) — data import problem, backfill cannot help these rows"
-	case withGeom < total:
+	case withGeoJSON >= total && withGeom < total:
 		diagnosis = "some rows have malformed geometry (skipped by backfill)"
+	case withGeoJSON < total && cornersRecoverable > 0:
+		diagnosis = "geom_geojson missing but corners present — geometry is RECOVERABLE from corners without re-import"
+	case withGeoJSON < total:
+		diagnosis = "geometry absent from DB entirely (no geom_geojson, no corners) — must re-import source data for these plots"
 	}
 
 	ctx.Header("Cache-Control", "no-store")
 	ctx.JSON(iris.Map{
-		"api_version":       HabitatAPIVersion,
-		"sector_id":         sectorID,
-		"total_plots":       total,
-		"with_geom":         withGeom,     // renders in MVT tiles
-		"with_geom_geojson": withGeoJSON,  // backfill source
-		"with_centroid":     withCentroid, // drives tilejson bounds
-		"backfillable":      backfillable, // geom NULL but geojson present
-		"postgis_ready":     storage.HabitatPostGISReady,
-		"diagnosis":         diagnosis,
+		"api_version":         HabitatAPIVersion,
+		"sector_id":           sectorID,
+		"total_plots":         total,
+		"with_geom":           withGeom,           // renders in MVT tiles (PostGIS path)
+		"with_geom_geojson":   withGeoJSON,        // renders in legacy path + backfill source
+		"with_centroid":       withCentroid,       // drives tilejson bounds
+		"with_corners":        withCorners,        // alt geometry source
+		"with_raw_properties": withRawProps,       // last-resort source
+		"corners_recoverable": cornersRecoverable, // missing geojson but has corners
+		"backfillable":        backfillable,       // geom NULL but geojson present
+		"postgis_ready":       storage.HabitatPostGISReady,
+		"diagnosis":           diagnosis,
 	})
 }
 
