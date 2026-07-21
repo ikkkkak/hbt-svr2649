@@ -168,6 +168,7 @@ func SendAIChatMessage(ctx iris.Context) {
 					"quick_replies":         out.QuickReplies,
 					"propertyRecommendations": out.PropertyRecommendations,
 					"interaction_id":        out.InteractionID,
+					"sources":               aiSourcesForMessage(req.Message),
 				},
 			}
 
@@ -401,6 +402,7 @@ func SendAIChatMessage(ctx iris.Context) {
 			"quick_replies":           quickReplies,
 			"propertyRecommendations": recs,
 			"interaction_id":          interactionID,
+			"sources":                 aiSourcesForMessage(req.Message),
 		},
 	}
 	if chatEscalation != nil {
@@ -418,6 +420,28 @@ func sanitizeAIOutput(in string) string {
 	out := in
 	// Remove leaked internal ID mentions from model output.
 	out = regexp.MustCompile(`(?i)\b(ID|id)\s*[:#]?\s*\d+\b`).ReplaceAllString(out, "listing")
+	return out
+}
+
+// aiSourcesForMessage returns cited market listings (from admin-scraped
+// sources) relevant to the user's message, shaped for the chat payload.
+// Empty when nothing relevant — the UI only shows a Sources section when
+// there are real references, so the AI reads as grounded, never fabricated.
+func aiSourcesForMessage(message string) []iris.Map {
+	cites := services.RetrieveScrapedContext(message, 3)
+	if len(cites) == 0 {
+		return nil
+	}
+	out := make([]iris.Map, 0, len(cites))
+	for _, c := range cites {
+		out = append(out, iris.Map{
+			"title":      c.Title,
+			"price_text": c.PriceText,
+			"location":   c.Location,
+			"url":        c.SourceURL,
+			"kind":       c.Kind,
+		})
+	}
 	return out
 }
 
