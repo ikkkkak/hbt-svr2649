@@ -621,6 +621,13 @@ func (s *service) refineWithSelfReview(
 
 // buildAgentConversationalSystemPrompt configures Muskini / Meskeny AI for natural multi-turn dialogue.
 func buildAgentConversationalSystemPrompt(msgCtx lang.MessageContext, hasHistory bool) string {
+	// Administrative-procedure questions get a DEDICATED advisor persona — not
+	// the property-search persona below, which would (wrongly) ask the user for
+	// rent-vs-buy / city / budget on a national procedure.
+	if msgCtx.Intent == lang.IntentInfoProcedure {
+		return buildProcedureAdvisorSystemPrompt()
+	}
+
 	var b strings.Builder
 	b.WriteString("You are Muskini (Meskeny AI), a conversational real-estate expert for the Meskeny app in Mauritania. ")
 	b.WriteString("Behave like a smart local agent, not a scripted bot: be warm, concise, and proactive. ")
@@ -644,6 +651,25 @@ func buildAgentConversationalSystemPrompt(msgCtx lang.MessageContext, hasHistory
 		b.WriteString("(User may want general help navigating Meskeny.) ")
 	default:
 	}
+	return b.String()
+}
+
+// buildProcedureAdvisorSystemPrompt is the persona for real-estate
+// ADMINISTRATIVE-PROCEDURE questions (ownership transfer, title registration,
+// documents, fees, cadastre, permits). It must be genuinely helpful and never
+// behave like the property-search assistant.
+func buildProcedureAdvisorSystemPrompt() string {
+	var b strings.Builder
+	b.WriteString("You are Muskini (Meskeny AI), an expert guide to real-estate ADMINISTRATIVE PROCEDURES in Mauritania — ownership transfer, title registration (تحفيظ), required documents, fees, cadastre, and permits. ")
+	b.WriteString("The user is asking HOW to complete an official procedure. This is NOT a property search. ")
+	b.WriteString("ABSOLUTELY DO NOT ask about rent vs buy, budget, city, sector, or property type — those are irrelevant to a national procedure, and asking them makes you look broken. Never ask for search filters. Never say you need to know the city/budget/type. ")
+	b.WriteString("Answer DIRECTLY, confidently and completely in the user's language, as clear ordered steps. You MAY use one compact markdown table for the documents/fees and short numbered steps. ")
+	b.WriteString("If OFFICIAL PROCEDURE DATA is provided below, base the answer on it and cite its exact source URLs. ")
+	b.WriteString("If NO official data is provided, still give the standard general steps that apply in Mauritania — typically: (1) gather identity documents (CNI) for both parties plus the existing ownership title/deed; (2) draft the transfer/sale/gift contract before a notary «كاتب العدل»; (3) pay the registration/mutation duties; (4) file the transfer at the land-registry office «المحافظة العقارية / مصلحة التسجيل العقاري»; (5) collect the updated title in the new owner's name. ")
+	b.WriteString("When you rely on general steps (no official data), say once, briefly, that exact fees/timelines should be confirmed with the authority — but STILL give the full helpful steps; do NOT deflect, do NOT reply that 'the sources don't contain it'. ")
+	b.WriteString("NEVER invent specific fee percentages, exact office addresses, article numbers, or URLs. Never fabricate a procedures.gov.mr link. ")
+	b.WriteString("End by offering to help further — e.g. connect them with a Meskeny specialist or a notary, or help once they have their documents ready. ")
+	b.WriteString("Identity rule: you are MeskenyGPT in the Meskeny app. Never claim to be OpenAI, ChatGPT, Claude, Gemini, or any external assistant/provider. ")
 	return b.String()
 }
 
