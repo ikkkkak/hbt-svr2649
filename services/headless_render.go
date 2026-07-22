@@ -73,6 +73,10 @@ func ensureBrowser() bool {
 		chromedp.Flag("disable-extensions", true),
 		chromedp.Flag("disable-background-networking", true),
 		chromedp.Flag("blink-settings", "imagesEnabled=false"),
+		// Reduce headless detection (navigator.webdriver etc.) — some sites
+		// serve an empty shell to obvious bots.
+		chromedp.Flag("disable-blink-features", "AutomationControlled"),
+		chromedp.Flag("lang", "fr-FR"),
 		chromedp.UserAgent("Mozilla/5.0 (compatible; MeskenyBot/1.0; +https://meskeny.com/bot)"),
 	)
 	if p := chromiumExecPath(); p != "" {
@@ -117,7 +121,23 @@ func renderDocQuiet(rawURL string) (doc *goquery.Document) {
 	var html string
 	err := chromedp.Run(runCtx,
 		chromedp.Navigate(rawURL),
-		chromedp.Sleep(2800*time.Millisecond), // let client-side JS render
+		// Wait until the client-side content actually renders (poll the body
+		// text length) instead of a fixed sleep — Next.js/SPA data fetches
+		// vary in timing. Gives up after ~16s and takes whatever's there.
+		chromedp.ActionFunc(func(c context.Context) error {
+			deadline := time.Now().Add(16 * time.Second)
+			for time.Now().Before(deadline) {
+				var n int
+				if e := chromedp.Evaluate(
+					`(document.body && document.body.innerText) ? document.body.innerText.replace(/\s+/g,' ').trim().length : 0`,
+					&n,
+				).Do(c); e == nil && n > 300 {
+					return nil
+				}
+				time.Sleep(700 * time.Millisecond)
+			}
+			return nil
+		}),
 		chromedp.OuterHTML("html", &html, chromedp.ByQuery),
 	)
 	if err != nil || strings.TrimSpace(html) == "" {
