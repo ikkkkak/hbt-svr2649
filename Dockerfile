@@ -5,10 +5,13 @@
 FROM golang:1.25-alpine
 
 RUN apk add --no-cache ffmpeg ttf-dejavu ca-certificates \
+	chromium nss freetype harfbuzz ttf-freefont \
 	&& ffmpeg -version
 
 ENV FFMPEG_PATH=/usr/bin/ffmpeg
 ENV SLIDESHOW_FONT_PATH=/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf
+# Headless Chromium for scraping JavaScript-rendered sites (chromedp).
+ENV CHROME_BIN=/usr/bin/chromium-browser
 
 WORKDIR /app
 

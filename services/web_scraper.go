@@ -478,6 +478,18 @@ func (w *WebScraper) crawlSiteContent(ctx context.Context, source *models.Scrape
 		}
 
 		title, text := extractReadable(doc)
+		// AUTO-FALLBACK: if the plain HTML is near-empty, the page is
+		// JavaScript-rendered — render it in a real browser and re-extract.
+		// (Cheap fetch first keeps server-rendered sites fast.)
+		if len(text) < crawlMinChars {
+			if rdoc := renderDocQuiet(page.url); rdoc != nil {
+				rtitle, rtext := extractReadable(rdoc)
+				if len(rtext) > len(text) {
+					title, text = rtitle, rtext
+					doc = rdoc // discover JS-injected links from rendered DOM
+				}
+			}
+		}
 		if len(text) > maxSeenChars {
 			maxSeenChars = len(text)
 		}
@@ -530,7 +542,11 @@ func (w *WebScraper) crawlSiteContent(ctx context.Context, source *models.Scrape
 		// Distinguish "site is JS-rendered" (we fetched pages but they had
 		// almost no server HTML text) from "no relevant content".
 		if maxSeenChars < crawlMinChars && pagesFetched > 0 {
-			result.Status = fmt.Sprintf("no content — site appears JavaScript-rendered (server HTML nearly empty across %d pages). A headless renderer is required for this source.", pagesFetched)
+			if headlessAvailable() {
+				result.Status = fmt.Sprintf("site is JavaScript-rendered; headless rendering produced no extractable text across %d pages (content may load from a separate API).", pagesFetched)
+			} else {
+				result.Status = fmt.Sprintf("site appears JavaScript-rendered (server HTML nearly empty across %d pages) and headless Chromium is not installed in this build.", pagesFetched)
+			}
 		} else {
 			result.Status = fmt.Sprintf("crawled %d pages — 0 real-estate-relevant. Try the 'Store every page' option, or check the URL.", pagesFetched)
 		}
