@@ -10,6 +10,8 @@ func TestProcedureIntentRouting(t *testing.T) {
 		"how do i transfer ownership of a land plot", // EN
 		"quels sont les frais d'enregistrement",      // FR fees + question
 		"إجراءات تحفيظ الأرض",                        // registration procedure
+		"لدي عقار ولدي ملكية على اسمي وأريد أن احول هذه الملكية إلى اسم آخر", // non-adjacent transfer (reported)
+		"أريد تحويل ملكية عقار من اسم إلى اسم آخر",   // from-name-to-name (reported)
 	}
 	for _, m := range procedure {
 		got := AnalyzeMessage(m).Intent

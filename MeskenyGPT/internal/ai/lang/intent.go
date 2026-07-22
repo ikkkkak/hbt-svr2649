@@ -643,6 +643,28 @@ func MessageSignalsProcedure(msg, lower string) bool {
 		}
 	}
 
+	// Ownership-transfer phrasings where the words aren't adjacent, e.g.
+	// "أحول هذه الملكية إلى اسم آخر", "نقل ملكية عقار من اسم إلى اسم".
+	if strings.Contains(msg, "ملكية") {
+		for _, v := range []string{
+			"احول", "أحول", "نحول", "يحول", "تحويل", "تحويلها", "حول",
+			"نقل", "انقل", "أنقل", "نقلها", "تبديل", "أبدل", "نبدل", "بدل",
+		} {
+			if strings.Contains(msg, v) {
+				return true
+			}
+		}
+	}
+	// "transfer … to another name" / "from one name to another".
+	if strings.Contains(msg, "عقار") || strings.Contains(msg, "ملكية") {
+		if strings.Contains(msg, "اسم آخر") ||
+			strings.Contains(msg, "إلى اسم") ||
+			strings.Contains(msg, "الى اسم") ||
+			strings.Contains(msg, "من اسم") {
+			return true
+		}
+	}
+
 	// Weaker admin terms — a procedure question only when paired with a how-to /
 	// question signal (otherwise "documents"/"fees" alone are ambiguous).
 	admin := []string{

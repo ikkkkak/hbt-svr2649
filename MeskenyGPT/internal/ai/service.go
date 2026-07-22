@@ -416,6 +416,10 @@ func (s *service) HandleChatTurn(ctx context.Context, in ChatInput) (ChatOutput,
 	// Live market listings (admin-scraped) — lets the AI reason over real
 	// current prices/comparables and cite the source URL.
 	sys += retrieveScrapedMarketBlock(ctx, s.gdb, msgCtx)
+	// Administrative-procedure questions: strict grounding so the AI answers
+	// from real scraped official data (or admits it lacks it) — never invents
+	// steps/fees/URLs, which would read as a scam to users.
+	sys += procedureGroundingBlock(ctx, s.gdb, msgCtx)
 
 	msgs := []client.Message{{Role: "system", Content: sys}}
 	msgs = append(msgs, sanitizeHistoryForLLM(in.History)...)

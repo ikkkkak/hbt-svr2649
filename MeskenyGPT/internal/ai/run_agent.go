@@ -399,6 +399,9 @@ func (s *service) agentRunConversational(
 	// procedure questions (ownership transfer, titles, documents, fees) from
 	// real government pages and cite them, instead of guessing.
 	sys += retrieveScrapedMarketBlock(ctx, s.gdb, msgCtx)
+	// Strict grounding for administrative procedures: answer only from real
+	// scraped data, or admit we lack it — never fabricate steps/fees/URLs.
+	sys += procedureGroundingBlock(ctx, s.gdb, msgCtx)
 
 	msgs := []client.Message{{Role: "system", Content: sys}}
 	msgs = append(msgs, sanitizeHistoryForLLM(in.History)...)
