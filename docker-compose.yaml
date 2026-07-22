@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # Dokploy reads this path as the Dockerfile (misconfigured in dashboard).
 # Canonical Dockerfile is ./Dockerfile — fix Dokploy: Dockerfile path = Dockerfile
 FROM golang:1.25-alpine
@@ -16,11 +17,20 @@ ENV CHROME_BIN=/usr/bin/chromium
 WORKDIR /app
 
 COPY go.mod go.sum ./
-RUN go mod download
+# Persist the module cache across builds (BuildKit cache mount).
+RUN --mount=type=cache,target=/go/pkg/mod \
+	go mod download
 
 COPY . .
 
-RUN go build -ldflags="-s -w" -o server .
+# Persist BOTH the module cache and the compiler build cache across builds, so
+# only packages that actually changed are recompiled. This turns a ~16-min
+# from-scratch build (heavy since Chromium/chromedp was added) into a short
+# incremental one, avoiding Dokploy build timeouts/cancellations.
+# -p=2 caps compiler parallelism to keep peak memory low on a small VM.
+RUN --mount=type=cache,target=/go/pkg/mod \
+	--mount=type=cache,target=/root/.cache/go-build \
+	go build -p 2 -ldflags="-s -w" -o server .
 
 EXPOSE 4000
 
