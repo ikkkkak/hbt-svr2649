@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"apartments-clone-server/models"
@@ -21,6 +22,34 @@ import (
 func AdminScraperHeadlessCheck(ctx iris.Context) {
 	ok, detail := services.HeadlessSelfCheck()
 	ctx.JSON(iris.Map{"headless_available": ok, "detail": detail})
+}
+
+// POST /admin/scraper/paste — ingest a JSON payload the admin collected from an
+// external crawl/scrape elsewhere. It becomes citable knowledge the AI uses to
+// answer users' general questions.
+// Body: { name, kind?, url?, json }  (json may also be sent as "data").
+func AdminPasteScrapedJSON(ctx iris.Context) {
+	var body struct {
+		Name string `json:"name"`
+		Kind string `json:"kind"`
+		URL  string `json:"url"`
+		JSON string `json:"json"`
+		Data string `json:"data"`
+	}
+	if err := ctx.ReadJSON(&body); err != nil {
+		utils.JSONError(ctx, http.StatusBadRequest, "bad_request", "invalid body")
+		return
+	}
+	payload := body.JSON
+	if strings.TrimSpace(payload) == "" {
+		payload = body.Data
+	}
+	sid, n, err := services.ImportPastedJSON(body.Name, body.Kind, body.URL, payload)
+	if err != nil {
+		utils.JSONError(ctx, http.StatusBadRequest, "import_failed", err.Error())
+		return
+	}
+	ctx.JSON(iris.Map{"status": "imported", "source_id": sid, "inserted": n})
 }
 
 // POST /admin/scraper/sources — register a URL for MeskenyGPT to scrape.
