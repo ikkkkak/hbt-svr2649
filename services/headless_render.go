@@ -33,14 +33,21 @@ var (
 // chromiumExecPath returns the Chromium binary path (env override → common
 // Alpine/Debian locations).
 func chromiumExecPath() string {
+	// Honor CHROME_BIN only if it actually exists (a stale/wrong env value
+	// otherwise makes chromedp fail to launch a nonexistent binary).
 	if p := os.Getenv("CHROME_BIN"); p != "" {
-		return p
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
 	}
 	for _, p := range []string{
-		"/usr/bin/chromium-browser",
-		"/usr/bin/chromium",
+		"/usr/bin/chromium",         // modern Alpine
+		"/usr/bin/chromium-browser", // older Alpine/Debian
+		"/usr/lib/chromium/chrome",
+		"/usr/lib/chromium/chromium",
 		"/usr/bin/google-chrome",
 		"/usr/bin/google-chrome-stable",
+		"/usr/bin/chrome",
 	} {
 		if _, err := os.Stat(p); err == nil {
 			return p

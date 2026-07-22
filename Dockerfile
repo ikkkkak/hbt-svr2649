@@ -6,12 +6,17 @@ FROM golang:1.25-alpine
 
 RUN apk add --no-cache ffmpeg ttf-dejavu ca-certificates \
 	chromium nss freetype harfbuzz ttf-freefont \
-	&& ffmpeg -version
+	&& ffmpeg -version \
+	# Print where Chromium landed (build-log visibility) — path differs by
+	# Alpine version (/usr/bin/chromium vs chromium-browser).
+	&& (command -v chromium || command -v chromium-browser || true) \
+	&& ls -la /usr/bin/chromium* 2>/dev/null || true
 
 ENV FFMPEG_PATH=/usr/bin/ffmpeg
 ENV SLIDESHOW_FONT_PATH=/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf
 # Headless Chromium for scraping JavaScript-rendered sites (chromedp).
-ENV CHROME_BIN=/usr/bin/chromium-browser
+# The app also auto-detects the binary if this exact path differs.
+ENV CHROME_BIN=/usr/bin/chromium
 
 WORKDIR /app
 
