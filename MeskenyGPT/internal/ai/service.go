@@ -169,6 +169,15 @@ func looksLikeFoundResultsClaim(text string) bool {
 
 func enforceNoCardsResponseIntegrity(msgCtx lang.MessageContext, text string) string {
 	trimmed := strings.TrimSpace(text)
+	// This guard exists ONLY for property-search answers — it stops the model
+	// claiming it "found listings" when there are no cards. It must NOT touch
+	// informational/procedure answers: a procedure answer legitimately says
+	// "here are the steps / إليك الخطوات / هذه الوثائق", which is not a false
+	// listings claim. Applying it there replaced good, grounded procedure
+	// answers with the wrong "rent or buy? budget?" property-search prompt.
+	if msgCtx.Intent == lang.IntentInfoProcedure {
+		return trimmed
+	}
 	if trimmed == "" {
 		return noCardsClarificationText(msgCtx.Lang)
 	}
