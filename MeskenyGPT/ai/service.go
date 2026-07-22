@@ -35,6 +35,7 @@ const (
 	AgentEventFollowUps      = internal.AgentEventFollowUps
 	AgentEventRunComplete    = internal.AgentEventRunComplete
 	AgentEventBlocked        = internal.AgentEventBlocked
+	AgentEventSources        = internal.AgentEventSources
 )
 
 var feedbackCollector = capture.NewDBFeedbackCollector()

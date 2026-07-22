@@ -40,6 +40,10 @@ type AgentEvent struct {
 
 	Delta string `json:"delta,omitempty"`
 	Steps []StepPlanItem `json:"steps,omitempty"`
+
+	// Sources are the real references (scraped pages/pasted knowledge) the
+	// answer drew on — shown in the client's "searched N sources" sheet.
+	Sources []any `json:"sources,omitempty"`
 }
 
 // StepPlanItem is one planned reasoning step for the client timeline.
@@ -70,6 +74,7 @@ const (
 	AgentEventTextDelta     = "text_delta"
 	AgentEventRunComplete   = "run_complete"
 	AgentEventBlocked       = "blocked"
+	AgentEventSources       = "sources"
 )
 
 type agentRunEmitter func(AgentEvent)

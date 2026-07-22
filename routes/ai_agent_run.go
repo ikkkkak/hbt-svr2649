@@ -211,6 +211,18 @@ func SendAIAgentRun(ctx iris.Context) {
 		return
 	}
 
+	// Emit the references the answer drew on (scraped pages / pasted knowledge)
+	// so the client can show "searched N sources" with a citations sheet.
+	if out.Message.Content != "" {
+		if srcs := aiSourcesForMessage(req.Message); len(srcs) > 0 {
+			refs := make([]any, len(srcs))
+			for i, s := range srcs {
+				refs[i] = s
+			}
+			writeEvent(ai.AgentEvent{Type: ai.AgentEventSources, RunID: runID, Sources: refs})
+		}
+	}
+
 	if userID > 0 && dbSessionID > 0 && out.Message.Content != "" {
 		qrJSON, _ := json.Marshal(out.QuickReplies)
 		_ = storage.DB.Create(&models.AIChatMessage{
