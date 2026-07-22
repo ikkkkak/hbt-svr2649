@@ -793,18 +793,116 @@ func (w *WebScraper) fetchDoc(ctx context.Context, rawURL string) (*goquery.Docu
 var wsCollapse = regexp.MustCompile(`\s+`)
 
 // extractReadable pulls a page's title and main text, stripping chrome.
+// extractReadable pulls a clean title + main text out of a page. It works on a
+// DETACHED CLONE so the caller's doc keeps all its links for crawl discovery,
+// and it strips navigation/menu blocks by link density — the key to not having
+// a site's shared menu drown every page's unique content.
 func extractReadable(doc *goquery.Document) (title, text string) {
-	title = strings.TrimSpace(doc.Find("title").First().Text())
+	ogTitle := metaContent(doc, "og:title")
+	if ogTitle == "" {
+		ogTitle = metaContent(doc, "twitter:title")
+	}
+	rawTitle := strings.TrimSpace(doc.Find("title").First().Text())
+
+	// Detached clone — mutations here never touch the caller's doc.
+	root := doc.Find("body").Clone()
+	if root.Length() == 0 {
+		root = doc.Selection.Clone()
+	}
+	root.Find("script, style, noscript, nav, footer, header, form, svg, aside, iframe").Remove()
+
+	// Remove link-dense blocks (nav bars, category menus, sidebars): many links
+	// and almost no prose. This is what stops the shared menu — repeated
+	// identically on every page — from dominating the stored text.
+	collapsedLen := func(sel *goquery.Selection) int {
+		return len(wsCollapse.ReplaceAllString(strings.TrimSpace(sel.Text()), " "))
+	}
+	root.Find("ul, ol, table, div, section").Each(func(_ int, s *goquery.Selection) {
+		links := s.Find("a")
+		if links.Length() < 8 {
+			return
+		}
+		// Measure on WHITESPACE-COLLAPSED text — raw HTML indentation would
+		// otherwise inflate the total and hide a menu's true link density.
+		total := collapsedLen(s)
+		if total == 0 {
+			return
+		}
+		linkLen := 0
+		links.Each(func(_ int, a *goquery.Selection) {
+			linkLen += collapsedLen(a)
+		})
+		// Overwhelmingly links + little prose → navigation/index. Drop it. The
+		// prose guard protects real content that merely contains some links.
+		if linkLen*100/total > 65 && (total-linkLen) < 600 {
+			s.Remove()
+		}
+	})
+
+	container := root.Find("main")
+	if container.Length() == 0 {
+		container = root.Find("article")
+	}
+	if container.Length() == 0 {
+		container = root
+	}
+
+	// Title: og:title → first surviving content heading (the menu is gone, so
+	// remaining headings are real) → cleaned <title> → first line of content.
+	title = strings.TrimSpace(ogTitle)
 	if title == "" {
-		title = strings.TrimSpace(doc.Find("h1").First().Text())
+		container.Find("h1, h2, h3, h4, h5, h6").EachWithBreak(func(_ int, h *goquery.Selection) bool {
+			t := strings.TrimSpace(wsCollapse.ReplaceAllString(h.Text(), " "))
+			if len([]rune(t)) >= 4 && len([]rune(t)) <= 200 && t != rawTitle {
+				title = t
+				return false
+			}
+			return true
+		})
 	}
-	doc.Find("script, style, noscript, nav, footer, header, form, svg").Remove()
-	body := doc.Find("main")
-	if body.Length() == 0 {
-		body = doc.Find("body")
+
+	text = wsCollapse.ReplaceAllString(strings.TrimSpace(container.Text()), " ")
+
+	if title == "" {
+		title = cleanSiteTitle(rawTitle)
 	}
-	text = wsCollapse.ReplaceAllString(strings.TrimSpace(body.Text()), " ")
+	// Last resort: if the title is empty or just the site-wide name, lead with
+	// the first slice of the page's own text so listings stay distinguishable.
+	if (title == "" || title == cleanSiteTitle(rawTitle)) && text != "" {
+		if lead := firstRunes(text, 90); lead != "" {
+			title = lead
+		}
+	}
 	return title, text
+}
+
+func metaContent(doc *goquery.Document, key string) string {
+	if v, ok := doc.Find(`meta[property="` + key + `"]`).Attr("content"); ok && strings.TrimSpace(v) != "" {
+		return strings.TrimSpace(v)
+	}
+	if v, ok := doc.Find(`meta[name="` + key + `"]`).Attr("content"); ok {
+		return strings.TrimSpace(v)
+	}
+	return ""
+}
+
+// cleanSiteTitle trims a "Page — Site" style <title> down to the page part.
+func cleanSiteTitle(t string) string {
+	for _, sep := range []string{" | ", " — ", " – ", " - ", " · ", " :: " } {
+		if i := strings.Index(t, sep); i > 0 {
+			return strings.TrimSpace(t[:i])
+		}
+	}
+	return strings.TrimSpace(t)
+}
+
+func firstRunes(s string, n int) string {
+	s = strings.TrimSpace(s)
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return strings.TrimSpace(string(r[:n]))
 }
 
 func pageIsRelevant(title, text, pageURL string) bool {
