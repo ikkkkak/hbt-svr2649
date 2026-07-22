@@ -224,6 +224,7 @@ func performMigrations(db *gorm.DB) {
 		&models.ScrapedSource{},
 		&models.ScrapedListing{},
 		&models.ScrapeRun{},
+		&models.ScrapedAPICall{},
 		&models.AIEscalation{},
 		&models.AINotification{},
 		&models.AIConversationMemory{},

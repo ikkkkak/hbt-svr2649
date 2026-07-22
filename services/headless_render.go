@@ -9,8 +9,21 @@ import (
 	"time"
 
 	"github.com/PuerkitoBio/goquery"
+	"github.com/chromedp/cdproto/cdp"
+	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/chromedp"
 )
+
+// CapturedAPI is one XHR/fetch/GraphQL response intercepted while a page
+// rendered — the clean structured data behind JS-driven sites.
+type CapturedAPI struct {
+	URL          string
+	Method       string
+	ResourceType string
+	Status       int
+	ContentType  string
+	Body         string
+}
 
 // Headless rendering (chromedp + headless Chromium) for JavaScript-rendered
 // sites (Next.js/SPA gov portals, etc.) where the server HTML is an empty
@@ -96,12 +109,24 @@ func ensureBrowser() bool {
 	return true
 }
 
-// renderDocQuiet renders a URL with headless Chromium and returns the parsed
-// rendered DOM. Serialized process-wide. Returns nil if unavailable/failed.
-func renderDocQuiet(rawURL string) (doc *goquery.Document) {
+// renderDocQuiet renders a URL and returns just the parsed rendered DOM.
+func renderDocQuiet(rawURL string) *goquery.Document {
+	doc, _ := renderCaptured(rawURL)
+	return doc
+}
+
+// bodyReadyJS returns the visible text length — used to wait for client-side
+// content to actually render before we snapshot.
+const bodyReadyJS = `(document.body && document.body.innerText) ? document.body.innerText.replace(/\s+/g,' ').trim().length : 0`
+
+// renderCaptured renders a URL with headless Chromium AND intercepts every
+// XHR/fetch response the page makes (the JSON APIs behind JS-driven sites),
+// returning both the rendered DOM and the captured API responses. Serialized
+// process-wide. Returns (nil, nil) if unavailable/failed.
+func renderCaptured(rawURL string) (doc *goquery.Document, apis []CapturedAPI) {
 	browserMu.Lock()
 	defer browserMu.Unlock()
-	// A Chromium/chromedp panic must not propagate — return nil (plain fetch
+	// A Chromium/chromedp panic must not propagate — return empty (plain fetch
 	// already provided a fallback) rather than crash the crawl goroutine.
 	defer func() {
 		if r := recover(); r != nil {
@@ -111,27 +136,97 @@ func renderDocQuiet(rawURL string) (doc *goquery.Document) {
 	}()
 
 	if !ensureBrowser() {
-		return nil
+		return nil, nil
 	}
 	tabCtx, cancelTab := chromedp.NewContext(sharedBrowse)
 	defer cancelTab()
-	runCtx, cancelRun := context.WithTimeout(tabCtx, 25*time.Second)
+	runCtx, cancelRun := context.WithTimeout(tabCtx, 40*time.Second)
 	defer cancelRun()
+
+	type reqMeta struct {
+		url, method, rtype, ctype string
+		status                    int
+	}
+	var mu sync.Mutex
+	meta := map[network.RequestID]*reqMeta{}
+	captured := map[network.RequestID]*CapturedAPI{}
+
+	chromedp.ListenTarget(runCtx, func(ev interface{}) {
+		switch e := ev.(type) {
+		case *network.EventRequestWillBeSent:
+			mu.Lock()
+			m := meta[e.RequestID]
+			if m == nil {
+				m = &reqMeta{}
+				meta[e.RequestID] = m
+			}
+			if e.Request != nil {
+				m.method = e.Request.Method
+				if m.url == "" {
+					m.url = e.Request.URL
+				}
+			}
+			mu.Unlock()
+		case *network.EventResponseReceived:
+			if e.Type != network.ResourceTypeXHR && e.Type != network.ResourceTypeFetch {
+				return
+			}
+			mu.Lock()
+			m := meta[e.RequestID]
+			if m == nil {
+				m = &reqMeta{}
+				meta[e.RequestID] = m
+			}
+			m.rtype = string(e.Type)
+			if e.Response != nil {
+				m.url = e.Response.URL
+				m.status = int(e.Response.Status)
+				m.ctype = e.Response.MimeType
+			}
+			mu.Unlock()
+		case *network.EventLoadingFinished:
+			mu.Lock()
+			m := meta[e.RequestID]
+			mu.Unlock()
+			if m == nil || (m.rtype != string(network.ResourceTypeXHR) && m.rtype != string(network.ResourceTypeFetch)) {
+				return
+			}
+			id := e.RequestID
+			snap := *m
+			// GetResponseBody must run off the event-loop goroutine, with a
+			// cdp executor. Best-effort: the body may already be evicted.
+			go func() {
+				defer func() { _ = recover() }()
+				c := chromedp.FromContext(runCtx)
+				if c == nil || c.Target == nil {
+					return
+				}
+				ex := cdp.WithExecutor(runCtx, c.Target)
+				body, err := network.GetResponseBody(id).Do(ex)
+				if err != nil || len(body) == 0 {
+					return
+				}
+				mu.Lock()
+				captured[id] = &CapturedAPI{
+					URL: snap.url, Method: snap.method, ResourceType: snap.rtype,
+					Status: snap.status, ContentType: snap.ctype, Body: string(body),
+				}
+				mu.Unlock()
+			}()
+		}
+	})
 
 	var html string
 	err := chromedp.Run(runCtx,
+		network.Enable(),
 		chromedp.Navigate(rawURL),
 		// Wait until the client-side content actually renders (poll the body
-		// text length) instead of a fixed sleep — Next.js/SPA data fetches
-		// vary in timing. Gives up after ~16s and takes whatever's there.
+		// text length) instead of a fixed sleep — SPA data fetches vary.
 		chromedp.ActionFunc(func(c context.Context) error {
 			deadline := time.Now().Add(16 * time.Second)
 			for time.Now().Before(deadline) {
 				var n int
-				if e := chromedp.Evaluate(
-					`(document.body && document.body.innerText) ? document.body.innerText.replace(/\s+/g,' ').trim().length : 0`,
-					&n,
-				).Do(c); e == nil && n > 300 {
+				if e := chromedp.Evaluate(bodyReadyJS, &n).Do(c); e == nil && n > 300 {
 					return nil
 				}
 				time.Sleep(700 * time.Millisecond)
@@ -140,14 +235,21 @@ func renderDocQuiet(rawURL string) (doc *goquery.Document) {
 		}),
 		chromedp.OuterHTML("html", &html, chromedp.ByQuery),
 	)
-	if err != nil || strings.TrimSpace(html) == "" {
-		return nil
+	// Let late XHR bodies finish arriving before we tear the tab down.
+	time.Sleep(900 * time.Millisecond)
+
+	mu.Lock()
+	for _, c := range captured {
+		apis = append(apis, *c)
 	}
-	doc, err = goquery.NewDocumentFromReader(strings.NewReader(html))
-	if err != nil {
-		return nil
+	mu.Unlock()
+
+	if err == nil && strings.TrimSpace(html) != "" {
+		if d, e := goquery.NewDocumentFromReader(strings.NewReader(html)); e == nil {
+			doc = d
+		}
 	}
-	return doc
+	return doc, apis
 }
 
 // headlessAvailable reports whether Chromium can be used (for status messages).

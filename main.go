@@ -693,6 +693,7 @@ func main() {
 		admin.Post("/scraper/sources/{id:uint}/run", routes.AdminRunScrapedSource)
 		admin.Get("/scraper/listings", routes.AdminListScrapedListings)
 		admin.Get("/scraper/runs", routes.AdminListScrapeRuns)
+		admin.Get("/scraper/api-calls", routes.AdminListScrapedAPICalls)
 		admin.Get("/scraper/headless-check", routes.AdminScraperHeadlessCheck)
 
 		admin.Get("/properties", routes.AdminListProperties)

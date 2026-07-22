@@ -215,3 +215,24 @@ func AdminListScrapedListings(ctx iris.Context) {
 	}
 	ctx.JSON(iris.Map{"data": rows})
 }
+
+// GET /admin/scraper/api-calls?source_id=&limit= — browse intercepted
+// XHR/fetch responses (the raw JSON behind JS-driven sites).
+func AdminListScrapedAPICalls(ctx iris.Context) {
+	q := storage.DB.Model(&models.ScrapedAPICall{})
+	if sid := ctx.URLParam("source_id"); sid != "" {
+		if v, err := strconv.ParseUint(sid, 10, 32); err == nil {
+			q = q.Where("source_id = ?", v)
+		}
+	}
+	limit := ctx.URLParamIntDefault("limit", 50)
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	var rows []models.ScrapedAPICall
+	if err := q.Order("scraped_at DESC").Limit(limit).Find(&rows).Error; err != nil {
+		utils.JSONError(ctx, http.StatusInternalServerError, "server_error", err.Error())
+		return
+	}
+	ctx.JSON(iris.Map{"data": rows})
+}

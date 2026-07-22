@@ -97,3 +97,26 @@ type ScrapeRun struct {
 }
 
 func (ScrapeRun) TableName() string { return "scrape_runs" }
+
+// ScrapedAPICall is one XHR/fetch/GraphQL response intercepted while a page
+// rendered in headless Chromium — the clean JSON behind JS-driven sites, the
+// most reliable source of structured data. Stored complete (raw body) so the
+// full response is preserved, not just extracted fields.
+type ScrapedAPICall struct {
+	ID        uint      `json:"id" gorm:"primaryKey"`
+	CreatedAt time.Time `json:"created_at" gorm:"index"`
+
+	SourceID     uint      `json:"source_id" gorm:"index;not null"`
+	PageURL      string    `json:"page_url" gorm:"type:text"`      // page that triggered the call
+	APIURL       string    `json:"api_url" gorm:"type:text;index"` // the intercepted endpoint
+	Method       string    `json:"method" gorm:"size:12"`
+	ResourceType string    `json:"resource_type" gorm:"size:16"` // XHR | Fetch
+	Status       int       `json:"status"`
+	ContentType  string    `json:"content_type" gorm:"size:255"`
+	Body         string    `json:"body" gorm:"type:text"` // raw response body
+	BodySize     int       `json:"body_size"`
+	ContentHash  string    `json:"content_hash" gorm:"index;size:64"`
+	ScrapedAt    time.Time `json:"scraped_at"`
+}
+
+func (ScrapedAPICall) TableName() string { return "scraped_api_calls" }

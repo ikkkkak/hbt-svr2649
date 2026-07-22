@@ -149,6 +149,7 @@ type ScrapeResult struct {
 	ItemCount int
 	Inserted  int
 	Updated   int
+	APICalls  int // XHR/fetch responses captured & stored
 	Status    string
 }
 
@@ -422,6 +423,86 @@ func hashListing(sourceID uint, l *models.ScrapedListing) string {
 	return hex.EncodeToString(h[:])
 }
 
+func sha256hex(s string) string {
+	h := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(h[:])
+}
+
+// urlShortPath returns a compact "host/last-path-segment" label for titles.
+func urlShortPath(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return clip(raw, 80)
+	}
+	p := strings.Trim(u.Path, "/")
+	if p == "" {
+		return u.Host
+	}
+	if i := strings.LastIndex(p, "/"); i >= 0 && i < len(p)-1 {
+		p = p[i+1:]
+	}
+	return clip(u.Host+"/"+p, 80)
+}
+
+// storeCapturedAPIs persists every intercepted XHR/fetch response in full
+// (scraped_api_calls) and, when the body is JSON, also indexes it as knowledge
+// (scraped_listings) so MeskenyGPT can reason over and cite the structured
+// data. Dedups on a content hash so re-runs don't pile up duplicates.
+func storeCapturedAPIs(source *models.ScrapedSource, pageURL string, apis []CapturedAPI, result *ScrapeResult) {
+	now := time.Now()
+	for _, a := range apis {
+		body := sanitizeUTF8(a.Body)
+		if strings.TrimSpace(body) == "" {
+			continue
+		}
+		hash := sha256hex(fmt.Sprintf("%d|%s|%s", source.ID, a.URL, body))
+
+		// 1) Complete raw storage.
+		var existing models.ScrapedAPICall
+		if storage.DB.Where("source_id = ? AND content_hash = ?", source.ID, hash).
+			First(&existing).Error != nil {
+			rec := models.ScrapedAPICall{
+				SourceID:     source.ID,
+				PageURL:      pageURL,
+				APIURL:       clip(a.URL, 2000),
+				Method:       a.Method,
+				ResourceType: a.ResourceType,
+				Status:       a.Status,
+				ContentType:  clip(a.ContentType, 200),
+				Body:         clip(body, 300000),
+				BodySize:     len(a.Body),
+				ContentHash:  hash,
+				ScrapedAt:    now,
+			}
+			if storage.DB.Create(&rec).Error == nil {
+				result.APICalls++
+			}
+		}
+
+		// 2) Index JSON as citable knowledge for the AI.
+		if strings.Contains(strings.ToLower(a.ContentType), "json") &&
+			len(strings.TrimSpace(body)) > 40 {
+			listing := models.ScrapedListing{
+				SourceID:    source.ID,
+				Kind:        source.Kind,
+				Title:       clip("API · "+urlShortPath(a.URL), 500),
+				Description: clip(body, 6000),
+				SourceURL:   clip(a.URL, 2000),
+				ScrapedAt:   now,
+			}
+			listing.ContentHash = hashListing(source.ID, &listing)
+			var el models.ScrapedListing
+			if storage.DB.Where("source_id = ? AND content_hash = ?", source.ID, listing.ContentHash).
+				First(&el).Error != nil {
+				if storage.DB.Create(&listing).Error == nil {
+					result.Inserted++
+					result.ItemCount++
+				}
+			}
+		}
+	}
+}
+
 // Crawl limits — high enough to map an entire ministry/portal, still bounded
 // so one source can't run away. An admin-registered crawl of a single site
 // gets a lighter per-page delay than the global politeness spacing.
@@ -503,13 +584,17 @@ func (w *WebScraper) crawlSiteContent(ctx context.Context, source *models.Scrape
 		// JavaScript-rendered — render it in a real browser and re-extract.
 		// (Cheap fetch first keeps server-rendered sites fast.)
 		if len(text) < crawlMinChars {
-			if rdoc := renderDocQuiet(page.url); rdoc != nil {
+			rdoc, apis := renderCaptured(page.url)
+			if rdoc != nil {
 				rtitle, rtext := extractReadable(rdoc)
 				if len(rtext) > len(text) {
 					title, text = rtitle, rtext
 					doc = rdoc // discover JS-injected links from rendered DOM
 				}
 			}
+			// Store every intercepted XHR/fetch response (complete raw JSON),
+			// and index substantial JSON as knowledge the AI can cite.
+			storeCapturedAPIs(source, page.url, apis, result)
 		}
 		if len(text) > maxSeenChars {
 			maxSeenChars = len(text)
@@ -574,6 +659,9 @@ func (w *WebScraper) crawlSiteContent(ctx context.Context, source *models.Scrape
 	} else {
 		result.Status = fmt.Sprintf("crawled — %d relevant pages (%d new, %d updated)",
 			result.ItemCount, result.Inserted, result.Updated)
+	}
+	if result.APICalls > 0 {
+		result.Status += fmt.Sprintf(" · %d API responses captured", result.APICalls)
 	}
 	source.LastScrapedAt = &now
 	source.LastStatus = result.Status
