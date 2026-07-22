@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"apartments-clone-server/models"
 	"apartments-clone-server/storage"
@@ -390,9 +391,29 @@ func detectCurrency(s string) string {
 func clip(s string, n int) string {
 	s = strings.TrimSpace(s)
 	if len(s) <= n {
+		return sanitizeUTF8(s)
+	}
+	// Truncate on a rune boundary, never mid-character. Slicing bytes on
+	// multibyte text (Arabic, etc.) would leave a dangling lead byte that
+	// PostgreSQL rejects as "invalid byte sequence for encoding UTF8".
+	cut := n
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return sanitizeUTF8(strings.TrimSpace(s[:cut]))
+}
+
+// sanitizeUTF8 drops any invalid/incomplete UTF-8 so a value can always be
+// stored in a UTF-8 Postgres column. Also strips NUL bytes, which Postgres
+// text columns cannot hold.
+func sanitizeUTF8(s string) string {
+	if i := strings.IndexByte(s, 0); i >= 0 {
+		s = strings.ReplaceAll(s, "\x00", "")
+	}
+	if utf8.ValidString(s) {
 		return s
 	}
-	return s[:n]
+	return strings.ToValidUTF8(s, "")
 }
 
 func hashListing(sourceID uint, l *models.ScrapedListing) string {
