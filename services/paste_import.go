@@ -56,6 +56,10 @@ func ImportPastedJSON(name, kind, sourceURL, payload string) (sourceID uint, ins
 		return src.ID, 0, fmt.Errorf("could not extract any records from the JSON")
 	}
 
+	// Re-paste replaces: clear this source's previous rows so a stale
+	// whole-file blob from an earlier import can't linger and pollute grounding.
+	storage.DB.Where("source_id = ?", src.ID).Delete(&models.ScrapedListing{})
+
 	now := time.Now()
 	for _, it := range items {
 		desc := sanitizeUTF8(strings.TrimSpace(it.Description))
@@ -175,9 +179,115 @@ func procedureRecord(catTitle string, d *procDetail) pastedItem {
 	}
 }
 
+// parseMinistriesExport handles the ijraati.gov.mr export shape:
+// { source, ministries:[ { ministry_ar, procedures:[ { title, description,
+// category, concerned_parties{}, required_documents (string|array),
+// duration_and_cost{} } ] } ] }. Flattens to ONE rich record per procedure.
+func parseMinistriesExport(text string) []pastedItem {
+	var doc struct {
+		Source     string `json:"source"`
+		Ministries []struct {
+			MinistryAR string `json:"ministry_ar"`
+			MinistryEN string `json:"ministry_en"`
+			Procedures []struct {
+				Title             string         `json:"title"`
+				Description       string         `json:"description"`
+				Category          string         `json:"category"`
+				ConcernedParties  map[string]any `json:"concerned_parties"`
+				RequiredDocuments any            `json:"required_documents"`
+				DurationAndCost   map[string]any `json:"duration_and_cost"`
+				URL               string         `json:"url"`
+			} `json:"procedures"`
+		} `json:"ministries"`
+	}
+	if json.Unmarshal([]byte(text), &doc) != nil || len(doc.Ministries) == 0 {
+		return nil
+	}
+	var out []pastedItem
+	for _, m := range doc.Ministries {
+		for _, p := range m.Procedures {
+			title := strings.TrimSpace(p.Title)
+			if title == "" {
+				continue
+			}
+			var b strings.Builder
+			b.WriteString(title)
+			if m.MinistryAR != "" {
+				b.WriteString(" — " + strings.TrimSpace(m.MinistryAR))
+			}
+			b.WriteString("\n")
+			if d := strings.TrimSpace(p.Description); d != "" {
+				b.WriteString(d + "\n")
+			}
+			if docs := anyToText(p.RequiredDocuments); docs != "" {
+				b.WriteString("الوثائق المطلوبة / Documents requis: " + docs + "\n")
+			}
+			for _, k := range sortedMapKeys(p.DurationAndCost) {
+				if v := valToText(p.DurationAndCost[k]); v != "" {
+					fmt.Fprintf(&b, "%s: %s\n", k, v)
+				}
+			}
+			for _, k := range sortedMapKeys(p.ConcernedParties) {
+				if v := valToText(p.ConcernedParties[k]); v != "" {
+					fmt.Fprintf(&b, "%s: %s\n", k, v)
+				}
+			}
+			out = append(out, pastedItem{
+				Title:       title,
+				Description: strings.TrimSpace(b.String()),
+				URL:         firstNonEmptyStr(strings.TrimSpace(p.URL), strings.TrimSpace(doc.Source)),
+			})
+		}
+	}
+	return out
+}
+
+func anyToText(v any) string {
+	switch vv := v.(type) {
+	case string:
+		return strings.TrimSpace(vv)
+	case []any:
+		parts := make([]string, 0, len(vv))
+		for _, e := range vv {
+			if s := valToText(e); s != "" {
+				parts = append(parts, s)
+			}
+		}
+		return strings.Join(parts, ", ")
+	default:
+		return ""
+	}
+}
+
+func valToText(v any) string {
+	if v == nil {
+		return ""
+	}
+	if s, ok := v.(string); ok {
+		return strings.TrimSpace(s)
+	}
+	return strings.TrimSpace(fmt.Sprintf("%v", v))
+}
+
+func sortedMapKeys(m map[string]any) []string {
+	if len(m) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
 // parsePastedItems turns any JSON payload into a flat list of records.
 func parsePastedItems(text string) []pastedItem {
-	// 0) Known structured export (procedures.gov.mr) — flatten per procedure.
+	// 0a) ijraati.gov.mr export (ministries[].procedures[]).
+	if items := parseMinistriesExport(text); len(items) > 0 {
+		return items
+	}
+	// 0b) procedures.gov.mr export (target_categories → fr/ar details).
 	if items := parseProceduresExport(text); len(items) > 0 {
 		return items
 	}
