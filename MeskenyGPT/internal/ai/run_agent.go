@@ -395,6 +395,11 @@ func (s *service) agentRunConversational(
 			sys += strings.TrimSpace(snip) + "\n---\n"
 		}
 	}
+	// Scraped ministry/cadastre/market knowledge — lets the agent ANSWER
+	// procedure questions (ownership transfer, titles, documents, fees) from
+	// real government pages and cite them, instead of guessing.
+	sys += retrieveScrapedMarketBlock(ctx, s.gdb, msgCtx)
+
 	msgs := []client.Message{{Role: "system", Content: sys}}
 	msgs = append(msgs, sanitizeHistoryForLLM(in.History)...)
 	msgs = append(msgs, client.Message{Role: "user", Content: in.Text})
@@ -638,6 +643,8 @@ func intentCode(i lang.Intent) string {
 		return "greeting"
 	case lang.IntentHelp:
 		return "help"
+	case lang.IntentInfoProcedure:
+		return "info_procedure"
 	default:
 		return "unknown"
 	}

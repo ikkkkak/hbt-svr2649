@@ -30,6 +30,13 @@ const (
 	// Conversational / info
 	IntentGreeting
 	IntentHelp
+
+	// IntentInfoProcedure is a question about a real-estate ADMINISTRATIVE
+	// procedure or information — how to transfer ownership, register a title,
+	// required documents, fees, permits, cadastre steps, etc. These are
+	// ANSWERED from scraped ministry/cadastre knowledge, never routed to a
+	// property/land search.
+	IntentInfoProcedure
 )
 
 // MessageContext is the structured understanding of a single message.

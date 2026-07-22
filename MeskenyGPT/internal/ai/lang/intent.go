@@ -56,6 +56,17 @@ func AnalyzeMessage(msg string) MessageContext {
 		return ctx
 	}
 
+	// ── Administrative / procedure questions ─────────────────────────────────
+	// "How do I transfer land ownership?", "What documents to register a title?",
+	// "cadastre fees", "permis d'occuper"… These are INFORMATION requests
+	// answered from scraped ministry/cadastre knowledge — NOT property searches.
+	// Detected before the land/search keywords so that "قطعة أرضية" (land plot)
+	// inside a procedure question does not get hijacked into a land search.
+	if MessageSignalsProcedure(msg, lower) {
+		ctx.Intent = IntentInfoProcedure
+		return ctx
+	}
+
 	// Rent — Mauritanian Hassaniya incl. للإجاره / كراء (checked before buy; rent wins on conflict).
 	if MessageSignalsRent(msg) {
 		ctx.Intent = IntentSearchRent
@@ -603,6 +614,66 @@ func IsExplicitPurposeIntent(intent Intent) bool {
 	default:
 		return false
 	}
+}
+
+// MessageSignalsProcedure reports whether a message is asking ABOUT a
+// real-estate administrative procedure or information (ownership transfer,
+// title registration, required documents, fees, permits, cadastre steps) —
+// which must be ANSWERED from scraped ministry/cadastre knowledge, not treated
+// as a property search.
+func MessageSignalsProcedure(msg, lower string) bool {
+	// Strong procedure phrases — decisive on their own (cannot be a search).
+	strong := []string{
+		// Arabic — ownership / registration / procedures
+		"تبديل ملكية", "نقل ملكية", "تحويل ملكية", "تحفيظ", "سند ملكية", "سند عقاري",
+		"رسم عقاري", "شهادة عقارية", "رخصة بناء", "تسجيل عقاري", "الملكية العقارية",
+		"إجراء", "إجراءات", "مسطرة", "مساطر", "المساطر", "الوثائق المطلوبة",
+		// French
+		"titre foncier", "titres fonciers", "permis d'occuper", "permis d’occuper",
+		"mutation", "enregistrement", "démarche", "procédure", "acte de propriété",
+		"transfert de propriété", "certificat de propriété", "permis de construire",
+		// English
+		"title deed", "land registration", "property registration", "ownership transfer",
+		"transfer ownership", "transfer of ownership", "register a title", "occupancy permit",
+		"building permit", "property procedure", "land procedure",
+	}
+	for _, k := range strong {
+		if strings.Contains(msg, k) || strings.Contains(lower, k) {
+			return true
+		}
+	}
+
+	// Weaker admin terms — a procedure question only when paired with a how-to /
+	// question signal (otherwise "documents"/"fees" alone are ambiguous).
+	admin := []string{
+		"وثائق", "مستندات", "أوراق مطلوبة", "رسوم", "معاملة", "تسجيل",
+		"documents", "papiers", "pièces", "frais", "dossier",
+		"paperwork", "fees", "registration", "notaire", "notary",
+		"cadastre", "foncier", "foncière",
+	}
+	hasAdmin := false
+	for _, k := range admin {
+		if strings.Contains(msg, k) || strings.Contains(lower, k) {
+			hasAdmin = true
+			break
+		}
+	}
+	if !hasAdmin {
+		return false
+	}
+	question := []string{
+		"كيف", "ما هي", "ماهي", "ما هو", "ماهو", "هل يجب", "ماذا أحتاج", "شنو",
+		"comment", "quels sont", "quelles sont", "quel", "quelle", "combien de temps",
+		"faut-il", "dois-je", "puis-je",
+		"how do i", "how can i", "how to", "what documents", "what do i need",
+		"what are the", "do i need", "how long", "steps to",
+	}
+	for _, q := range question {
+		if strings.Contains(msg, q) || strings.Contains(lower, q) {
+			return true
+		}
+	}
+	return false
 }
 
 // IsPropertySearchIntent tells if this message should trigger DB-backed
