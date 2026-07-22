@@ -14,7 +14,7 @@ import (
 // endpoint returns, the running binary is stale.
 //
 // Format: YYYY.MM.DD-N  (N = nth bump that day). Keep it short.
-const HabitatAPIVersion = "2026.07.22-26"
+const HabitatAPIVersion = "2026.07.22-27"
 
 // processStartedAt marks when THIS binary started — a fresh timestamp proves
 // the process actually restarted (a redeploy), independent of the version

@@ -1490,7 +1490,8 @@ func (s *AIService) GetInitialGreeting(lang ...Lang) (string, []map[string]strin
 // ─────────────────────────────────────────────────────────────────────────────
 
 func (s *AIService) GenerateSessionTitle(message string) string {
-	// Strip emojis for cleaner titles
+	// Strip emojis for cleaner titles. Ranging over the string decodes whole
+	// UTF-8 runes, so we never keep a partial byte.
 	var b strings.Builder
 	for _, r := range message {
 		if r < 0x1F600 {
@@ -1498,11 +1499,15 @@ func (s *AIService) GenerateSessionTitle(message string) string {
 		}
 	}
 	clean := strings.TrimSpace(b.String())
-	if len(clean) > 48 {
-		return clean[:48] + "…"
-	}
 	if clean == "" {
 		return "Nouvelle recherche"
+	}
+	// Truncate on a RUNE boundary — byte slicing here would cut an Arabic
+	// character in half and Postgres rejects the dangling byte
+	// ("invalid byte sequence for encoding UTF8"), 500ing the whole chat turn.
+	runes := []rune(clean)
+	if len(runes) > 40 {
+		return strings.TrimSpace(string(runes[:40])) + "…"
 	}
 	return clean
 }
