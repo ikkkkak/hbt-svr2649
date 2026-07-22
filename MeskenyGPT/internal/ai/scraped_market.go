@@ -110,9 +110,9 @@ func retrieveScrapedMarketBlock(ctx context.Context, gdb *gorm.DB, mc lang.Messa
 //     and cite ONLY those exact URLs.
 //   - If we have nothing: the model is explicitly forbidden from inventing
 //     steps, documents, fees, percentages, office names, or URLs.
-func procedureGroundingBlock(ctx context.Context, gdb *gorm.DB, mc lang.MessageContext) string {
+func procedureGroundingBlock(ctx context.Context, gdb *gorm.DB, mc lang.MessageContext) (block string, found bool, sourceURLs []string) {
 	if gdb == nil || mc.Intent != lang.IntentInfoProcedure {
-		return ""
+		return "", false, nil
 	}
 
 	type procRow struct {
@@ -150,11 +150,8 @@ func procedureGroundingBlock(ctx context.Context, gdb *gorm.DB, mc lang.MessageC
 		return "\n\n=== ADMINISTRATIVE PROCEDURE — GENERAL GUIDANCE (NO OFFICIAL SOURCE ON FILE) ===\n" +
 			"The user is asking HOW to complete a real-estate administrative procedure. This is a NATIONAL procedure — it does NOT depend on the property type (apartment/house/land) or the city. " +
 			"NEVER ask 'is it an apartment or land?' or 'which city?' — that is robotic and wrong here. Answer immediately and helpfully.\n" +
-			"CRITICAL — HONESTY MARKER: We do NOT have an official documented source for this on file. You MUST BEGIN your reply with exactly this disclaimer line on its own (translated to the user's language, keep the ⚠️): " +
-			"'⚠️ إرشادات عامة — لم نتحقق بعد من هذا الإجراء مقابل مصدر رسمي في مسكني.' (FR: '⚠️ Indications générales — non encore vérifiées auprès d'une source officielle sur Meskeny.' / EN: '⚠️ General guidance — not yet verified against an official source on Meskeny.'). " +
-			"Then give the GENERAL steps that apply in Mauritania (typically: prepare identity documents + the existing title/ownership deed → draft the transfer/sale/gift contract before a notary «كاتب العدل» → pay the registration/mutation duties → register at the land-registry office «مصلحة التسجيل العقاري / المحافظة العقارية» → collect the updated title). " +
-			"You MUST NOT invent specific fee amounts/percentages, exact office addresses, processing days, article numbers, or URLs — never fabricate a procedures.gov.mr link, and do NOT state a specific number of days/weeks as if it were official. End by recommending the user confirm exact details with the land registry or a notary, and offer to connect them with a Meskeny specialist. " +
-			"Do not present any of this as the official verified procedure.\n"
+			"We do NOT have an official documented source for this on file. Give the GENERAL steps that apply in Mauritania (typically: prepare identity documents + the existing title/ownership deed → draft the transfer/sale/gift contract before a notary «كاتب العدل» → pay the registration/mutation duties → register at the land-registry office «مصلحة التسجيل العقاري / المحافظة العقارية» → collect the updated title). " +
+			"You MUST NOT invent specific fee amounts/percentages, exact office addresses, processing days, article numbers, or URLs — never fabricate a procedures.gov.mr link, and do NOT state a specific number of days/weeks as if it were official. Keep documents generic; do not present a precise official document checklist. End by recommending the user confirm exact details with the land registry or a notary, and offer to connect them with a Meskeny specialist.\n", false, nil
 	}
 
 	var b strings.Builder
@@ -165,12 +162,67 @@ func procedureGroundingBlock(ctx context.Context, gdb *gorm.DB, mc lang.MessageC
 		if d := strings.TrimSpace(r.Description); d != "" {
 			b.WriteString(clipRunes(d, 1000) + "\n")
 		}
-		if strings.TrimSpace(r.SourceURL) != "" {
-			b.WriteString("source: " + strings.TrimSpace(r.SourceURL) + "\n")
+		if u := strings.TrimSpace(r.SourceURL); u != "" {
+			b.WriteString("source: " + u + "\n")
+			sourceURLs = append(sourceURLs, u)
 		}
 		b.WriteString("\n")
 	}
-	return b.String()
+	return b.String(), true, sourceURLs
+}
+
+// procedureDisclaimer / procedureSourceLabel — localized strings used to
+// GUARANTEE the honesty marker / citation in code (not left to the LLM).
+func procedureDisclaimer(l lang.Lang) string {
+	switch l {
+	case lang.LangAR:
+		return "⚠️ إرشادات عامة — لم نتحقق بعد من هذا الإجراء مقابل مصدر رسمي في مسكني. تأكد من التفاصيل الدقيقة لدى الجهة المختصة."
+	case lang.LangEN:
+		return "⚠️ General guidance — not yet verified against an official source on Meskeny. Confirm exact details with the competent authority."
+	default:
+		return "⚠️ Indications générales — non encore vérifiées auprès d'une source officielle sur Meskeny. Confirmez les détails exacts auprès de l'autorité compétente."
+	}
+}
+
+func procedureSourceLabel(l lang.Lang) string {
+	switch l {
+	case lang.LangAR:
+		return "المصدر:"
+	default:
+		return "Source:"
+	}
+}
+
+// EnforceProcedureHonesty GUARANTEES the trust markers regardless of what the
+// LLM did: a general (ungrounded) procedure answer always carries the ⚠️
+// disclaimer up front; a grounded one always shows a real source URL. This is
+// the machine-enforced version of the prompt rules the model kept ignoring.
+func EnforceProcedureHonesty(mc lang.MessageContext, answer string, grounded bool, sourceURLs []string) string {
+	if mc.Intent != lang.IntentInfoProcedure {
+		return answer
+	}
+	a := strings.TrimSpace(answer)
+	if a == "" {
+		return a
+	}
+	if !grounded {
+		if !strings.Contains(a, "⚠️") {
+			a = procedureDisclaimer(mc.Lang) + "\n\n" + a
+		}
+		return a
+	}
+	// Grounded: make sure a real source URL is present so the user can verify.
+	for _, u := range sourceURLs {
+		if u != "" && strings.Contains(a, u) {
+			return a // already cited
+		}
+	}
+	for _, u := range sourceURLs {
+		if strings.TrimSpace(u) != "" {
+			return a + "\n\n" + procedureSourceLabel(mc.Lang) + " " + strings.TrimSpace(u)
+		}
+	}
+	return a
 }
 
 func clipRunes(s string, n int) string {

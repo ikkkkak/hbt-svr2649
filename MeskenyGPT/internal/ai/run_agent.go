@@ -401,7 +401,8 @@ func (s *service) agentRunConversational(
 	sys += retrieveScrapedMarketBlock(ctx, s.gdb, msgCtx)
 	// Strict grounding for administrative procedures: answer only from real
 	// scraped data, or admit we lack it — never fabricate steps/fees/URLs.
-	sys += procedureGroundingBlock(ctx, s.gdb, msgCtx)
+	pgBlock, pgGrounded, pgURLs := procedureGroundingBlock(ctx, s.gdb, msgCtx)
+	sys += pgBlock
 
 	msgs := []client.Message{{Role: "system", Content: sys}}
 	msgs = append(msgs, sanitizeHistoryForLLM(in.History)...)
@@ -454,6 +455,7 @@ func (s *service) agentRunConversational(
 	}
 
 	finalContent = enforceNoCardsResponseIntegrity(msgCtx, finalContent)
+	finalContent = EnforceProcedureHonesty(msgCtx, finalContent, pgGrounded, pgURLs)
 	finalContent = enforceMeskenyIdentity(msgCtx, finalContent)
 
 	matches, conf, assumptions, gaps := verifyConversational(msgCtx, in.Text, finalContent)

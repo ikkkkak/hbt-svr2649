@@ -428,7 +428,8 @@ func (s *service) HandleChatTurn(ctx context.Context, in ChatInput) (ChatOutput,
 	// Administrative-procedure questions: strict grounding so the AI answers
 	// from real scraped official data (or admits it lacks it) — never invents
 	// steps/fees/URLs, which would read as a scam to users.
-	sys += procedureGroundingBlock(ctx, s.gdb, msgCtx)
+	pgBlock, pgGrounded, pgURLs := procedureGroundingBlock(ctx, s.gdb, msgCtx)
+	sys += pgBlock
 
 	msgs := []client.Message{{Role: "system", Content: sys}}
 	msgs = append(msgs, sanitizeHistoryForLLM(in.History)...)
@@ -449,6 +450,9 @@ func (s *service) HandleChatTurn(ctx context.Context, in ChatInput) (ChatOutput,
 			finalContent = refined
 		}
 	}
+	// Guarantee the trust markers in code (the LLM can't be trusted to add the
+	// ⚠️ disclaimer / source citation reliably).
+	finalContent = EnforceProcedureHonesty(msgCtx, finalContent, pgGrounded, pgURLs)
 
 	elapsed := time.Since(start).Milliseconds()
 	msg := response.Message{
