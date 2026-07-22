@@ -147,12 +147,12 @@ func procedureGroundingBlock(ctx context.Context, gdb *gorm.DB, mc lang.MessageC
 	_ = q.Order("sl.scraped_at DESC").Limit(8).Scan(&rows).Error
 
 	if len(rows) == 0 {
-		return "\n\n=== ADMINISTRATIVE PROCEDURE — NO OFFICIAL DATA ON FILE ===\n" +
-			"The user is asking about a real-estate administrative procedure, but we have NO scraped or official source for it in our knowledge base right now. " +
-			"You MUST NOT invent specific steps, required documents, fees, tax percentages, office names, article numbers, or URLs. " +
-			"Never fabricate a procedures.gov.mr link. Instead, in the user's language: (1) say honestly you don't yet have the official documented procedure on file, " +
-			"(2) give at most a brief, high-level orientation explicitly labelled as general guidance to be verified, and " +
-			"(3) recommend confirming with the competent authority (e.g. the land registry / Conservation Foncière) or ask to be connected to a Meskeny specialist. Keep it short and honest — do not pad it with plausible-sounding but unverified detail.\n"
+		return "\n\n=== ADMINISTRATIVE PROCEDURE — ANSWER DIRECTLY, DO NOT INTERROGATE ===\n" +
+			"The user is asking HOW to complete a real-estate administrative procedure (e.g. transferring ownership). This is a NATIONAL procedure — it does NOT depend on the property type (apartment/house/land) or the city. " +
+			"NEVER ask 'is it an apartment or land?' or 'which city?' — that is robotic and wrong here; those questions do not change the procedure. Answer immediately and helpfully.\n" +
+			"Give a clear, confident, well-structured answer of the GENERAL steps that apply in Mauritania (typically: prepare identity documents + the existing title/ownership deed, draft a transfer/sale/gift contract before a notary «كاتب العدل», pay the registration/mutation duties, then register the transfer at the land-registry office «مصلحة التسجيل العقاري / المحافظة العقارية» and collect the updated title). Present it as clear steps. " +
+			"Because we do NOT yet have the official documented source on file, you MUST: (a) present these as general guidance to confirm, not as exact fees/deadlines; (b) NOT invent specific fee percentages, exact office addresses, article numbers, or URLs — never fabricate a procedures.gov.mr link; (c) end by recommending the user confirm details with the land registry or a notary, and offer to connect them with a Meskeny specialist. " +
+			"Be genuinely useful and complete — do not deflect with questions.\n"
 	}
 
 	var b strings.Builder

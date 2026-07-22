@@ -115,6 +115,8 @@ func IntentLabel(it lang.Intent) string {
 		return "greeting"
 	case lang.IntentHelp:
 		return "help"
+	case lang.IntentInfoProcedure:
+		return "info_procedure"
 	default:
 		return "unknown"
 	}
