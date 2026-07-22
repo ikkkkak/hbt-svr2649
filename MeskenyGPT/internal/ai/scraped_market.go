@@ -144,7 +144,7 @@ func procedureGroundingBlock(ctx context.Context, gdb *gorm.DB, mc lang.MessageC
 	}
 
 	var rows []procRow
-	_ = q.Order("sl.scraped_at DESC").Limit(8).Scan(&rows).Error
+	_ = q.Order("sl.scraped_at DESC").Limit(4).Scan(&rows).Error
 
 	if len(rows) == 0 {
 		return "\n\n=== ADMINISTRATIVE PROCEDURE — GENERAL GUIDANCE (NO OFFICIAL SOURCE ON FILE) ===\n" +
@@ -155,8 +155,14 @@ func procedureGroundingBlock(ctx context.Context, gdb *gorm.DB, mc lang.MessageC
 	}
 
 	var b strings.Builder
-	b.WriteString("\n\n=== OFFICIAL PROCEDURE DATA (AUTHORITATIVE — GROUND YOUR ANSWER ONLY IN THIS) ===\n")
-	b.WriteString("Answer the procedure question ONLY from the content below. You MUST cite the exact source URL(s) shown here INLINE in your answer (write a line like 'المصدر / Source: <url>') so the user can verify it — this is mandatory when you use this data. Never invent or guess a URL. Do NOT add documents, fees, percentages, deadlines, or office names that are not present in this content; if a detail the user needs is missing here, say it must be verified with the authority rather than guessing. Do NOT show the honesty/⚠️ disclaimer when you have this official data.\n\n")
+	b.WriteString("\n\n=== OFFICIAL PROCEDURE DATA (AUTHORITATIVE) ===\n")
+	b.WriteString("The exact official data for the user's procedure is below. STRICT RULES:\n" +
+		"1. Pick the SINGLE procedure below that best matches the user's request and answer about THAT one specifically (don't blend several).\n" +
+		"2. Reproduce its documents, fees, processing time and responsible authority EXACTLY as written — copy amounts/percentages/day-counts VERBATIM. If a fee says '3.2%' or '50 أوقية' or duration '10 أيام', write exactly that.\n" +
+		"3. It is FORBIDDEN to replace an exact figure that IS in the data with vague wording like 'approximate', 'varies', or 'inquire from the authority'. It is FORBIDDEN to invent a generic range like '3–15 days' or generic documents (e.g. 'شهادة عدم ممانعة من الجيران') that are NOT in the data.\n" +
+		"4. Do NOT add steps, documents, or fees that are not present below. If a detail is missing from the data, simply omit it.\n" +
+		"5. You MUST end with the exact source URL from the matched procedure (write 'المصدر: <url>' / 'Source: <url>'). Never guess a URL. Do NOT show any ⚠️ disclaimer — this is official data.\n" +
+		"Format: a one-line intro, then the real required documents and the real fees/duration (a compact table is good), then the source line.\n\n")
 	for i, r := range rows {
 		b.WriteString(fmt.Sprintf("%d. %s\n", i+1, strings.TrimSpace(r.Title)))
 		if d := strings.TrimSpace(r.Description); d != "" {
