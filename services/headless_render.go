@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"strings"
 	"sync"
@@ -86,9 +87,17 @@ func ensureBrowser() bool {
 
 // renderDocQuiet renders a URL with headless Chromium and returns the parsed
 // rendered DOM. Serialized process-wide. Returns nil if unavailable/failed.
-func renderDocQuiet(rawURL string) *goquery.Document {
+func renderDocQuiet(rawURL string) (doc *goquery.Document) {
 	browserMu.Lock()
 	defer browserMu.Unlock()
+	// A Chromium/chromedp panic must not propagate — return nil (plain fetch
+	// already provided a fallback) rather than crash the crawl goroutine.
+	defer func() {
+		if r := recover(); r != nil {
+			browserBad = true // stop trying this process
+			doc = nil
+		}
+	}()
 
 	if !ensureBrowser() {
 		return nil
@@ -107,7 +116,7 @@ func renderDocQuiet(rawURL string) *goquery.Document {
 	if err != nil || strings.TrimSpace(html) == "" {
 		return nil
 	}
-	doc, err := goquery.NewDocumentFromReader(strings.NewReader(html))
+	doc, err = goquery.NewDocumentFromReader(strings.NewReader(html))
 	if err != nil {
 		return nil
 	}
@@ -119,4 +128,23 @@ func headlessAvailable() bool {
 	browserMu.Lock()
 	defer browserMu.Unlock()
 	return ensureBrowser()
+}
+
+// HeadlessSelfCheck launches Chromium and reports the outcome + the resolved
+// binary path — an admin diagnostic. Panic-safe.
+func HeadlessSelfCheck() (ok bool, detail string) {
+	defer func() {
+		if r := recover(); r != nil {
+			ok = false
+			detail = fmt.Sprintf("panic: %v", r)
+		}
+	}()
+	path := chromiumExecPath()
+	if path == "" {
+		return false, "no Chromium binary found (CHROME_BIN unset and no known path)"
+	}
+	if headlessAvailable() {
+		return true, "Chromium OK at " + path
+	}
+	return false, "Chromium present at " + path + " but failed to launch"
 }

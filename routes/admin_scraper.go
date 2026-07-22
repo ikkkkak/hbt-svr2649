@@ -2,6 +2,7 @@ package routes
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"strconv"
 	"time"
@@ -14,6 +15,13 @@ import (
 	"github.com/kataras/iris/v12"
 	"gorm.io/datatypes"
 )
+
+// GET /admin/scraper/headless-check — reports whether headless Chromium can
+// launch in this deployment (diagnoses JS-render capability).
+func AdminScraperHeadlessCheck(ctx iris.Context) {
+	ok, detail := services.HeadlessSelfCheck()
+	ctx.JSON(iris.Map{"headless_available": ok, "detail": detail})
+}
 
 // POST /admin/scraper/sources — register a URL for MeskenyGPT to scrape.
 func AdminCreateScrapedSource(ctx iris.Context) {
@@ -139,6 +147,14 @@ func AdminRunScrapedSource(ctx iris.Context) {
 	storage.DB.Model(&src).Update("last_status", "running…")
 
 	go func(s models.ScrapedSource) {
+		// Panic recovery: a headless-browser/parse panic must NEVER crash the
+		// whole API server. Capture it in last_status instead.
+		defer func() {
+			if r := recover(); r != nil {
+				storage.DB.Model(&models.ScrapedSource{}).Where("id = ?", s.ID).
+					Update("last_status", fmt.Sprintf("error: crashed during scrape (%v)", r))
+			}
+		}()
 		// Long budget: a full site crawl (sitemap + links) can take many
 		// minutes. Runs in the background so nothing waits on it.
 		c, cancel := context.WithTimeout(context.Background(), 25*time.Minute)

@@ -723,6 +723,7 @@ func ScrapeAllActiveSources() {
 	scraper := NewWebScraper()
 	for i := range sources {
 		func(src *models.ScrapedSource) {
+			defer func() { _ = recover() }() // never crash the scheduler
 			ctx, cancel := context.WithTimeout(context.Background(), 25*time.Minute)
 			defer cancel()
 			if _, err := scraper.ScrapeSourceScheduled(ctx, src); err != nil {
