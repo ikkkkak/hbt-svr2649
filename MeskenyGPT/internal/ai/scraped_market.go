@@ -147,17 +147,19 @@ func procedureGroundingBlock(ctx context.Context, gdb *gorm.DB, mc lang.MessageC
 	_ = q.Order("sl.scraped_at DESC").Limit(8).Scan(&rows).Error
 
 	if len(rows) == 0 {
-		return "\n\n=== ADMINISTRATIVE PROCEDURE — ANSWER DIRECTLY, DO NOT INTERROGATE ===\n" +
-			"The user is asking HOW to complete a real-estate administrative procedure (e.g. transferring ownership). This is a NATIONAL procedure — it does NOT depend on the property type (apartment/house/land) or the city. " +
-			"NEVER ask 'is it an apartment or land?' or 'which city?' — that is robotic and wrong here; those questions do not change the procedure. Answer immediately and helpfully.\n" +
-			"Give a clear, confident, well-structured answer of the GENERAL steps that apply in Mauritania (typically: prepare identity documents + the existing title/ownership deed, draft a transfer/sale/gift contract before a notary «كاتب العدل», pay the registration/mutation duties, then register the transfer at the land-registry office «مصلحة التسجيل العقاري / المحافظة العقارية» and collect the updated title). Present it as clear steps. " +
-			"Because we do NOT yet have the official documented source on file, you MUST: (a) present these as general guidance to confirm, not as exact fees/deadlines; (b) NOT invent specific fee percentages, exact office addresses, article numbers, or URLs — never fabricate a procedures.gov.mr link; (c) end by recommending the user confirm details with the land registry or a notary, and offer to connect them with a Meskeny specialist. " +
-			"Be genuinely useful and complete — do not deflect with questions.\n"
+		return "\n\n=== ADMINISTRATIVE PROCEDURE — GENERAL GUIDANCE (NO OFFICIAL SOURCE ON FILE) ===\n" +
+			"The user is asking HOW to complete a real-estate administrative procedure. This is a NATIONAL procedure — it does NOT depend on the property type (apartment/house/land) or the city. " +
+			"NEVER ask 'is it an apartment or land?' or 'which city?' — that is robotic and wrong here. Answer immediately and helpfully.\n" +
+			"CRITICAL — HONESTY MARKER: We do NOT have an official documented source for this on file. You MUST BEGIN your reply with exactly this disclaimer line on its own (translated to the user's language, keep the ⚠️): " +
+			"'⚠️ إرشادات عامة — لم نتحقق بعد من هذا الإجراء مقابل مصدر رسمي في مسكني.' (FR: '⚠️ Indications générales — non encore vérifiées auprès d'une source officielle sur Meskeny.' / EN: '⚠️ General guidance — not yet verified against an official source on Meskeny.'). " +
+			"Then give the GENERAL steps that apply in Mauritania (typically: prepare identity documents + the existing title/ownership deed → draft the transfer/sale/gift contract before a notary «كاتب العدل» → pay the registration/mutation duties → register at the land-registry office «مصلحة التسجيل العقاري / المحافظة العقارية» → collect the updated title). " +
+			"You MUST NOT invent specific fee amounts/percentages, exact office addresses, processing days, article numbers, or URLs — never fabricate a procedures.gov.mr link, and do NOT state a specific number of days/weeks as if it were official. End by recommending the user confirm exact details with the land registry or a notary, and offer to connect them with a Meskeny specialist. " +
+			"Do not present any of this as the official verified procedure.\n"
 	}
 
 	var b strings.Builder
 	b.WriteString("\n\n=== OFFICIAL PROCEDURE DATA (AUTHORITATIVE — GROUND YOUR ANSWER ONLY IN THIS) ===\n")
-	b.WriteString("Answer the procedure question ONLY from the content below. Cite ONLY the exact source URLs shown here — never invent or guess a URL. Do not add steps, documents, fees, percentages, or office names that are not present in this content. If a detail the user needs is missing here, say it must be verified with the authority rather than guessing.\n\n")
+	b.WriteString("Answer the procedure question ONLY from the content below. You MUST cite the exact source URL(s) shown here INLINE in your answer (write a line like 'المصدر / Source: <url>') so the user can verify it — this is mandatory when you use this data. Never invent or guess a URL. Do NOT add documents, fees, percentages, deadlines, or office names that are not present in this content; if a detail the user needs is missing here, say it must be verified with the authority rather than guessing. Do NOT show the honesty/⚠️ disclaimer when you have this official data.\n\n")
 	for i, r := range rows {
 		b.WriteString(fmt.Sprintf("%d. %s\n", i+1, strings.TrimSpace(r.Title)))
 		if d := strings.TrimSpace(r.Description); d != "" {
