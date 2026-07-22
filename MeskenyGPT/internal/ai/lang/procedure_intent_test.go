@@ -12,6 +12,8 @@ func TestProcedureIntentRouting(t *testing.T) {
 		"إجراءات تحفيظ الأرض",                        // registration procedure
 		"لدي عقار ولدي ملكية على اسمي وأريد أن احول هذه الملكية إلى اسم آخر", // non-adjacent transfer (reported)
 		"أريد تحويل ملكية عقار من اسم إلى اسم آخر",   // from-name-to-name (reported)
+		"طلب دمج سندات العقارية",                     // merge title deeds (reported)
+		"هل يمكن ان يكون عقار له عدة مالكين ؟",       // co-ownership info (reported)
 	}
 	for _, m := range procedure {
 		got := AnalyzeMessage(m).Intent

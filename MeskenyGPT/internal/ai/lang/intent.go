@@ -628,10 +628,14 @@ func MessageSignalsProcedure(msg, lower string) bool {
 		"تبديل ملكية", "نقل ملكية", "تحويل ملكية", "تحفيظ", "سند ملكية", "سند عقاري",
 		"رسم عقاري", "شهادة عقارية", "رخصة بناء", "تسجيل عقاري", "الملكية العقارية",
 		"إجراء", "إجراءات", "مسطرة", "مساطر", "المساطر", "الوثائق المطلوبة",
+		"دمج سند", "دمج السند", "دمج سندات", "دمج السندات", "تقسيم سند",
+		"سند عقارية", "سندات عقارية", "السندات العقارية", "إذن بناء", "اذن بناء",
+		"ملكية مشتركة", "الملكية المشتركة",
 		// French
 		"titre foncier", "titres fonciers", "permis d'occuper", "permis d’occuper",
 		"mutation", "enregistrement", "démarche", "procédure", "acte de propriété",
 		"transfert de propriété", "certificat de propriété", "permis de construire",
+		"morcellement", "fusion de titres", "autorisation de construction",
 		// English
 		"title deed", "land registration", "property registration", "ownership transfer",
 		"transfer ownership", "transfer of ownership", "register a title", "occupancy permit",
@@ -661,6 +665,14 @@ func MessageSignalsProcedure(msg, lower string) bool {
 			strings.Contains(msg, "إلى اسم") ||
 			strings.Contains(msg, "الى اسم") ||
 			strings.Contains(msg, "من اسم") {
+			return true
+		}
+	}
+	// Ownership / co-ownership INFO questions, e.g. "can a property have several
+	// owners?" — these are legal/info questions, not property searches.
+	if strings.Contains(msg, "عقار") || strings.Contains(msg, "ملكية") || strings.Contains(msg, "أرض") {
+		if strings.Contains(msg, "مالكين") || strings.Contains(msg, "ملاك") ||
+			strings.Contains(msg, "مالكون") || strings.Contains(msg, "عدة مالكين") {
 			return true
 		}
 	}

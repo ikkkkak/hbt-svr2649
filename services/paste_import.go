@@ -99,8 +99,88 @@ func firstNonEmptyStr(vals ...string) string {
 
 type pastedItem struct{ Title, Description, URL string }
 
+// procDetail is one language variant of a procedures.gov.mr procedure.
+type procDetail struct {
+	URL               string         `json:"url"`
+	Title             string         `json:"title"`
+	MetadataFields    map[string]any `json:"metadata_fields"`
+	RequiredDocuments []string       `json:"required_documents"`
+}
+
+// parseProceduresExport recognises the procedures.gov.mr structured export
+// (target_categories[].procedures[].french_details/arabic_details) and flattens
+// it into one rich, citable record per language per procedure — title, the
+// metadata (responsible entity, delay, fees), and the required documents, with
+// the real source URL. Returns nil if the payload isn't that shape.
+func parseProceduresExport(text string) []pastedItem {
+	var doc struct {
+		TargetCategories []struct {
+			TitleFR    string `json:"title_fr"`
+			TitleAR    string `json:"title_ar"`
+			Procedures []struct {
+				FrenchDetails *procDetail `json:"french_details"`
+				ArabicDetails *procDetail `json:"arabic_details"`
+			} `json:"procedures"`
+		} `json:"target_categories"`
+	}
+	if json.Unmarshal([]byte(text), &doc) != nil || len(doc.TargetCategories) == 0 {
+		return nil
+	}
+	var out []pastedItem
+	for _, cat := range doc.TargetCategories {
+		catTitle := firstNonEmptyStr(cat.TitleAR, cat.TitleFR)
+		for _, p := range cat.Procedures {
+			for _, d := range []*procDetail{p.ArabicDetails, p.FrenchDetails} {
+				if d == nil || strings.TrimSpace(d.Title) == "" {
+					continue
+				}
+				out = append(out, procedureRecord(catTitle, d))
+			}
+		}
+	}
+	return out
+}
+
+func procedureRecord(catTitle string, d *procDetail) pastedItem {
+	var b strings.Builder
+	b.WriteString(strings.TrimSpace(d.Title))
+	if catTitle != "" {
+		b.WriteString(" — " + catTitle)
+	}
+	b.WriteString("\n")
+	if len(d.MetadataFields) > 0 {
+		keys := make([]string, 0, len(d.MetadataFields))
+		for k := range d.MetadataFields {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			if v := strings.TrimSpace(fmt.Sprintf("%v", d.MetadataFields[k])); v != "" && v != "<nil>" {
+				fmt.Fprintf(&b, "%s: %s\n", k, v)
+			}
+		}
+	}
+	if len(d.RequiredDocuments) > 0 {
+		b.WriteString("الوثائق المطلوبة / Documents requis:\n")
+		for _, doc := range d.RequiredDocuments {
+			if s := strings.TrimSpace(doc); s != "" {
+				b.WriteString("- " + s + "\n")
+			}
+		}
+	}
+	return pastedItem{
+		Title:       strings.TrimSpace(d.Title),
+		Description: strings.TrimSpace(b.String()),
+		URL:         strings.TrimSpace(d.URL),
+	}
+}
+
 // parsePastedItems turns any JSON payload into a flat list of records.
 func parsePastedItems(text string) []pastedItem {
+	// 0) Known structured export (procedures.gov.mr) — flatten per procedure.
+	if items := parseProceduresExport(text); len(items) > 0 {
+		return items
+	}
 	// 1) Array of objects.
 	var arr []map[string]any
 	if json.Unmarshal([]byte(text), &arr) == nil && len(arr) > 0 {
