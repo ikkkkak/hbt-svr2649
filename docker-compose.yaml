@@ -4,15 +4,12 @@
 FROM golang:1.25-alpine
 
 RUN apk add --no-cache ffmpeg ttf-dejavu ca-certificates \
-	chromium nss freetype harfbuzz ttf-freefont \
-	&& ffmpeg -version \
-	&& (command -v chromium || command -v chromium-browser || true) \
-	&& ls -la /usr/bin/chromium* 2>/dev/null || true
+	&& ffmpeg -version
 
 ENV FFMPEG_PATH=/usr/bin/ffmpeg
 ENV SLIDESHOW_FONT_PATH=/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf
-# Headless Chromium for scraping JavaScript-rendered sites (chromedp).
-ENV CHROME_BIN=/usr/bin/chromium
+# Chromium REMOVED — it exhausted the VM's RAM/disk and slowed builds.
+# JS-rendered sites are handled via the admin "Paste external JSON" tool.
 
 WORKDIR /app
 

@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # Dokploy Application deploy:
 #   Build type = Dockerfile
 #   Dockerfile path = Dockerfile   (never docker-compose.yaml or compose.yaml)
@@ -5,27 +6,24 @@
 FROM golang:1.25-alpine
 
 RUN apk add --no-cache ffmpeg ttf-dejavu ca-certificates \
-	chromium nss freetype harfbuzz ttf-freefont \
-	&& ffmpeg -version \
-	# Print where Chromium landed (build-log visibility) — path differs by
-	# Alpine version (/usr/bin/chromium vs chromium-browser).
-	&& (command -v chromium || command -v chromium-browser || true) \
-	&& ls -la /usr/bin/chromium* 2>/dev/null || true
+	&& ffmpeg -version
 
 ENV FFMPEG_PATH=/usr/bin/ffmpeg
 ENV SLIDESHOW_FONT_PATH=/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf
-# Headless Chromium for scraping JavaScript-rendered sites (chromedp).
-# The app also auto-detects the binary if this exact path differs.
-ENV CHROME_BIN=/usr/bin/chromium
+# Chromium REMOVED — it exhausted the VM's RAM/disk and slowed builds.
+# JS-rendered sites are handled via the admin "Paste external JSON" tool.
 
 WORKDIR /app
 
 COPY go.mod go.sum ./
-RUN go mod download
+RUN --mount=type=cache,target=/go/pkg/mod \
+	go mod download
 
 COPY . .
 
-RUN go build -ldflags="-s -w" -o server .
+RUN --mount=type=cache,target=/go/pkg/mod \
+	--mount=type=cache,target=/root/.cache/go-build \
+	go build -p 2 -ldflags="-s -w" -o server .
 
 EXPOSE 4000
 
