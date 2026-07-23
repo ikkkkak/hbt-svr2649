@@ -110,15 +110,16 @@ func retrieveScrapedMarketBlock(ctx context.Context, gdb *gorm.DB, mc lang.Messa
 //     and cite ONLY those exact URLs.
 //   - If we have nothing: the model is explicitly forbidden from inventing
 //     steps, documents, fees, percentages, office names, or URLs.
-func procedureGroundingBlock(ctx context.Context, gdb *gorm.DB, mc lang.MessageContext) (block string, found bool, sourceURLs []string) {
+func procedureGroundingBlock(ctx context.Context, gdb *gorm.DB, mc lang.MessageContext) (block string, found bool, sourceURLs []string, verifiedFacts string) {
 	if gdb == nil || mc.Intent != lang.IntentInfoProcedure {
-		return "", false, nil
+		return "", false, nil, ""
 	}
 
 	type procRow struct {
 		Title       string
 		Description string
 		SourceURL   string
+		Score       int
 	}
 	terms := promptTokens(mc.RawText)
 
@@ -164,7 +165,22 @@ func procedureGroundingBlock(ctx context.Context, gdb *gorm.DB, mc lang.MessageC
 			"The user is asking HOW to complete a real-estate administrative procedure. This is a NATIONAL procedure — it does NOT depend on the property type (apartment/house/land) or the city. " +
 			"NEVER ask 'is it an apartment or land?' or 'which city?' — that is robotic and wrong here. Answer immediately and helpfully.\n" +
 			"We do NOT have an official documented source for this on file. Give the GENERAL steps that apply in Mauritania (typically: prepare identity documents + the existing title/ownership deed → draft the transfer/sale/gift contract before a notary «كاتب العدل» → pay the registration/mutation duties → register at the land-registry office «مصلحة التسجيل العقاري / المحافظة العقارية» → collect the updated title). " +
-			"You MUST NOT invent specific fee amounts/percentages, exact office addresses, processing days, article numbers, or URLs — never fabricate a procedures.gov.mr link, and do NOT state a specific number of days/weeks as if it were official. Keep documents generic; do not present a precise official document checklist. End by recommending the user confirm exact details with the land registry or a notary, and offer to connect them with a Meskeny specialist.\n", false, nil
+			"You MUST NOT invent specific fee amounts/percentages, exact office addresses, processing days, article numbers, or URLs — never fabricate a procedures.gov.mr link, and do NOT state a specific number of days/weeks as if it were official. Keep documents generic; do not present a precise official document checklist. End by recommending the user confirm exact details with the land registry or a notary, and offer to connect them with a Meskeny specialist.\n", false, nil, ""
+	}
+
+	// ANTI-INVENTION LAYER: if the top match hit the TITLE (score >= 5), keep
+	// its record verbatim so the answer can be anchored to real DB data the LLM
+	// cannot override. Rendered directly to the user (not paraphrased).
+	if rows[0].Score >= 5 {
+		r := rows[0]
+		var vb strings.Builder
+		vb.WriteString("**📋 " + strings.TrimSpace(r.Title) + "**\n")
+		vb.WriteString("_" + verifiedLabel(mc.Lang) + "_\n\n")
+		vb.WriteString(clipRunes(strings.TrimSpace(r.Description), 1600))
+		if u := strings.TrimSpace(r.SourceURL); u != "" {
+			vb.WriteString("\n\n" + procedureSourceLabel(mc.Lang) + " " + u)
+		}
+		verifiedFacts = vb.String()
 	}
 
 	var b strings.Builder
@@ -187,7 +203,18 @@ func procedureGroundingBlock(ctx context.Context, gdb *gorm.DB, mc lang.MessageC
 		}
 		b.WriteString("\n")
 	}
-	return b.String(), true, sourceURLs
+	return b.String(), true, sourceURLs, verifiedFacts
+}
+
+func verifiedLabel(l lang.Lang) string {
+	switch l {
+	case lang.LangAR:
+		return "بيانات رسمية موثّقة من المصدر"
+	case lang.LangEN:
+		return "Official data, verified from the source"
+	default:
+		return "Données officielles, vérifiées à la source"
+	}
 }
 
 // procedureDisclaimer / procedureSourceLabel — localized strings used to
@@ -216,7 +243,7 @@ func procedureSourceLabel(l lang.Lang) string {
 // LLM did: a general (ungrounded) procedure answer always carries the ⚠️
 // disclaimer up front; a grounded one always shows a real source URL. This is
 // the machine-enforced version of the prompt rules the model kept ignoring.
-func EnforceProcedureHonesty(mc lang.MessageContext, answer string, grounded bool, sourceURLs []string) string {
+func EnforceProcedureHonesty(mc lang.MessageContext, answer string, grounded bool, sourceURLs []string, verifiedFacts string) string {
 	if mc.Intent != lang.IntentInfoProcedure {
 		return answer
 	}
@@ -230,10 +257,17 @@ func EnforceProcedureHonesty(mc lang.MessageContext, answer string, grounded boo
 		}
 		return a
 	}
-	// Grounded: make sure a real source URL is present so the user can verify.
+	// ANTI-INVENTION: anchor the answer to the real DB record. The verbatim
+	// official facts go FIRST so the correct documents/fees/duration are always
+	// shown and cannot be invented away by the model. The model's prose follows
+	// as explanation.
+	if strings.TrimSpace(verifiedFacts) != "" {
+		return strings.TrimSpace(verifiedFacts) + "\n\n———\n\n" + a
+	}
+	// No strong single match: at least guarantee a real source URL is present.
 	for _, u := range sourceURLs {
 		if u != "" && strings.Contains(a, u) {
-			return a // already cited
+			return a
 		}
 	}
 	for _, u := range sourceURLs {
