@@ -120,31 +120,44 @@ func procedureGroundingBlock(ctx context.Context, gdb *gorm.DB, mc lang.MessageC
 		Description string
 		SourceURL   string
 	}
+	terms := promptTokens(mc.RawText)
+
 	q := gdb.WithContext(ctx).
 		Table("scraped_listings AS sl").
-		Select("sl.title, sl.description, sl.source_url").
 		Joins("JOIN scraped_sources ss ON ss.id = sl.source_id AND ss.active = true").
 		Where("sl.deleted_at IS NULL")
 
-	terms := promptTokens(mc.RawText)
 	if len(terms) > 0 {
-		or := gdb.Session(&gorm.Session{NewDB: true})
-		first := true
+		// RELEVANCE RANKING: a TITLE match is worth far more than a description
+		// match, so the procedure whose title best fits the question surfaces
+		// first (e.g. "نقل سند عقاري" for a transfer question), instead of
+		// arbitrary recent rows the old ORDER BY scraped_at returned.
+		// promptTokens only yields [a-z0-9]+Arabic (no SQL metachars), so
+		// inlining is safe; we still strip quotes defensively.
+		var scoreParts, whereParts []string
 		for _, t := range terms {
-			like := "%" + t + "%"
-			cond := "LOWER(sl.title) LIKE ? OR LOWER(sl.description) LIKE ?"
-			if first {
-				or = or.Where(cond, like, like)
-				first = false
-			} else {
-				or = or.Or(cond, like, like)
+			t = strings.ReplaceAll(t, "'", "")
+			if t == "" {
+				continue
 			}
+			like := "'%" + t + "%'"
+			scoreParts = append(scoreParts,
+				"(CASE WHEN LOWER(sl.title) LIKE "+like+" THEN 5 ELSE 0 END)",
+				"(CASE WHEN LOWER(sl.description) LIKE "+like+" THEN 1 ELSE 0 END)")
+			whereParts = append(whereParts,
+				"LOWER(sl.title) LIKE "+like+" OR LOWER(sl.description) LIKE "+like)
 		}
-		q = q.Where(or)
+		scoreExpr := strings.Join(scoreParts, " + ")
+		q = q.Select("sl.title, sl.description, sl.source_url, (" + scoreExpr + ") AS score").
+			Where(strings.Join(whereParts, " OR ")).
+			Order("score DESC, sl.scraped_at DESC")
+	} else {
+		q = q.Select("sl.title, sl.description, sl.source_url").
+			Order("sl.scraped_at DESC")
 	}
 
 	var rows []procRow
-	_ = q.Order("sl.scraped_at DESC").Limit(4).Scan(&rows).Error
+	_ = q.Limit(3).Scan(&rows).Error
 
 	if len(rows) == 0 {
 		return "\n\n=== ADMINISTRATIVE PROCEDURE — GENERAL GUIDANCE (NO OFFICIAL SOURCE ON FILE) ===\n" +
