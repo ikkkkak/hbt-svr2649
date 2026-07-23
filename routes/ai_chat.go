@@ -428,6 +428,12 @@ func sanitizeAIOutput(in string) string {
 // Empty when nothing relevant — the UI only shows a Sources section when
 // there are real references, so the AI reads as grounded, never fabricated.
 func aiSourcesForMessage(message string) []iris.Map {
+	// Property/land SEARCH results show listing cards — never attach scraped
+	// knowledge references to them. References belong on info/help/procedure
+	// answers only.
+	if ai.MessageIsPropertySearch(message) {
+		return nil
+	}
 	cites := services.RetrieveScrapedContext(message, 3)
 	if len(cites) == 0 {
 		return nil

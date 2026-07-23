@@ -5,7 +5,16 @@ import (
 
 	internal "apartments-clone-server/MeskenyGPT/internal/ai"
 	"apartments-clone-server/MeskenyGPT/internal/ai/capture"
+	"apartments-clone-server/MeskenyGPT/internal/ai/lang"
 )
+
+// MessageIsPropertySearch reports whether a message is a property/land SEARCH
+// (rent/buy/land/etc.). The server uses this to suppress scraped-knowledge
+// references on search results — citations belong on info/help/procedure
+// answers, not on property listing cards.
+func MessageIsPropertySearch(msg string) bool {
+	return lang.IsPropertySearchIntent(lang.AnalyzeMessage(msg).Intent)
+}
 
 // Re-export core MeskenyGPT AI types so that the main server can depend on
 // this public package instead of importing internal/ directly.
