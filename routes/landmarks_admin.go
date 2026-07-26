@@ -153,6 +153,16 @@ func AdminUpdateLandmark(ctx iris.Context) {
 		Images      *[]string `json:"images"`
 		Sides       *[]string `json:"sides"`
 
+		// Location pickers (structured place references).
+		CityID     *uint `json:"city_id"`
+		ZoneID     *uint `json:"zone_id"`
+		QuartierID *uint `json:"quartier_id"`
+
+		// Cadastre link. HabitatPlotID: >0 links (and is validated against the
+		// plot number + quartier's sector), 0 clears the link, nil leaves it.
+		HabitatPlotID *uint `json:"habitat_plot_id"`
+		PlotConfirmed *bool `json:"plot_confirmed"`
+
 		IsInvestmentOpportunity *bool `json:"is_investment_opportunity"`
 		IsGoodDeal              *bool `json:"is_good_deal"`
 		IsGold                  *bool `json:"is_gold"`
@@ -193,6 +203,30 @@ func AdminUpdateLandmark(ctx iris.Context) {
 	if input.PlotNumber != nil {
 		landmark.PlotNumber = strings.TrimSpace(*input.PlotNumber)
 	}
+	if input.CityID != nil {
+		if *input.CityID == 0 {
+			landmark.CityID = nil
+		} else {
+			v := *input.CityID
+			landmark.CityID = &v
+		}
+	}
+	if input.ZoneID != nil {
+		if *input.ZoneID == 0 {
+			landmark.ZoneID = nil
+		} else {
+			v := *input.ZoneID
+			landmark.ZoneID = &v
+		}
+	}
+	if input.QuartierID != nil {
+		if *input.QuartierID == 0 {
+			landmark.QuartierID = nil
+		} else {
+			v := *input.QuartierID
+			landmark.QuartierID = &v
+		}
+	}
 	if input.Elevation != nil {
 		landmark.ElevationMeters = *input.Elevation
 	}
@@ -223,6 +257,33 @@ func AdminUpdateLandmark(ctx iris.Context) {
 	}
 	if input.IsGold != nil {
 		landmark.IsGold = *input.IsGold
+	}
+
+	// Cadastre link. Uses the effective (possibly just-updated) plot number and
+	// quartier so the admin can pick a quartier, type a plot number, and link in
+	// one save. >0 links (server-validated), 0 clears, nil leaves untouched.
+	if input.HabitatPlotID != nil {
+		if *input.HabitatPlotID == 0 {
+			landmark.HabitatPlotID = nil
+			landmark.PlotConfirmed = false
+		} else {
+			if landmark.QuartierID == nil || *landmark.QuartierID == 0 {
+				ctx.StatusCode(http.StatusBadRequest)
+				ctx.JSON(iris.Map{"error": "Select a quartier before linking a cadastre plot"})
+				return
+			}
+			if err := validateLandmarkHabitatPlot(input.HabitatPlotID, landmark.PlotNumber, *landmark.QuartierID); err != nil {
+				ctx.StatusCode(http.StatusBadRequest)
+				ctx.JSON(iris.Map{"error": err.Error()})
+				return
+			}
+			v := *input.HabitatPlotID
+			landmark.HabitatPlotID = &v
+			landmark.PlotConfirmed = true
+		}
+	}
+	if input.PlotConfirmed != nil {
+		landmark.PlotConfirmed = *input.PlotConfirmed
 	}
 
 	if err := storage.DB.Save(&landmark).Error; err != nil {
