@@ -1555,6 +1555,11 @@ func VerifyLandmark(ctx iris.Context) {
 		return
 	}
 
+	// Notify the owner that their property was accepted or declined.
+	if landmark.OwnerID != nil && *landmark.OwnerID > 0 {
+		go notifyLandmarkOwnerDecision(*landmark.OwnerID, landmark, input.IsVerified, input.VerificationNotes)
+	}
+
 	if input.IsVerified {
 		landmarkID := landmark.ID
 		jobUserID := userID
@@ -1577,6 +1582,36 @@ func VerifyLandmark(ctx iris.Context) {
 	}
 
 	ctx.JSON(iris.Map{"message": "Landmark verification updated"})
+}
+
+// notifyLandmarkOwnerDecision pushes an accept/decline notification to the
+// landmark's owner so they know the outcome of the admin review.
+func notifyLandmarkOwnerDecision(ownerID uint, landmark models.Landmark, accepted bool, notes string) {
+	defer func() { _ = recover() }()
+	name := strings.TrimSpace(landmark.Title)
+	if name == "" {
+		name = "قطعتك الأرضية"
+	}
+	var title, body string
+	if accepted {
+		title = "تمت الموافقة على عقارك ✅"
+		body = fmt.Sprintf("تمت الموافقة على «%s» وأصبح منشوراً على مسكني.", name)
+	} else {
+		title = "لم تتم الموافقة على عقارك"
+		body = fmt.Sprintf("للأسف لم تتم الموافقة على «%s».", name)
+		if n := strings.TrimSpace(notes); n != "" {
+			body += " السبب: " + n
+		}
+	}
+	ns := services.NewNotificationService()
+	if err := ns.SendNotificationToUser(ownerID, title, body, services.NotificationData{
+		Type:   "landmark_decision",
+		ID:     fmt.Sprintf("%d", landmark.ID),
+		Screen: "LandmarkDetails",
+		Params: fmt.Sprintf(`{"landmarkId":%d}`, landmark.ID),
+	}); err != nil {
+		log.Printf("⚠️ notifyLandmarkOwnerDecision owner=%d land=%d: %v", ownerID, landmark.ID, err)
+	}
 }
 
 func resolveLandmarkFeedVideoURL(lm models.Landmark, jobFallback string) string {

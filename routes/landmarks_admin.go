@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/kataras/iris/v12"
+	"gorm.io/datatypes"
 	"gorm.io/gorm"
 )
 
@@ -133,7 +134,25 @@ func AdminUpdateLandmark(ctx iris.Context) {
 		return
 	}
 
+	// Full admin edit: every field is optional (pointer) so we only update what
+	// was sent. Images/Sides accept a string array and are stored as JSON.
 	var input struct {
+		Title       *string `json:"title"`
+		Description *string `json:"description"`
+		Price       *float64 `json:"price"`
+		Area        *float64 `json:"area"`
+		AreaUnit    *string  `json:"area_unit"`
+		LandType    *string  `json:"land_type"`
+		Zoning      *string  `json:"zoning"`
+		District    *string  `json:"district"`
+		Region      *string  `json:"region"`
+		PlotNumber  *string  `json:"plot_number"`
+		Elevation   *float64 `json:"elevation_m"`
+		VideoURL    *string  `json:"video_url"`
+		MediaType   *string  `json:"media_type"`
+		Images      *[]string `json:"images"`
+		Sides       *[]string `json:"sides"`
+
 		IsInvestmentOpportunity *bool `json:"is_investment_opportunity"`
 		IsGoodDeal              *bool `json:"is_good_deal"`
 		IsGold                  *bool `json:"is_gold"`
@@ -142,6 +161,57 @@ func AdminUpdateLandmark(ctx iris.Context) {
 		ctx.StatusCode(http.StatusBadRequest)
 		ctx.JSON(iris.Map{"error": "Invalid JSON"})
 		return
+	}
+
+	if input.Title != nil {
+		landmark.Title = strings.TrimSpace(*input.Title)
+	}
+	if input.Description != nil {
+		landmark.Description = *input.Description
+	}
+	if input.Price != nil {
+		landmark.Price = *input.Price
+	}
+	if input.Area != nil {
+		landmark.Area = *input.Area
+	}
+	if input.AreaUnit != nil {
+		landmark.AreaUnit = strings.TrimSpace(*input.AreaUnit)
+	}
+	if input.LandType != nil {
+		landmark.LandType = strings.TrimSpace(*input.LandType)
+	}
+	if input.Zoning != nil {
+		landmark.Zoning = strings.TrimSpace(*input.Zoning)
+	}
+	if input.District != nil {
+		landmark.District = strings.TrimSpace(*input.District)
+	}
+	if input.Region != nil {
+		landmark.Region = strings.TrimSpace(*input.Region)
+	}
+	if input.PlotNumber != nil {
+		landmark.PlotNumber = strings.TrimSpace(*input.PlotNumber)
+	}
+	if input.Elevation != nil {
+		landmark.ElevationMeters = *input.Elevation
+	}
+	if input.VideoURL != nil {
+		v := strings.TrimSpace(*input.VideoURL)
+		landmark.VideoURL = &v
+	}
+	if input.MediaType != nil {
+		landmark.MediaType = strings.TrimSpace(*input.MediaType)
+	}
+	if input.Images != nil {
+		if b, err := json.Marshal(*input.Images); err == nil {
+			landmark.Images = datatypes.JSON(b)
+		}
+	}
+	if input.Sides != nil {
+		if b, err := json.Marshal(*input.Sides); err == nil {
+			landmark.Sides = datatypes.JSON(b)
+		}
 	}
 
 	wasInvestment := landmark.IsInvestmentOpportunity
