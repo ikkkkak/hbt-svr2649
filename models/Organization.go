@@ -111,7 +111,8 @@ type PropertySale struct {
 	City         string  `json:"city" gorm:"not null"`
 	CityID       *uint   `json:"city_id" gorm:"column:city_id"`
 	ZoneID       *uint   `json:"zone_id" gorm:"column:zone_id"`
-	QuartierID   *uint   `json:"quartier_id" gorm:"column:quartier_id"`
+	QuartierID    *uint   `json:"quartier_id" gorm:"column:quartier_id"`
+	SubQuartierID *uint   `json:"sub_quartier_id" gorm:"column:sub_quartier_id"`
 	CountryID    *uint   `json:"country_id" gorm:"column:country_id;index"`
 	State        string  `json:"state" gorm:"not null"`
 	Country      string  `json:"country" gorm:"not null"`
@@ -353,7 +354,8 @@ type Landmark struct {
 	CountryID  *uint `json:"country_id" gorm:"index"`
 	CityID     *uint `json:"city_id" gorm:"index"`
 	ZoneID     *uint `json:"zone_id" gorm:"index"`
-	QuartierID *uint `json:"quartier_id" gorm:"index"`
+	QuartierID    *uint `json:"quartier_id" gorm:"index"`
+	SubQuartierID *uint `json:"sub_quartier_id" gorm:"index"` // optional finer sub-quartier / sub-sector
 
 	// Cadastre: host-confirmed Habitat GIS plot
 	HabitatPlotID *uint `json:"habitat_plot_id" gorm:"index"`

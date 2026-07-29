@@ -108,7 +108,8 @@ func CreateLandmark(ctx iris.Context) {
 		// Structured location (required for new listings)
 		CityID     *uint `json:"city_id"`
 		ZoneID     *uint `json:"zone_id"`
-		QuartierID *uint `json:"quartier_id"`
+		QuartierID    *uint `json:"quartier_id"`
+		SubQuartierID *uint `json:"sub_quartier_id"`
 		// Cadastre match from Habitat GIS
 		HabitatPlotID *uint `json:"habitat_plot_id"`
 		PlotConfirmed bool  `json:"plot_confirmed"`
@@ -255,6 +256,7 @@ func CreateLandmark(ctx iris.Context) {
 		CityID:         input.CityID,
 		ZoneID:         input.ZoneID,
 		QuartierID:     input.QuartierID,
+		SubQuartierID:  input.SubQuartierID,
 		HabitatPlotID:  input.HabitatPlotID,
 		PlotConfirmed:  input.PlotConfirmed,
 		// Location labels

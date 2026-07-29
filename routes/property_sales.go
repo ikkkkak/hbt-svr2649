@@ -862,6 +862,7 @@ func UpdatePropertySale(ctx iris.Context) {
 		CityID          *uint                    `json:"city_id"`
 		ZoneID          *uint                    `json:"zone_id"`
 		QuartierID      *uint                    `json:"quartier_id"`
+		SubQuartierID   *uint                    `json:"sub_quartier_id"`
 		State           string                   `json:"state"`
 		Country         string                   `json:"country"`
 		PostalCode      string                   `json:"postal_code"`
@@ -945,6 +946,9 @@ func UpdatePropertySale(ctx iris.Context) {
 	}
 	if input.QuartierID != nil {
 		property.QuartierID = input.QuartierID
+	}
+	if input.SubQuartierID != nil {
+		property.SubQuartierID = input.SubQuartierID
 	}
 	if input.State != "" {
 		property.State = input.State
@@ -1549,6 +1553,7 @@ func AdminUpdatePropertySale(ctx iris.Context) {
 		CityID          *uint                    `json:"city_id"`
 		ZoneID          *uint                    `json:"zone_id"`
 		QuartierID      *uint                    `json:"quartier_id"`
+		SubQuartierID   *uint                    `json:"sub_quartier_id"`
 		State           string                   `json:"state"`
 		Country         string                   `json:"country"`
 		PostalCode      string                   `json:"postal_code"`
@@ -1627,6 +1632,9 @@ func AdminUpdatePropertySale(ctx iris.Context) {
 	}
 	if input.QuartierID != nil {
 		property.QuartierID = input.QuartierID
+	}
+	if input.SubQuartierID != nil {
+		property.SubQuartierID = input.SubQuartierID
 	}
 	if input.State != "" {
 		property.State = input.State
