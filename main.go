@@ -465,6 +465,14 @@ func main() {
 	app.Get("/api/health/ready", routes.HealthReady)
 	app.Get("/api/health/deep", routes.HealthDeep)
 
+	// meskeny.com public web: app-link association files + per-listing Open
+	// Graph pages (WhatsApp/social previews + Universal Link app-open).
+	app.Get("/.well-known/apple-app-site-association", routes.ServeAppleAppSiteAssociation)
+	app.Get("/.well-known/assetlinks.json", routes.ServeAssetLinks)
+	app.Get("/property-sale/{slug:string}", routes.ServePropertySaleOG)
+	app.Get("/property/{slug:string}", routes.ServeRentalOG)
+	app.Get("/land/{slug:string}", routes.ServeLandmarkOG)
+
 	// Simple test endpoint
 	app.Get("/test", func(ctx iris.Context) {
 		ctx.JSON(iris.Map{"status": "ok", "message": "Test endpoint working"})
