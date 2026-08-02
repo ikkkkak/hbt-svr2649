@@ -991,6 +991,39 @@ func GetForSaleLandmarkByPlot(ctx iris.Context) {
 // resolveHabitatSectorIDForQuartier maps a listings quartier to a habitat_sectors row.
 // Listings: City â†’ Zone â†’ Quartier. Cadastre: Plan â†’ Sector â†’ Plot.
 // IDs are not shared; matching is by zone/plan name and quartier/sector name.
+// GET /api/habitat/quartiers/{quartierId}/sub-sectors
+// Resolves the listing quartier to its habitat sector the SAME way the plot
+// lookup does (plan + name), then returns THAT sector's sub-sectors. The
+// quartier's stored habitat_sector_id can point at a duplicate sector with no
+// sub-sectors, so we must use the resolved id (returned as sector_id).
+func GetSubSectorsForQuartier(ctx iris.Context) {
+	quartierID, err := strconv.ParseUint(ctx.Params().Get("quartierId"), 10, 32)
+	if err != nil || quartierID == 0 {
+		ctx.StatusCode(http.StatusBadRequest)
+		ctx.JSON(iris.Map{"error": "invalid quartier id"})
+		return
+	}
+	sectorID, _, resolveErr := resolveHabitatSectorIDForQuartier(uint(quartierID))
+	if resolveErr != nil || sectorID == 0 {
+		ctx.JSON(iris.Map{
+			"success":   true,
+			"sector_id": 0,
+			"data":      []models.HabitatSubSector{},
+		})
+		return
+	}
+	var subSectors []models.HabitatSubSector
+	if err := storage.DB.
+		Where("sector_id = ? AND plot_count > 0", sectorID).
+		Order("name ASC").
+		Find(&subSectors).Error; err != nil {
+		ctx.StatusCode(http.StatusInternalServerError)
+		ctx.JSON(iris.Map{"error": "Failed to fetch sub-sectors"})
+		return
+	}
+	ctx.JSON(iris.Map{"success": true, "sector_id": sectorID, "data": subSectors})
+}
+
 func resolveHabitatSectorIDForQuartier(quartierID uint) (sectorID uint, meta iris.Map, err error) {
 	meta = iris.Map{}
 

@@ -1579,6 +1579,7 @@ func main() {
 		habitat.Get("/plans/{planId:uint}/sectors", routes.GetHabitatSectorsByPlan)
 		habitat.Get("/sectors/{sectorId:uint}/plots", routes.GetHabitatPlotsBySector)
 		habitat.Get("/sectors/{sectorId:uint}/sub-sectors", routes.GetHabitatSubSectorsBySector)
+		habitat.Get("/quartiers/{quartierId:uint}/sub-sectors", routes.GetSubSectorsForQuartier)
 		habitat.Get("/sub-sectors/{subSectorId:uint}", routes.GetHabitatSubSector)
 		habitat.Get("/sub-sectors/{subSectorId:uint}/plots", routes.GetHabitatPlotsBySubSector)
 		habitat.Get("/version", routes.GetHabitatAPIVersion)
