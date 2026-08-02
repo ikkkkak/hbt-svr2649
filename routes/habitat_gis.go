@@ -1003,15 +1003,73 @@ func GetSubSectorsForQuartier(ctx iris.Context) {
 		ctx.JSON(iris.Map{"error": "invalid quartier id"})
 		return
 	}
-	sectorID, _, resolveErr := resolveHabitatSectorIDForQuartier(uint(quartierID))
-	if resolveErr != nil || sectorID == 0 {
+
+	emptyResp := func() {
 		ctx.JSON(iris.Map{
 			"success":   true,
 			"sector_id": 0,
 			"data":      []models.HabitatSubSector{},
 		})
+	}
+
+	var q models.Quartier
+	if storage.DB.First(&q, uint(quartierID)).Error != nil {
+		emptyResp()
 		return
 	}
+
+	hasSubs := func(sid uint) bool {
+		var cnt int64
+		storage.DB.Model(&models.HabitatSubSector{}).
+			Where("sector_id = ? AND plot_count > 0", sid).Count(&cnt)
+		return cnt > 0
+	}
+
+	var sectorID uint
+
+	// 1. Standard resolver (plan + exact name) — use it only if it lands on a
+	//    sector that actually has sub-sectors.
+	if sid, _, rerr := resolveHabitatSectorIDForQuartier(uint(quartierID)); rerr == nil && sid > 0 && hasSubs(sid) {
+		sectorID = sid
+	}
+
+	// 2. Fuzzy: a sector in the quartier's plan whose name matches the quartier
+	//    name (handles prefixes, e.g. "Naim_ANCIEN_AEROPORT" vs "ANCIEN_AEROPORT")
+	//    AND has sub-sectors. This is why the app said "no sub-sectors" for a
+	//    sector that has them: the exact match failed on the prefix.
+	if sectorID == 0 {
+		var zone models.Zone
+		if storage.DB.First(&zone, q.ZoneID).Error == nil {
+			planID := resolveZoneHabitatPlanID(storage.DB, &zone)
+			if planID > 0 {
+				name := strings.TrimSpace(q.Name)
+				var sectors []models.HabitatSector
+				storage.DB.
+					Where(
+						"plan_id = ? AND (name ILIKE ? OR ? ILIKE '%' || name || '%')",
+						planID, "%"+name+"%", name,
+					).
+					Find(&sectors)
+				for _, s := range sectors {
+					if hasSubs(s.ID) {
+						sectorID = s.ID
+						break
+					}
+				}
+			}
+		}
+	}
+
+	// 3. Fall back to the stored id (may have no subs → returns empty).
+	if sectorID == 0 && q.HabitatSectorID != nil && *q.HabitatSectorID > 0 {
+		sectorID = *q.HabitatSectorID
+	}
+
+	if sectorID == 0 {
+		emptyResp()
+		return
+	}
+
 	var subSectors []models.HabitatSubSector
 	if err := storage.DB.
 		Where("sector_id = ? AND plot_count > 0", sectorID).
