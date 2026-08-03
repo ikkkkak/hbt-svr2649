@@ -1734,12 +1734,38 @@ func validateLandmarkHabitatPlot(habitatPlotID *uint, plotNumber string, quartie
 	if !strings.EqualFold(strings.TrimSpace(plot.PlotNumber), pn) {
 		return fmt.Errorf("plot number does not match the cadastre record")
 	}
-	sectorID, _, err := resolveHabitatSectorIDForQuartier(quartierID)
-	if err != nil {
-		return fmt.Errorf("could not match your sector to cadastre data")
+	// Validate at the PLAN (zone) level, not the exact sector.
+	//
+	// A quartier's stored habitat_sector_id is frequently stale or points at a
+	// duplicate sector (naming drift between the location catalog and the
+	// cadastre import), and a plot can sit inside a sub-sector (Ilot) while
+	// still carrying the top-level SectorID. Demanding plot.SectorID == the
+	// quartier's resolved sector therefore rejected perfectly valid plots
+	// (e.g. Ancient Airport, whose plots the app finds via the fuzzy
+	// sub-sector resolver but whose stored sector link points elsewhere).
+	//
+	// Requiring the plot to belong to the same cadastre plan as the quartier's
+	// zone still prevents attaching a plot from a different zone, while
+	// tolerating the sector/sub-sector naming mess. If we can't resolve the
+	// plan (a data gap on our side), we don't hard-fail the listing.
+	var q models.Quartier
+	if err := storage.DB.First(&q, quartierID).Error; err != nil {
+		return nil
 	}
-	if plot.SectorID != sectorID {
-		return fmt.Errorf("cadastre plot is not in the selected sector")
+	var zone models.Zone
+	if err := storage.DB.First(&zone, q.ZoneID).Error; err != nil {
+		return nil
+	}
+	planID := resolveZoneHabitatPlanID(storage.DB, &zone)
+	if planID == 0 {
+		return nil
+	}
+	var sector models.HabitatSector
+	if err := storage.DB.Select("id", "plan_id").First(&sector, plot.SectorID).Error; err != nil {
+		return nil
+	}
+	if sector.PlanID != planID {
+		return fmt.Errorf("cadastre plot is not in the selected zone")
 	}
 	return nil
 }
